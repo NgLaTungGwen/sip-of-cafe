@@ -1,0 +1,16 @@
+{
+  "name": "sip-of-cafe",
+  "owner": {
+    "name": "Jayson Nguyen"
+  },
+  "metadata": {
+    "description": "Jayson Nguyen's Claude Code skills."
+  },
+  "plugins": [
+    {
+      "name": "bmad-parallel-build",
+      "source": "./plugins/bmad-parallel-build",
+      "description": "Parallel BMAD build: one bmad-build-auto worker per unit in its own worktree, then a synthesis agent merges everything into one Azure DevOps PR."
+    }
+  ]
+}

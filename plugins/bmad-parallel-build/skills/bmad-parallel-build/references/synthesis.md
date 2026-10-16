@@ -11,7 +11,7 @@ You are the synthesis agent for a parallel BMAD build.
 
 Integration worktree: `<iwt>`, on branch `<ibranch>` and based on `origin/main`.
 Work only inside it. Run every shell command as `cd <iwt> && ...`. Never touch
-`D:/Stuff/Quy/hive-factory` or a unit worktree.
+`<root>` (the main checkout) or a unit worktree.
 
 Run goal: <one paragraph from the approved split>
 
@@ -91,7 +91,7 @@ you tried, and the decision you need from the user.
 
 Once every check is green:
 
-1. Read `C:/Users/DELL/.claude/skills/create-pr/SKILL.md` and follow it from
+1. Load the `create-pr` skill (Skill tool) and follow it from
    `<iwt>`. Its precondition checks must pass. Push with
    `git push -u origin HEAD`.
 2. Under "What changed", give one bullet per unit, aggregated by behaviour.

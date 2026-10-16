@@ -16,8 +16,8 @@ Send every worker in **one message**, with one `Agent` call per unit
 (`subagent_type: general-purpose`, `run_in_background: false`). Fill in the
 placeholders:
 
-- `<root>`: `D:/Stuff/Quy/hive-factory`
-- `<skill>`: `<root>/.claude/skills/bmad-parallel-build`
+- `<root>`: the absolute `<root>` from SKILL.md
+- `<skill>`: the absolute `<skill>` from SKILL.md
 - `<name>`: `<slug>-<n>`
 - `<wt>`: `<root>/.claude/worktrees/<name>`
 - `<branch>`: the unit's branch
@@ -26,7 +26,7 @@ placeholders:
 You are a Build Auto worker for one unit of a parallel build.
 
 Project root: <wt>   (a git worktree on branch <branch>, which you create in step 0)
-Work only inside <wt>. Never read, edit or run anything elsewhere in D:/Stuff/Quy/hive-factory (the main checkout) or in another worktree.
+Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the main checkout) or in another worktree.
 
 0. Prepare the worktree. Run each command below as its own foreground Bash
    call with `timeout: 600000`, in order, and stop at the first failure:

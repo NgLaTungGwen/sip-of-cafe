@@ -17,9 +17,13 @@ other cases: when a worker doesn't build, and when synthesis reports `stuck`.
 
 Paths in this skill:
 
-- `<root>` is the main checkout, `D:/Stuff/Quy/hive-factory`. Never edit or
-  switch branches in it, because other sessions use it.
-- `<skill>` is this skill's directory, `<root>/.claude/skills/bmad-parallel-build`.
+- `<root>` is the project's main checkout, the absolute path printed by
+  `git rev-parse --path-format=absolute --show-toplevel` in the directory this
+  session started in. Never edit or switch branches in it, because other
+  sessions use it.
+- `<skill>` is this skill's own directory, the base directory Claude Code
+  reported when it loaded this skill (under `.claude/skills/` for a copied
+  install, under `~/.claude/plugins/` for a plugin install).
 
 ## 1. Read the input
 
