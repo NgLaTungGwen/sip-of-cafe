@@ -1,6 +1,6 @@
 {
   "name": "bmad-parallel-build",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Parallel BMAD build: one bmad-build-auto worker per unit in its own worktree, then a synthesis agent merges everything into one Azure DevOps PR.",
   "author": { "name": "Jayson Nguyen" }
 }

@@ -25,6 +25,13 @@ Paths in this skill:
   reported when it loaded this skill (under `.claude/skills/` for a copied
   install, under `~/.claude/plugins/` for a plugin install).
 
+## 0. Make sure BMAD is installed
+
+Run `bash "<skill>/scripts/ensure-bmad.sh" "<root>"` before anything else. It
+leaves an existing BMAD install alone and otherwise installs the pinned
+`bmad-method` release into `<root>` (module `bmm`, tool `claude-code`), which
+takes a minute or two. If it fails, stop and show the user its output.
+
 ## 1. Read the input
 
 The user provides one of two things:

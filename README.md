@@ -28,8 +28,9 @@ claude plugin install bmad-parallel-build@sip-of-cafe
 
 ### Requirements
 
-- BMAD installed in the project (`npx bmad-method install`), including
-  `bmad-build-auto`.
+- BMAD comes with it: on first run the skill installs `bmad-method` 6.12.0
+  into the project (`_bmad/` and the `bmad-*` skills) if it isn't there yet.
+  An existing install is left alone; set `BMAD_VERSION` to pin another release.
 - Git, bash, Python and `uv`.
 - The Azure CLI with the `azure-devops` extension, with `az devops configure`
   defaults set for the organisation and project.
