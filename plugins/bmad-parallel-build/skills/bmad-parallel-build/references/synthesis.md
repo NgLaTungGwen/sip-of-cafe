@@ -2,7 +2,7 @@
 
 A single agent merges every ready unit into one integration branch, gets that
 branch green and opens the PR. Launch it with `Agent`
-(`subagent_type: general-purpose`, `run_in_background: false`). Its prompt is
+(`subagent_type: general-purpose`, `model: opus`, `run_in_background: false`). Its prompt is
 everything below the line, with the placeholders filled in.
 
 ---

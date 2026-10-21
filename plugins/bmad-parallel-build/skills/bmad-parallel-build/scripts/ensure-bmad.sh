@@ -13,6 +13,16 @@ set -euo pipefail
 
 root="${1:?usage: ensure-bmad.sh <main-root>}"
 version="${BMAD_VERSION:-6.12.0}"
+skill="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The workers hand coding to the haiku-implementer agent, which has to be a
+# project agent so prepare-worktree.sh can copy it into every worktree. A copy
+# the project already has is left alone.
+mkdir -p "$root/.claude/agents"
+if [[ ! -f "$root/.claude/agents/haiku-implementer.md" ]]; then
+  cp "$skill/agents/haiku-implementer.md" "$root/.claude/agents/"
+  echo "agents: installed haiku-implementer into $root/.claude/agents"
+fi
 
 if [[ -f "$root/_bmad/scripts/render_skill.py" && -f "$root/.claude/skills/bmad-build-auto/SKILL.md" ]]; then
   echo "bmad: already installed in $root"

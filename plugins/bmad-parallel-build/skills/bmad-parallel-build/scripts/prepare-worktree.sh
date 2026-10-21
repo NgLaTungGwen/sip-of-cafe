@@ -41,6 +41,9 @@ git -C "$root" worktree add -b "$branch" "$wt" "$base" >&2
 cp -r "$root/_bmad" "$wt/_bmad"
 mkdir -p "$wt/.claude"
 cp -r "$root/.claude/skills" "$wt/.claude/skills"
+if [ -d "$root/.claude/agents" ]; then
+  cp -r "$root/.claude/agents" "$wt/.claude/agents"
+fi
 
 # A private test database per worktree. Without one every run shares
 # <dev db>_test, and each run's teardown deletes rows the other created
@@ -66,7 +69,7 @@ persistent_facts = [
 ]
 
 implementation_handoff = """
-Launch a subagent with no prior conversation context, with this prompt:
+Launch a subagent with no prior conversation context, using the \`haiku-implementer\` agent (\`subagent_type: haiku-implementer\`), with this prompt:
 
 > The project root is $wt. Every file you read or edit, and every command you run, must be inside that directory. Use absolute paths and \`cd $wt && ...\` for shell commands. Nothing outside $wt may change: not the main checkout $root, and not any other worktree.
 >

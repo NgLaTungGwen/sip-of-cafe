@@ -13,7 +13,10 @@ happen, so the implementation subagent stays there as well.
 ## Dispatch prompt
 
 Send every worker in **one message**, with one `Agent` call per unit
-(`subagent_type: general-purpose`, `run_in_background: false`). Fill in the
+(`subagent_type: general-purpose`, `model: sonnet`, `run_in_background: false`).
+The worker plans, verifies and reviews on Sonnet; its review subagents follow
+its model. The code itself is written by the `haiku-implementer` agent that
+the worktree's `implementation_handoff` names. Fill in the
 placeholders:
 
 - `<root>`: the absolute `<root>` from SKILL.md

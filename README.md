@@ -26,6 +26,25 @@ claude plugin marketplace add NgLaTungGwen/sip-of-cafe
 claude plugin install bmad-parallel-build@sip-of-cafe
 ```
 
+### Models
+
+Each step runs on the model it needs:
+
+| Step | Model |
+|---|---|
+| Split and orchestration | your session's model |
+| Worktree setup, install, build | scripts, no model |
+| Worker: spec, verification, review | Sonnet |
+| Code, from the spec | Haiku (`haiku-implementer` agent) |
+| Synthesis: merge, fix, open the PR | Opus |
+
+The `haiku-implementer` agent sets `autoCompactWindow: 100000`, so the Haiku
+coder compacts at about 67k tokens and its requests stay under 100k. On first
+run the skill copies the agent into the project's `.claude/agents/`; edit that
+copy to change it. Compaction only happens when auto-compact is on
+(`"autoCompactEnabled": true`, the default), and the field needs Claude Code
+v2.1.296 or later.
+
 ### Requirements
 
 - BMAD comes with it: on first run the skill installs `bmad-method` 6.12.0
