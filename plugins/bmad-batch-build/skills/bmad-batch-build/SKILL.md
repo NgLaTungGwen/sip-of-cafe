@@ -24,6 +24,18 @@ mode"):
 The only planned checkpoint is the split approval. You also stop and ask in two
 other cases: when a worker doesn't build, and when synthesis reports `stuck`.
 
+Two rules shape the flow, because most of a run is waiting:
+
+- **Keep long waits out of large contexts.** An agent that sits idle past its
+  cache TTL pays to re-write its whole context. So installs and the full suite
+  run in the background while the worker plans and reviews, the Haiku coder
+  (small context, cheap tokens) does the waiting for the install, and you keep
+  your own context thin: you never read product code, `Explore` maps it.
+- **Scripts do the mechanical work.** Installs, merges, migration and
+  contracts checks, the gate and the ticket links are scripts, so the Opus
+  agents spend their turns on judgment: planning, review triage, conflicts and
+  failures.
+
 Paths in this skill:
 
 - `<root>` is the project's main checkout, the absolute path printed by
@@ -72,9 +84,16 @@ run can be resumed.
 
 ## 2. Split into units
 
-Read enough of the code to know where each change lands. `AGENTS.md` lists
-where things are. When you delegate the code mapping, use `Explore` with
-`model: sonnet`; it only reads and searches.
+Find where each change lands without reading the code yourself. Your context
+is re-written in full every time a worker, synthesis or the user answers after
+a long gap, since this session's cache keeps the session's own TTL, so every
+file you read here is paid for again at each of those returns. Read only
+`AGENTS.md`, then delegate the code mapping to one `Explore` agent with
+`model: sonnet`, and ask it for a compact map, not file contents: for each
+requirement, the files it would change, the existing interfaces it touches,
+and any shared hotspot (migrations, `packages/contracts`, lockfiles, a file
+two requirements both need). Send a second `Explore` only for a gap in that
+map.
 
 A unit is a piece of work that one worker can build and test on its own, from
 `origin/main`, without seeing any other unit. Rules for splitting:
@@ -129,9 +148,11 @@ The worker sees only its intent.
 ### Choose the mode
 
 Decide it yourself from the units; don't ask. Estimate each unit's worker time
-from its size: S 50 min, M 100 min, L 160 min. These numbers include the
-worker's own worktree preparation. They are a first calibration; correct them
-when `scripts/cost-report.py` shows other worker times.
+from its size: S 50 min, M 100 min, L 160 min. These numbers were measured
+when the worker installed before planning; the install now overlaps planning
+and the full suite overlaps review, so real times should come in lower. They
+are a first calibration; correct them when `scripts/cost-report.py` shows
+other worker times.
 
 ```text
 lane     = sum(unit minutes) - 10 * (units - 1) + 30   # one preparation, units in turn, one verify
@@ -213,15 +234,14 @@ the two stop cases in sections 6 and 7.
 ## 4. Launch
 
 In parallel mode nothing waits on anything else. Each worker prepares its own
-worktree and starts building as soon as that worktree is ready, so units never
-wait on each other.
+worktree, starts its install in the background and plans while it runs, so
+units never wait on each other. There is no separate integration worktree:
+synthesis later works in the first unit's worktree, so no extra install
+competes with the workers.
 
-In lane mode, steps 0 to 2 are the same, with two changes in step 2:
-
-- **No integration worktree.** The lane's worktree takes its place.
-- **Only the first unit's worker is sent,** using the lane prompt in
-  `references/worker.md`. Its worktree is `<root>/.claude/worktrees/<slug>`, on
-  `jayson/<type>-<slug>`.
+In lane mode, steps 0 to 2 are the same, except that only the first unit's
+worker is sent, using the lane prompt in `references/worker.md`. Its worktree
+is `<root>/.claude/worktrees/<slug>`, on `jayson/<type>-<slug>`.
 
 0. Preflight, in one Bash call, before anything is created:
    ```bash
@@ -243,36 +263,29 @@ In lane mode, steps 0 to 2 are the same, with two changes in step 2:
      The IDs are written back into that file. If the call fails, re-run it once;
      it creates only what is still missing. If it fails again, carry on with the
      build and report the error at the end. Tickets never block the code.
-   - **The integration worktree:** one Bash call with `run_in_background: true`
-     and a long timeout. Add `--apps` if any unit has it.
-     ```bash
-     bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<slug>" "jayson/<type>-<slug>" [--apps]
-     ```
    - **Every worker:** one foreground `Agent` call per unit, using the prompt in
      `<skill>/references/worker.md`. Each worker runs `bmad-build-auto`, which
      starts its own review subagents, so the calls must stay in the
      foreground.
 
-The integration worktree is ready long before the workers finish. Its
-background-task notification may arrive while they run; just note it.
+The ticket call finishes long before the workers; its notification may arrive
+while they run. Just note it.
 
 Each worktree gets its own `.env` that points at a private test database,
 `hive_pb_<name>_test`, which the test setup creates. Workers and synthesis then
-run the DB suites side by side without deleting each other's rows. Preparing a
-worktree takes several minutes (checkout, `npm ci`, build). Never `cd` your own
-shell into a worktree.
-
-If the integration worktree fails to prepare, clear it with
-`scripts/remove-worktree.sh` and retry once while the workers keep running.
+run the DB suites side by side without deleting each other's rows. Never `cd`
+your own shell into a worktree.
 
 ## 5. Wait for the workers
 
 **Parallel:** all the `Agent` calls return together. Record each worker's reply
-in the run file.
+in the run file, its `INTERFACES` line included: synthesis checks those against
+the agreed interfaces.
 
 **Lane:** when a worker returns, record its reply and gate its unit straight
 away (section 6, with its base). Then send the next unit's worker with the
-lane prompt. Go to synthesis after the last unit passes.
+lane prompt, whose intent lists the units already on the branch with their
+spec paths and `INTERFACES` lines. Go to synthesis after the last unit passes.
 
 ## 6. Gate
 
@@ -302,16 +315,30 @@ Apply the gate in `references/worker.md` to every unit, in one Bash call with
 
 Read the ticket IDs from `<slug>-tickets.json`. If the ticket call is still
 running, wait for its notification. Then read `<skill>/references/synthesis.md`,
-fill in its placeholders, and launch
-one foreground `Agent` with that prompt. List the ready units in dependency
-order. If they have no dependencies, put the unit that owns migrations and
-contracts first. In lane mode, set `<mode>` to `lane`, and use the lane's
-worktree and branch as `<iwt>` and `<ibranch>`; synthesis then skips the
-merge.
+fill in its placeholders, and launch one foreground `Agent` with that prompt.
+List the ready units in dependency order. If they have no dependencies, put the
+unit that owns migrations and contracts first. Give each unit its agreed
+interfaces from the split and its worker's `INTERFACES` line.
+
+- **Parallel:** `<iwt>` is the first listed unit's worktree, `<installed>` its
+  branch, and `<ibranch>` is `jayson/<type>-<slug>`.
+- **Lane:** `<mode>` is `lane`, `<iwt>` and `<ibranch>` are the lane's
+  worktree and branch; synthesis then skips the merge.
+- `<state>` is `<root>/.claude/worktrees/_runs/<slug>-synthesis.md`, and
+  `<tickets json>` is `<root>/.claude/worktrees/_runs/<slug>-tickets.json`.
+
+Then:
 
 - **`RESULT: pr`:** go to step 8.
-- **`RESULT: stuck`:** show the failure and the decision it needs. Once the
-  user answers, continue the same synthesis agent with `SendMessage`.
+- **`RESULT: stuck`:** show the failure and the decision it needs. Note the
+  time with `date +%s`. When the user answers:
+  - within 50 minutes, continue the same synthesis agent with `SendMessage`.
+    Its 1-hour cache is still warm.
+  - later, its cache has expired, and continuing it would re-write its whole
+    context. Launch a fresh synthesis agent instead, with the same prompt plus
+    one line at the top: `Resume: read <state> first. The merges and the
+    repairs it lists are committed on <ibranch>. The user's decision: <answer>.
+    Go on from section 3.`
 
 ## 8. Report
 
@@ -339,6 +366,10 @@ To clean up, run this for each worktree:
 ```bash
 bash "<skill>/scripts/remove-worktree.sh" "<root>" "<name>" "<branch>"
 ```
+
+In parallel mode the first unit's worktree is on the run's branch, so pass
+`jayson/<type>-<slug>` for it, then delete that unit's own branch with
+`git -C "<root>" branch -d <its branch>`.
 
 The script unlinks the npm junctions first, because a plain
 `git worktree remove` follows them on Windows. Run it from `<root>`. A shell

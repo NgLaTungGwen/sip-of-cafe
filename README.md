@@ -59,7 +59,9 @@ compacts at about 67k tokens; that needs v2.1.296 or later and auto-compact on
 (`"autoCompactEnabled": true`, the default).
 
 On first run the skill copies the three agents into the project's
-`.claude/agents/`; edit those copies to change them.
+`.claude/agents/`; edit those copies to change them. A copy that differs from
+the shipped one is kept and reported, so after upgrading the plugin, replace
+the copies you haven't customised.
 
 ### Lane or parallel, chosen automatically
 
@@ -74,6 +76,34 @@ One unit always runs as a lane, and five or more always run in parallel.
 Between those, the faster estimate wins, with ties going to the lane; a busy
 machine raises the lane's margin. The approval table shows the choice and both
 estimates, and you can switch.
+
+### Where the time and the cache go
+
+Most of a run is waiting on installs and test suites, and an agent that waits
+past its cache TTL pays to re-write its whole context. So the flow keeps long
+waits off the critical path and out of large contexts:
+
+- A worker checks out its worktree, starts the install in the background and
+  plans while it runs. The Haiku coder, whose context is still tiny, waits for
+  the install before its first command.
+- The worker starts the full DB suite in the background as soon as the coder
+  returns, and runs the review alongside it.
+- There is no separate integration worktree: synthesis builds the run's
+  branch in the first unit's worktree, so one install fewer competes with the
+  workers.
+- `scripts/merge-units.sh` does the merges, the migration-number check, the
+  contracts sync and any reinstall a lockfile needs; `ado_tickets.py
+  --link-pr` links the PR in one call. Synthesis spends its Opus turns on
+  conflicts, interface drift and failures.
+- Workers report the interfaces they actually built, so the next lane unit
+  and synthesis check those instead of re-reading the code.
+- The orchestrator never reads product code (an `Explore` agent maps it),
+  because its context is re-written each time a worker returns.
+- A stuck synthesis writes its state to a file. If the user answers after its
+  1-hour cache has expired, a fresh agent resumes from that file.
+
+`bg.sh run|wait` carries the background commands; their logs sit in the
+worktree's git dir, so the tree stays clean for the gate.
 
 ### Many runs on one machine
 
@@ -131,7 +161,9 @@ unreviewed, or leave it out.
 
 `scripts/cost-report.py <session .jsonl>` reports a finished run: cost and
 tokens per role, time per role, tool waits, cache rewrites after idle gaps,
-first-review findings per unit, and synthesis repair commits.
+first-review findings per unit, and synthesis repair commits. A gap counts as
+an idle rewrite when it beats the TTL the write used: 5 minutes, or 1 hour for
+the worker and synthesis agents.
 
 ### Requirements
 

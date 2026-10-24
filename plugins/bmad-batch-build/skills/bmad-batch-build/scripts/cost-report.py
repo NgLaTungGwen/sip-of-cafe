@@ -72,8 +72,8 @@ def wait_kind(block):
     if block["name"] == "Bash":
         c = block["input"].get("command", "")
         # Order matters: a poll loop that greps a test log is a wait, not a test.
-        for k, pat in (("poll background", r"\b(until|while)\b.*\bsleep\b|for i in .*\bsleep\b"),
-                       ("npm ci", r"npm ci"), ("bun install", r"bun install"),
+        for k, pat in (("poll background", r"\b(until|while)\b.*\bsleep\b|for i in .*\bsleep\b|bg\.sh\S* wait"),
+                       ("npm ci", r"npm ci|install-deps"), ("bun install", r"bun install"),
                        ("prepare-worktree", r"prepare-worktree"), ("render skill", r"render_skill\.py"),
                        ("test", r"vitest|\b(npm|bun|pnpm) (run )?test\b|npm run test:"),
                        ("build", r"run build"), ("typecheck/lint", r"typecheck|\btsc\b|lint")):
@@ -130,7 +130,10 @@ def profile(lines, lab, acc, edits, waits):
         c["usd_read"] += cr * pcr / 1e6
         c["usd_out"] += out * pout / 1e6 + u.get("input_tokens", 0) * pin / 1e6
         c["turns"] += 1
-        if prev and (ts(t) - ts(prev[0])).total_seconds() > 300 and w1 == 0:
+        # The cache expired if the gap beat the TTL the write used: 5 min, or
+        # 1 h for agents with cacheTtl 1h (they re-write as 1h after a gap).
+        gap = (ts(t) - ts(prev[0])).total_seconds() if prev else 0
+        if gap > (3600 if w1 else 300) and cw > 2000:
             c["usd_idle"] += cw_usd
             acc["_idle"][(lab, prev[1])] += cw_usd
         prev = (t, tool)
@@ -303,7 +306,7 @@ if __name__ == "__main__":
         t = v["usd_write"] + v["usd_read"] + v["usd_out"]
         print(f"{k:10} {v['agents']:6} {v['turns']:6} {v['tok_in']/1e6:8.1f} {v['tok_out']/1e6:8.2f} {v['usd_write']:7.1f} "
               f"{v['usd_read']:6.1f} {v['usd_out']:6.1f} {t:7.1f} {v['usd_idle']:13.1f}")
-    print("\nIdle (>5 min) cache rewrites, by what the agent was waiting on:")
+    print("\nIdle cache rewrites (gap beyond the 5 min or 1 h TTL), by what the agent was waiting on:")
     for (lab, tool), v in idle.most_common(10):
         print(f"  ${v:5.1f}  {lab:9} {tool}")
     print(f"\nWorker Edit/Write calls: {dict(edits)}")

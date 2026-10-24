@@ -3,9 +3,10 @@
 #
 # usage: prepare-worktree.sh <main-root> <name> <branch> [--apps] [--no-install] [--base <rev>]
 #
-# --no-install stops after checkout, copies, .env and pin file, so a caller with
-# a per-command time limit can run `npm ci`, the contracts build and
-# `bun install` as separate steps.
+# --no-install stops after checkout, copies, .env and pin file. Workers use it
+# and then start scripts/install-deps.sh in the background through bg.sh, so
+# the install overlaps planning; the pin file tells every agent to wait for it
+# (`bg.sh wait <wt> install`) before a command that needs node_modules.
 #
 # _bmad/ and .claude/ are gitignored, so a fresh worktree has neither the BMAD
 # runtime nor the skills. Both are copied in. Dependencies are installed inside
@@ -62,7 +63,8 @@ sed -E \
 # before vitest reads them).
 printf '\nVITEST_MAX_FORKS=3\nVITEST_MAX_THREADS=3\n' >> "$wt/.env"
 
-heavy="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/heavy.sh"
+scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+heavy="$scripts/heavy.sh" bg="$scripts/bg.sh"
 
 # Pin bmad-build-auto to this worktree. The file sits in the worktree's private
 # copy of _bmad, so the main checkout never sees it.
@@ -73,7 +75,8 @@ persistent_facts = [
   "The project root for this run is $wt. Every file read, edit, test and git command targets that directory. Never touch anything outside $wt: not the main checkout $root, and not any other worktree.",
   "Run shell commands as \`cd $wt && ...\`, or use \`git -C $wt\`.",
   "Source files change only through the implementation subagent, review fixes included: send them to it again. The parent edits only the spec and files under _bmad-output/.",
-  "Testing: the implementation subagent runs the targeted tests and typechecks. The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full DB suite exactly once, run as \`bash $heavy 'cd $wt && npm test'\`. Typechecks also go through it, e.g. \`bash $heavy 'cd $wt/api && npm run typecheck'\`; it waits for machine capacity instead of overloading it. After a failure, re-run only the failing files. Never run \`npm run build\` while iterating; synthesis builds.",
+  "Dependencies install in the background while you plan; planning needs only the checkout. Before any command that needs node_modules (tests, typecheck, build, lint), run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, halt with its output as the blocking condition.",
+  "Testing: the implementation subagent runs the targeted tests and typechecks. The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full DB suite exactly once. Run that full suite off the critical path: as soon as the implementation subagent returns, start \`bash $bg run $wt suite \"bash $heavy 'cd $wt && npm test'\"\` as a Bash call with run_in_background: true, and launch the review straight away. Before review triage, run \`bash $bg wait $wt suite\` (again while it prints still running) and triage a failure like any other review finding. Typechecks also go through the queue, e.g. \`bash $heavy 'cd $wt/api && npm run typecheck'\`; it waits for machine capacity instead of overloading it. After a failure, re-run only the failing files. Never run \`npm run build\` while iterating; synthesis builds.",
   "file:AGENTS.md",
 ]
 
@@ -81,6 +84,8 @@ implementation_handoff = """
 Launch a subagent with no prior conversation context, using the \`haiku-implementer\` agent (\`subagent_type: haiku-implementer\`), with this prompt:
 
 > The project root is $wt. Every file you read or edit, and every command you run, must be inside that directory. Use absolute paths and \`cd $wt && ...\` for shell commands. Nothing outside $wt may change: not the main checkout $root, and not any other worktree.
+>
+> Dependencies may still be installing. Before you run any command, run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, stop and report its output.
 >
 > Read {spec_file} fully and implement it. The spec is the sole source of truth. Load every file listed in its frontmatter \`context:\` before you start.
 >
@@ -95,12 +100,8 @@ if [ "$install" = 0 ]; then
   exit 0
 fi
 
-# api's typecheck resolves @hive/contracts through packages/contracts/dist,
-# which is gitignored. Tests alias it to source, and the api build (nest build)
-# is only needed by synthesis, so only contracts is built here.
-bash "$heavy" "cd '$wt' && npm ci --no-audit --no-fund --loglevel=error && npm --workspace @hive/contracts run build" >&2
-if [ "$apps" = 1 ]; then
-  bash "$heavy" "cd '$wt/apps' && bun install --frozen-lockfile" >&2
-fi
+# Without --no-install the install runs here, in the foreground, through the
+# same bg.sh entry a worker uses, so `bg.sh wait <wt> install` works either way.
+bash "$bg" run "$wt" install "bash '$scripts/install-deps.sh' '$wt'$([ "$apps" = 1 ] && echo " --apps")" >&2
 
 echo "$wt"

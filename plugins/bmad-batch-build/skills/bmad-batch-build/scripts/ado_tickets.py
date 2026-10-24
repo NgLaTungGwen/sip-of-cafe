@@ -23,6 +23,13 @@ organization and project come from the `az devops configure` defaults.
 Tasks are created in parallel because each az call takes 30-60 s here. The plan
 file is rewritten even when something fails, so the IDs that were created are
 kept, and a re-run creates only what is still missing.
+
+usage: python ado_tickets.py <plan.json> --link-pr <pr id> --merged <unit,unit,...>
+
+Links the PR to the stories of the merged units and to their tasks, never to a
+left-out unit's task. When every task in the plan was merged it also turns on
+close-on-complete. Prints the IDs ADO then reports as linked, and whether
+close-on-complete is on, in one call instead of three slow ones.
 """
 import json
 import shutil
@@ -106,5 +113,31 @@ def main(path: str) -> None:
         sys.exit(1)
 
 
+def link(path: str, pr: str, merged: set) -> None:
+    with open(path, encoding="utf-8") as f:
+        plan = json.load(f)
+    tasks = [t for t in plan["tasks"] if t.get("id") is not None and str(t["unit"]) in merged]
+    keys = {t["story"] for t in tasks}
+    stories = [s["id"] for s in plan["stories"] if s["key"] in keys and s.get("id") is not None]
+    ids = [str(i) for i in stories + [t["id"] for t in tasks]]
+    if not ids:
+        sys.exit("no merged unit has a ticket id")
+    az("repos", "pr", "work-item", "add", "--id", pr, "--work-items", *ids, "-o", "none")
+    close = len(tasks) == len(plan["tasks"])
+    if close:
+        az("repos", "pr", "update", "--id", pr, "--transition-work-items", "true", "-o", "none")
+    linked = az("repos", "pr", "work-item", "list", "--id", pr, "--query", "[].id", "-o", "tsv").split()
+    print(f"linked: {' '.join('#' + i for i in linked)}")
+    print(f"close-on-complete: {'on' if close else 'off (a unit was left out)'}")
+    missing = set(ids) - set(linked)
+    if missing:
+        sys.exit(f"not linked: {' '.join(sorted(missing))}")
+
+
 if __name__ == "__main__":
-    main(sys.argv[1])
+    if "--link-pr" in sys.argv:
+        args = sys.argv[1:]
+        merged = args[args.index("--merged") + 1].split(",") if "--merged" in args else []
+        link(args[0], args[args.index("--link-pr") + 1], set(merged))
+    else:
+        main(sys.argv[1])

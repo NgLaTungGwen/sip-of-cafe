@@ -25,8 +25,10 @@ Keep turns few and context small:
   (offset and limit) rather than whole.
 - Pipe noisy output through `tail -n 60`, or write it to a file and read only
   the failures.
-- Long commands (`npm ci`, the full test suite) run in the foreground with
-  `timeout: 600000`. If one is moved to the background, wait for it with a
-  bounded poll, for example
+- The install and the full suite run in the background through `bg.sh run`,
+  where your prompt and the workflow's pinned facts say, so they overlap
+  planning and review. Collect them with `bg.sh wait`, never by re-running
+  them. Other long commands run in the foreground with `timeout: 600000`. If
+  one is moved to the background, wait for it with a bounded poll, for example
   `timeout 540 bash -c 'until grep -q "<done marker>" <log>; do sleep 15; done'`,
   then read the log. Never write an unbounded `until ... sleep` loop.

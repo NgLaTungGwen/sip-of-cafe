@@ -5,67 +5,88 @@ branch green and opens the PR. Launch it with `Agent`
 (`subagent_type: bmad-batch-synthesis`, `run_in_background: false`, no `model`).
 That agent runs on Opus with a 1-hour prompt cache, so its context survives the
 long verify runs. Its prompt is everything below the line, with the
-placeholders filled in. In lane mode `<iwt>` and `<ibranch>` are the lane's
-worktree and branch, and `<mode>` is `lane`.
+placeholders filled in.
+
+There is no separate integration worktree, so no extra install competes with
+the workers at the start of the run:
+
+- **Parallel:** `<iwt>` is the worktree of the first unit in merge order, and
+  `<installed>` is that unit's branch, the revision its `node_modules` came
+  from. Synthesis starts `<ibranch>` there, on top of that unit.
+- **Lane:** `<iwt>` and `<ibranch>` are the lane's worktree and branch,
+  `<installed>` is `none`, and `<mode>` is `lane`.
+
+Merge-script output, interface lines and the state file keep the agent's own
+reading small: it opens a spec or a file only where a check points at it.
 
 ---
 
 You are the synthesis agent for a BMAD batch build.
 
-Integration worktree: `<iwt>`, on branch `<ibranch>` and based on `origin/main`.
-Work only inside it. Run every shell command as `cd <iwt> && ...`. Never touch
-`<root>` (the main checkout) or a unit worktree.
+Integration worktree: `<iwt>`. Work only inside it. Run every shell command as
+`cd <iwt> && ...`. Never touch `<root>` (the main checkout) or another
+worktree. The one file outside it you may write is the state file
+`<state>`.
 
 Mode: `<mode>` (`parallel` or `lane`). Skill scripts: `<skill>/scripts`.
 
 Run goal: <one paragraph from the approved split>
 
 Units to merge, in this order:
-<for each unit: n. <branch> | <title> | spec <SPEC path> | owns <files/areas> | provides/consumes <interfaces>>
+<for each unit: n. <branch> | <title> | spec <SPEC path> | owns <files/areas> | agreed <interfaces from the split> | built <the worker's INTERFACES line>>
 
 Units left out (they did not build): <list with blocking condition, or "none">
 
-ADO tickets: stories <#ids>; per merged unit <unit: #task id>; per left-out
-unit <unit: #task id>. If ticket creation failed: "none: <error>".
+ADO tickets: plan file `<tickets json>`; stories <#ids>; per merged unit
+<unit n: #task id>. If ticket creation failed: "none: <error>".
 
 Read `<iwt>/AGENTS.md` first.
 
 ## 1. Merge
 
-**Lane mode:** the units are already committed on `<ibranch>`, one after
-another, so there is nothing to merge. Skip to section 2 and, of its checks,
-run only migration numbers against `origin/main`, contracts drift and
-lockfiles.
+**Parallel mode:** first run `cd <iwt> && git switch -c <ibranch>`. The first
+unit is then already in, so merge the others.
 
-For each unit, in order, run `git merge --no-ff <branch> -m "merge: <title>"`.
-The unit branches are local refs that every worktree shares.
+Run the merge script once, with the units after the first in order (in lane
+mode, with none: the units are already committed on `<ibranch>`, so it only
+runs the checks):
 
-When a merge conflicts, resolve it so both units' intent survives. Read both
-specs before you choose. Commit the resolution as part of that merge. Never
-drop a unit's change silently.
+```bash
+bash "<skill>/scripts/merge-units.sh" "<iwt>" [--installed <installed>] "<branch 2>:<title 2>" "<branch 3>:<title 3>" ...
+```
+
+Leave out `--installed` in lane mode. The script merges with `--no-ff`, skips
+any branch already in `HEAD`, and stops at the first conflict with
+`CONFLICT <branch>` and the conflicted files (exit 3). Resolve that conflict so
+both units' intent survives: read both specs, but only the parts about the
+conflicted files. Never drop a unit's change silently. Commit the merge, then
+run the same command again; it carries on from the next branch.
 
 ## 2. Repair what merges cleanly but breaks
 
-Parallel branches have caused these failures here before:
+After the last merge the script prints its checks and has already done the
+mechanical repairs:
 
-- **Migration numbers.** List `compose/db/migrations/` on `origin/main` and on
-  every merged unit. If two units added the same number, or one collides with
-  `origin/main`, renumber the later files so the sequence is strictly
-  increasing. Rename the file and fix any references to it.
-- **Duplicate or overlapping methods.** Two units may each add the same port,
-  service or repository method with no textual conflict. Unify them.
-- **Agreed interfaces.** The split pinned some interfaces between units: one
-  unit provides each interface and another consumes it. Check that both sides
-  match exactly (routes, payloads, types and method signatures), and fix
+- `MIGRATIONS ok`, or the numbers that collide and the files added since
+  `origin/main`. Renumber the later units' files so the sequence is strictly
+  increasing, and fix any references to them.
+- `CONTRACTS`: if `packages/contracts/src` changed, it ran
+  `node apps/scripts/sync-contracts.mjs` and committed the result. If it says
+  `sync failed`, find out why.
+- `DEPS`: it reinstalled only what a merged lockfile changed. Never hand-merge
+  `package-lock.json` or `apps/bun.lock`; regenerate a conflicted one with
+  `npm install`, or `bun install` in `apps/`.
+
+Then the checks only you can do, which parallel branches have broken here
+before:
+
+- **Agreed interfaces.** Compare every unit's `agreed` and `built` interfaces
+  above. Start with any marked `CHANGED`, and then check that each provider and
+  consumer match exactly (routes, payloads, types and method signatures). Fix
   whichever side drifted from the agreed shape.
-- **Contracts drift.** If anything under `packages/contracts/src` changed, run
-  `node apps/scripts/sync-contracts.mjs` and commit the regenerated
-  `apps/src/contracts/`.
-- **Lockfiles.** Never hand-merge `package-lock.json` or `apps/bun.lock`.
-  Regenerate them with `npm install`, or `bun install` in `apps/`.
-- **Dependencies.** The integration worktree was installed from `origin/main`.
-  Run `npm ci` (or `bun install` in `apps/`) again only if a merged unit changed
-  that lockfile: `git diff --quiet origin/main -- package-lock.json`.
+- **Duplicate or overlapping methods.** Two units may each add the same port,
+  service or repository method with no textual conflict. Look in the areas
+  more than one unit touched, and unify them.
 
 Commit each repair as its own `fix(merge): ...` commit.
 
@@ -101,8 +122,11 @@ The pipeline's `Acceptance` stage fails by design, so ignore it.
 
 **Stop and report if you're stuck.** If the same failure survives three serious
 fix attempts, or a fix would mean choosing between two units' requirements, do
-not open a PR. Reply with `RESULT: stuck`, the failing command, its output, what
-you tried, and the decision you need from the user.
+not open a PR. First write `<state>`: what is merged, the repairs so far, which
+checks pass, the failing command and the last lines of its output, what you
+tried, and the open decision. Then reply with `RESULT: stuck` and the same
+facts. If the answer comes late, a fresh synthesis agent picks up from that
+file instead of re-writing this whole context.
 
 ## 4. Open the PR
 
@@ -124,18 +148,18 @@ Once every check is green:
 
 ## 5. Link the tickets
 
-Skip this section if ticket creation failed.
+Skip this section if ticket creation failed. Otherwise make one call, with the
+numbers of the merged units:
 
-1. Link the PR to the stories and to the merged units' tasks:
-   `az repos pr work-item add --id <pr id> --work-items <story ids> <merged task ids> -o none`
-   Never link a left-out unit's task, because that work isn't in this PR.
-2. If no unit was left out, ask ADO to close the linked items when the PR
-   completes:
-   `az repos pr update --id <pr id> --transition-work-items true -o none`
-   If a unit was left out, don't do this: the story isn't finished.
-3. Check the links with
-   `az repos pr work-item list --id <pr id> --query "[].id" -o tsv`.
-   Each `az` call takes up to a minute here.
+```bash
+python "<skill>/scripts/ado_tickets.py" "<tickets json>" --link-pr <pr id> --merged <n,n,...>
+```
+
+It links the PR to the merged units' stories and tasks, never to a left-out
+unit's task, because that work isn't in this PR. When no unit was left out it
+also turns on close-on-complete. It prints the linked IDs and whether
+close-on-complete is on, and exits non-zero if an ID didn't link. The `az`
+calls take up to a minute each.
 
 ## 6. Reply
 
