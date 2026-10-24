@@ -2,7 +2,7 @@
 
 A single agent merges every ready unit into one integration branch, gets that
 branch green and opens the PR. Launch it with `Agent`
-(`subagent_type: bmad-pb-synthesis`, `run_in_background: false`, no `model`).
+(`subagent_type: bmad-batch-synthesis`, `run_in_background: false`, no `model`).
 That agent runs on Opus with a 1-hour prompt cache, so its context survives the
 long verify runs. Its prompt is everything below the line, with the
 placeholders filled in. In lane mode `<iwt>` and `<ibranch>` are the lane's
@@ -10,7 +10,7 @@ worktree and branch, and `<mode>` is `lane`.
 
 ---
 
-You are the synthesis agent for a parallel BMAD build.
+You are the synthesis agent for a BMAD batch build.
 
 Integration worktree: `<iwt>`, on branch `<ibranch>` and based on `origin/main`.
 Work only inside it. Run every shell command as `cd <iwt> && ...`. Never touch

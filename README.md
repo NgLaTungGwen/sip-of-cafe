@@ -2,7 +2,13 @@
 
 Claude Code skills.
 
-## bmad-parallel-build
+## bmad-batch-build
+
+Formerly `bmad-parallel-build`, renamed in 0.6.0 because runs now go in
+parallel or in a lane. If you installed the old plugin, uninstall
+`bmad-parallel-build@sip-of-cafe` and install `bmad-batch-build@sip-of-cafe`.
+Old agent copies `bmad-pb-worker` and `bmad-pb-synthesis` in a project's
+`.claude/agents/` can be deleted.
 
 Orchestrates a parallel BMAD build from a meeting transcript or pasted work
 items. It splits the material into independent units and, after you approve the
@@ -23,7 +29,7 @@ As a Claude Code plugin:
 
 ```bash
 claude plugin marketplace add NgLaTungGwen/sip-of-cafe
-claude plugin install bmad-parallel-build@sip-of-cafe
+claude plugin install bmad-batch-build@sip-of-cafe
 ```
 
 ### Models
@@ -35,10 +41,10 @@ Each step runs on the model it needs:
 | Split and orchestration | your session's model |
 | Code mapping during the split | Sonnet (`Explore`) |
 | Worktree setup, install, build | scripts, no model |
-| Worker: spec, verification, review triage | Opus (`bmad-pb-worker` agent) |
+| Worker: spec, verification, review triage | Opus (`bmad-batch-worker` agent) |
 | Review layers | the worker's model, as bmad-build-auto requires |
 | Code, from the spec | Haiku (`haiku-implementer` agent) |
-| Synthesis: merge, fix, open the PR | Opus (`bmad-pb-synthesis` agent) |
+| Synthesis: merge, fix, open the PR | Opus (`bmad-batch-synthesis` agent) |
 
 The worker runs on Opus because Sonnet workers skipped the review step in 31 of
 47 measured units, against 5 of 67 on Opus. Opus and Sonnet cost the same per
@@ -87,7 +93,34 @@ The settings are environment variables:
 | `BMAD_HEAVY_DIR` | `~/.cache/bmad-heavy` | Where running commands are recorded |
 
 Free RAM is read from `/proc/meminfo` (Git Bash, Linux, WSL). Without that file
-only the slot count applies.
+only the slot count applies. Waiting commands start in arrival order.
+
+The agents are told to use `heavy.sh`. To make sure a command they type
+without it still queues, enable the optional hook yourself; the skill never
+turns it on. Add this to the project's `.claude/settings.local.json`, with
+the path to your install:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          { "type": "command", "command": "python \"<skill dir>/scripts/heavy_hook.py\"" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook only touches commands of the form
+`cd <dir under .claude/worktrees/> && <install | build | full test | typecheck>`.
+It rewrites such a command to go through `heavy.sh`, and approves that one
+rewritten call. A command chained with anything else, run outside the
+worktrees, or a targeted test run is left alone, and goes through your normal
+permission rules.
 
 ### Gate and measurement
 

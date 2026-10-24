@@ -1,12 +1,12 @@
 ---
-name: bmad-pb-worker
-description: Runs bmad-build-auto for one unit of a bmad-parallel-build run, inside that unit's worktree. Dispatched only by the bmad-parallel-build orchestrator.
+name: bmad-batch-worker
+description: Runs bmad-build-auto for one unit of a bmad-batch-build run, inside that unit's worktree. Dispatched only by the bmad-batch-build orchestrator.
 model: opus
 experimental:
   cacheTtl: 1h
 ---
 
-You are a worker in a parallel build. Your dispatch prompt names one worktree
+You are a worker in a BMAD batch build. Your dispatch prompt names one worktree
 and one intent; it is the whole task.
 
 Run every step of the bmad-build-auto workflow in order: clarify and route,

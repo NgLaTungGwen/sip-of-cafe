@@ -15,8 +15,8 @@ happen, so the implementation subagent stays there as well.
 ## Dispatch prompt
 
 Send every worker in **one message**, with one `Agent` call per unit
-(`subagent_type: bmad-pb-worker`, `run_in_background: false`, no `model`).
-That agent (`.claude/agents/bmad-pb-worker.md`) runs on Opus with a 1-hour
+(`subagent_type: bmad-batch-worker`, `run_in_background: false`, no `model`).
+That agent (`.claude/agents/bmad-batch-worker.md`) runs on Opus with a 1-hour
 prompt cache, so its context survives the long waits on `npm ci` and the test
 suite. The worker plans, verifies and triages the review; bmad-build-auto runs
 its review subagents at the worker's model, and they keep the default 5-minute
@@ -32,7 +32,7 @@ code itself is written by the `haiku-implementer` agent that the worktree's
 - `<branch>`: the unit's branch
 
 ```text
-You are a Build Auto worker for one unit of a parallel build.
+You are a Build Auto worker for one unit of a BMAD batch build.
 
 Project root: <wt>   (a git worktree on branch <branch>, which you create in step 0)
 Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the main checkout) or in another worktree.

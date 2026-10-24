@@ -1,6 +1,6 @@
 ---
 name: haiku-implementer
-description: Implements a finished bmad-build-auto spec file inside one worktree. Used as the implementation subagent of bmad-parallel-build workers; the worker plans, verifies and reviews.
+description: Implements a finished bmad-build-auto spec file inside one worktree. Used as the implementation subagent of bmad-batch-build workers; the worker plans, verifies and reviews.
 model: haiku
 autoCompactWindow: 100000
 tools: Read, Grep, Glob, Bash, Write, Edit

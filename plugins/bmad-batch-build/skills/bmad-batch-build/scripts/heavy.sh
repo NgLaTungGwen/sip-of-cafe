@@ -17,8 +17,10 @@
 # (default 3; its own default is one per CPU, which is what crashed workers
 # when several suites ran at once).
 #
-# State lives in BMAD_HEAVY_DIR (default ~/.cache/bmad-heavy), one file per
-# running command. Entries of dead processes, or older than 4 h, are dropped.
+# Waiting commands start in arrival order. State lives in BMAD_HEAVY_DIR
+# (default ~/.cache/bmad-heavy): a wait.* ticket per waiting command and a
+# run.* entry per running one. Entries of dead processes, or older than 4 h,
+# are dropped.
 set -uo pipefail
 
 weight=1 mem=""
@@ -75,28 +77,51 @@ survey() {
   echo "$used $recent"
 }
 
-waited=0 used=0 avail=0
+# First come, first served: every command takes a ticket named by its arrival
+# time, and only the oldest live ticket may start. A later, smaller command
+# never overtakes an earlier one, even when it would fit.
+ticket="$dir/wait.$(date +%s%N).$$"
+echo "$$" > "$ticket"
+trap 'rm -f "$entry" "$ticket"' EXIT
+
+# Prints how many live tickets are older than this one, dropping dead ones.
+ahead() {
+  local f n=0
+  for f in "$dir"/wait.*; do
+    [ -e "$f" ] || continue
+    [ "$f" = "$ticket" ] && break
+    if kill -0 "$(cat "$f" 2>/dev/null)" 2>/dev/null; then n=$((n + 1)); else rm -f "$f"; fi
+  done
+  echo "$n"
+}
+
+start() {
+  echo "$$ $weight $mem $(date +%s)" > "$entry"
+  rm -f "$ticket"
+}
+
+waited=0 used=0 avail=0 queue=0
 while :; do
   if lock; then
+    queue=$(ahead)
     read -r used recent < <(survey)
     avail=$(( $(free_mb) - recent ))
-    if [ "$used" -eq 0 ] || { [ $((used + weight)) -le "$slots" ] && [ $((avail - mem)) -ge "$floor" ]; }; then
-      echo "$$ $weight $mem $(date +%s)" > "$entry"
+    if [ "$queue" -eq 0 ] && { [ "$used" -eq 0 ] || { [ $((used + weight)) -le "$slots" ] && [ $((avail - mem)) -ge "$floor" ]; }; }; then
+      start
       unlock
       break
     fi
     unlock
   fi
   if [ "$waited" -ge "$max_wait" ]; then
-    echo "heavy.sh: waited ${waited}s for capacity; starting anyway" >&2
-    echo "$$ $weight $mem $(date +%s)" > "$entry"
+    echo "heavy.sh: waited ${waited}s; starting anyway" >&2
+    start
     break
   fi
-  [ $((waited % 60)) -eq 0 ] && echo "heavy.sh: waiting for capacity (running weight $used of $slots, ${avail} MB free)" >&2
-  sleep 10
-  waited=$((waited + 10))
+  [ $((waited % 60)) -eq 0 ] && echo "heavy.sh: waiting (${queue} ahead in the queue, running weight $used of $slots, ${avail} MB free)" >&2
+  sleep 5
+  waited=$((waited + 5))
 done
-trap 'rm -f "$entry"' EXIT
 
 export VITEST_MAX_FORKS="${VITEST_MAX_FORKS:-3}" VITEST_MAX_THREADS="${VITEST_MAX_THREADS:-3}"
 bash -c "$cmd"

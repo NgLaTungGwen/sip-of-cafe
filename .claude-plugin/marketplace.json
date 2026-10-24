@@ -8,9 +8,9 @@
   },
   "plugins": [
     {
-      "name": "bmad-parallel-build",
-      "source": "./plugins/bmad-parallel-build",
-      "description": "Parallel BMAD build: one bmad-build-auto worker per unit in its own worktree, then a synthesis agent merges everything into one Azure DevOps PR."
+      "name": "bmad-batch-build",
+      "source": "./plugins/bmad-batch-build",
+      "description": "BMAD batch build: one bmad-build-auto worker per unit, in parallel worktrees or in turn in one worktree (chosen automatically), then a synthesis agent opens one Azure DevOps PR."
     }
   ]
 }

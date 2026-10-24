@@ -1,9 +1,9 @@
 ---
-name: bmad-parallel-build
-description: 'Orchestrate a parallel BMAD build from a meeting transcript or pasted work items. Splits the material into independent units and, after the user approves the split, runs one bmad-build-auto worker per unit: in parallel worktrees for larger runs, or in turn in one worktree (lane) for small ones, chosen automatically. It also creates the Azure DevOps tickets (a User Story and one Task per unit, reusing any pasted work items). A synthesis agent then merges the results into one branch, gets it green, and opens one PR linked to those tickets. Use when the user says "parallel build", "fan out bmad-build", "orchestrate the build", or hands over a transcript or a set of work items to implement together.'
+name: bmad-batch-build
+description: 'Orchestrate a BMAD batch build from a meeting transcript or pasted work items. Splits the material into independent units and, after the user approves the split, runs one bmad-build-auto worker per unit: in parallel worktrees for larger runs, or in turn in one worktree (lane) for small ones, chosen automatically. It also creates the Azure DevOps tickets (a User Story and one Task per unit, reusing any pasted work items). A synthesis agent then merges the results into one branch, gets it green, and opens one PR linked to those tickets. Use when the user says "batch build", "parallel build", "fan out bmad-build", "orchestrate the build", or hands over a transcript or a set of work items to implement together.'
 ---
 
-# BMAD Parallel Build
+# BMAD Batch Build
 
 You are the orchestrator. You split the work, dispatch workers, check what they
 return and hand the results to synthesis. You never write product code
@@ -40,8 +40,8 @@ Run `bash "<skill>/scripts/ensure-bmad.sh" "<root>"` before anything else. It
 leaves an existing BMAD install alone and otherwise installs the pinned
 `bmad-method` release into `<root>` (module `bmm`, tool `claude-code`), which
 takes a minute or two. It also copies the run's three agents into
-`<root>/.claude/agents/` when the project doesn't have them: `bmad-pb-worker`,
-`bmad-pb-synthesis` and `haiku-implementer`. A project copy that differs from
+`<root>/.claude/agents/` when the project doesn't have them: `bmad-batch-worker`,
+`bmad-batch-synthesis` and `haiku-implementer`. A project copy that differs from
 the shipped one is kept and reported; pass that line on to the user. If the
 script fails, stop and show the user its output. The general-purpose agent is
 no substitute: it has no 1-hour cache and no workflow rules.
@@ -100,8 +100,13 @@ A unit is a piece of work that one worker can build and test on its own, from
 Heavy commands (installs, builds, full test suites, the synthesis verify) go
 through `scripts/heavy.sh`. It admits a command only while the machine has room
 for it, counting every session and run on this machine, so many runs can go at
-once without crashing; they queue instead. CPU and RAM may still run high, and
-that is expected. Vitest is capped at 3 workers per suite.
+once without crashing; they queue instead. Waiting commands start in arrival
+order. CPU and RAM may still run high, and that is expected. Vitest is capped
+at 3 workers per suite.
+
+`scripts/heavy_hook.py` is an optional PreToolUse hook the user can enable. It
+routes a heavy command that an agent typed without `heavy.sh` through the
+queue anyway. The skill never enables it itself.
 
 For every unit, write:
 

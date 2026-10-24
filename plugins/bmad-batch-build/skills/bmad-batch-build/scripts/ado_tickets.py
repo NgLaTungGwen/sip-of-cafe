@@ -16,7 +16,8 @@ plan.json (written by the orchestrator, updated in place with the IDs):
 An entry whose "id" is already set is an existing work item. It is reused and
 never edited or re-parented. Only entries with "id": null are created. Each new
 Task becomes a child of the story its "story" key names. Everything created is
-assigned to the signed-in az account and tagged bmad-parallel-build. The
+assigned to the signed-in az account and tagged bmad-parallel-build (the skill's
+former name, kept so board queries on the tag keep working). The
 organization and project come from the `az devops configure` defaults.
 
 Tasks are created in parallel because each az call takes 30-60 s here. The plan
@@ -30,7 +31,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 AZ = shutil.which("az") or shutil.which("az.cmd") or "az"
-TAG = "bmad-parallel-build"
+TAG = "bmad-parallel-build"  # former skill name, kept for board queries
 
 
 def az(*args: str) -> str:

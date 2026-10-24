@@ -1,4 +1,4 @@
-"""Token and cost profile of bmad-parallel-build runs.
+"""Token and cost profile of bmad-batch-build runs (formerly bmad-parallel-build).
 
 Usage: python cost_report.py <session.jsonl> [<session.jsonl> ...]
 
@@ -39,7 +39,8 @@ def load(path):
 def main_span(lines):
     """Index range from the skill invocation to the last synthesis result."""
     # The invocation is the slash command or a Skill tool call, not any mention.
-    marks = ("<command-name>/bmad-parallel-build</command-name>", '"skill": "bmad-parallel-build"')
+    marks = tuple(m for name in ("bmad-batch-build", "bmad-parallel-build")
+                  for m in (f"<command-name>/{name}</command-name>", f'"skill": "{name}"'))
     start = next((i for i, x in enumerate(lines) if x.get("type") in ("user", "assistant")
                   and any(k in json.dumps(x.get("message", "")) for k in marks)), 0)
     synth_ids = set()
@@ -60,9 +61,9 @@ def role(meta, first_line):
     agent = meta.get("agentType")
     if agent == "haiku-implementer":
         return "haiku"
-    if agent == "bmad-pb-synthesis" or "ynthesis" in meta.get("description", ""):
+    if agent in ("bmad-batch-synthesis", "bmad-pb-synthesis") or "ynthesis" in meta.get("description", ""):
         return "synthesis"
-    if agent == "bmad-pb-worker" or "Build Auto worker" in first_line:
+    if agent in ("bmad-batch-worker", "bmad-pb-worker") or "Build Auto worker" in first_line:
         return "worker"
     return "reviewer" if meta.get("spawnDepth", 1) > 1 else "other"
 
