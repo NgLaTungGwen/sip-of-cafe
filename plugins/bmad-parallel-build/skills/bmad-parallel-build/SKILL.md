@@ -1,6 +1,6 @@
 ---
 name: bmad-parallel-build
-description: 'Orchestrate a parallel BMAD build from a meeting transcript or pasted work items. Splits the material into independent units and, after the user approves the split, runs one bmad-build-auto worker per unit in its own worktree. It also creates the Azure DevOps tickets (a User Story and one Task per unit, reusing any pasted work items). A synthesis agent then merges the results into one branch, gets it green, and opens one PR linked to those tickets. Use when the user says "parallel build", "fan out bmad-build", "orchestrate the build", or hands over a transcript or a set of work items to implement together.'
+description: 'Orchestrate a parallel BMAD build from a meeting transcript or pasted work items. Splits the material into independent units and, after the user approves the split, runs one bmad-build-auto worker per unit: in parallel worktrees for larger runs, or in turn in one worktree (lane) for small ones, chosen automatically. It also creates the Azure DevOps tickets (a User Story and one Task per unit, reusing any pasted work items). A synthesis agent then merges the results into one branch, gets it green, and opens one PR linked to those tickets. Use when the user says "parallel build", "fan out bmad-build", "orchestrate the build", or hands over a transcript or a set of work items to implement together.'
 ---
 
 # BMAD Parallel Build
@@ -9,8 +9,17 @@ You are the orchestrator. You split the work, dispatch workers, check what they
 return and hand the results to synthesis. You never write product code
 yourself.
 
-The flow is: input → split → **user approves** → ADO tickets + worktrees +
-workers, all at once → gate → synthesis → one PR linked to the tickets.
+The flow is: input → split → mode → **user approves** → ADO tickets +
+worktrees + workers → gate → synthesis → one PR linked to the tickets.
+
+The mode is chosen automatically from the split (section 2, "Choose the
+mode"):
+
+- **parallel:** every unit gets its own worktree and all workers start
+  together, then synthesis merges them.
+- **lane:** the units take turns in one worktree on the run's branch, so
+  nothing is installed twice and nothing is merged. Small runs finish sooner
+  this way and load the machine less.
 
 The only planned checkpoint is the split approval. You also stop and ask in two
 other cases: when a worker doesn't build, and when synthesis reports `stuck`.
@@ -85,18 +94,24 @@ A unit is a piece of work that one worker can build and test on its own, from
   units' intents describe the agreed shape.
 - **No cap on the count, and no waves.** Split as finely as file ownership
   allows. Every unit starts in the same message, and no unit is ever held back
-  for a later round. Each unit should be one session-sized build. If
-  everything fits in one unit, say so and recommend plain `bmad-build`.
+  for a later round. Each unit should be one session-sized build. A single
+  unit is fine: it runs as a lane of one.
 
-This machine has 10 cores and 32 GB of RAM. Each unit runs its own `npm ci`,
-build, test suite and test database, and about 8 units can run at once in
-comfort. Beyond 8, everything still runs in parallel, but each unit is slower.
-Say so at approval, along with the token cost (roughly one full build per unit).
+Heavy commands (installs, builds, full test suites, the synthesis verify) go
+through `scripts/heavy.sh`. It admits a command only while the machine has room
+for it, counting every session and run on this machine, so many runs can go at
+once without crashing; they queue instead. CPU and RAM may still run high, and
+that is expected. Vitest is capped at 3 workers per suite.
 
 For every unit, write:
 
 - a title
-- a branch, `jayson/<type>-<slug>-<n>`
+- a size, from the files it owns:
+  - **S:** up to 3 files, with no migration and no new module;
+  - **M:** 4 to 10 files;
+  - **L:** more than 10 files, a new module, or a migration plus API plus UI.
+- a branch, `jayson/<type>-<slug>-<n>` (parallel mode only; a lane uses the
+  run's branch)
 - `--apps`, if the unit touches `apps/`
 - the files or areas it owns
 - a self-contained intent: the goal, the scope, what's out of scope, acceptance
@@ -105,6 +120,41 @@ For every unit, write:
 - its ticket
 
 The worker sees only its intent.
+
+### Choose the mode
+
+Decide it yourself from the units; don't ask. Estimate each unit's worker time
+from its size: S 50 min, M 100 min, L 160 min. These numbers include the
+worker's own worktree preparation. They are a first calibration; correct them
+when `scripts/cost-report.py` shows other worker times.
+
+```text
+lane     = sum(unit minutes) - 10 * (units - 1) + 30   # one preparation, units in turn, one verify
+parallel = max(unit minutes) + 80                       # all at once, then synthesis merges and verifies
+```
+
+- **1 unit:** lane.
+- **2 to 4 units:** lane when `lane <= parallel + margin`, otherwise parallel.
+  - The margin is 20 min.
+  - It is 40 min when the machine is already busy. Check with
+    `ls ~/.cache/bmad-heavy/run.* 2>/dev/null | wc -l`: four or more running
+    heavy commands means another session is busy.
+  - A tie goes to lane, because lane costs less, merges nothing and loads the
+    machine less.
+- **5 or more units:** parallel.
+
+Examples:
+
+| Units | Lane | Parallel | Result |
+|---|---|---|---|
+| 2 × S | 120 | 130 | lane |
+| 3 × S | 160 | 130 + 20 | parallel |
+| 2 × M | 220 | 180 + 20 | parallel |
+| L + S | 230 | 240 | lane |
+
+In lane mode the units run in dependency order, owner of migrations and
+contracts first. Disjoint files and pinned interfaces still help the review,
+but a later unit may build directly on an earlier one.
 
 ### Tickets
 
@@ -136,6 +186,15 @@ acceptance criteria in brief. Above the table, give the story or stories (`#id`
 reused, or `new User Story: <title>`). List the open ambiguities underneath.
 Approving the split also approves creating the new tickets.
 
+Add a size column to the table, and one **Mode** line under it: the chosen
+mode and both estimates, for example
+`Mode: lane (≈120 min; parallel ≈130 min)`. This is information, not a
+question. The user can still switch modes by choosing "adjust".
+
+Write the same line into the run file, with each unit's size. Sizes and
+estimates set against the measured times are how the mode constants get
+calibrated.
+
 Combining tasks is the one way the split loses parallelism. If you put more
 than one input task into a single unit, add a **Combined** line under the table
 for each such unit: name the tasks and give the reason (a shared file, or an
@@ -146,10 +205,18 @@ Ask with `AskUserQuestion` whether to approve, adjust or cancel. Iterate until
 the user approves. After approval, run to the end without asking, except for
 the two stop cases in sections 6 and 7.
 
-## 4. Launch everything at once
+## 4. Launch
 
-Nothing waits on anything else. Each worker prepares its own worktree and starts
-building as soon as that worktree is ready, so units never wait on each other.
+In parallel mode nothing waits on anything else. Each worker prepares its own
+worktree and starts building as soon as that worktree is ready, so units never
+wait on each other.
+
+In lane mode, steps 0 to 2 are the same, with two changes in step 2:
+
+- **No integration worktree.** The lane's worktree takes its place.
+- **Only the first unit's worker is sent,** using the lane prompt in
+  `references/worker.md`. Its worktree is `<root>/.claude/worktrees/<slug>`, on
+  `jayson/<type>-<slug>`.
 
 0. Preflight, in one Bash call, before anything is created:
    ```bash
@@ -195,8 +262,12 @@ If the integration worktree fails to prepare, clear it with
 
 ## 5. Wait for the workers
 
-All the `Agent` calls return together. Record each worker's reply in the run
-file.
+**Parallel:** all the `Agent` calls return together. Record each worker's reply
+in the run file.
+
+**Lane:** when a worker returns, record its reply and gate its unit straight
+away (section 6, with its base). Then send the next unit's worker with the
+lane prompt. Go to synthesis after the last unit passes.
 
 ## 6. Gate
 
@@ -214,6 +285,13 @@ Apply the gate in `references/worker.md` to every unit, in one Bash call with
   `bash "<skill>/scripts/remove-worktree.sh" "<root>" "<name>" "<branch>"`, then
   `git -C "<root>" branch -D "<branch>"` (the script's `-d` keeps an unmerged
   branch). Then send a fresh worker with the same, or a corrected, intent.
+- **A lane unit is not ready:** the lane stops there, because later units
+  build on it. Ask whether to:
+  - keep it marked unreviewed and continue with the next unit;
+  - re-dispatch it: reset the lane to the unit's base with
+    `git -C <wt> reset --hard <base>`, then send a fresh worker. This discards
+    that unit's commits;
+  - stop and send what is done to synthesis.
 
 ## 7. Synthesis
 
@@ -222,7 +300,9 @@ running, wait for its notification. Then read `<skill>/references/synthesis.md`,
 fill in its placeholders, and launch
 one foreground `Agent` with that prompt. List the ready units in dependency
 order. If they have no dependencies, put the unit that owns migrations and
-contracts first.
+contracts first. In lane mode, set `<mode>` to `lane`, and use the lane's
+worktree and branch as `<iwt>` and `<ibranch>`; synthesis then skips the
+merge.
 
 - **`RESULT: pr`:** go to step 8.
 - **`RESULT: stuck`:** show the failure and the decision it needs. Once the

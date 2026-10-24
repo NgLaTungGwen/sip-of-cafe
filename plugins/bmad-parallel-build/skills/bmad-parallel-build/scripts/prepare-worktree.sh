@@ -56,6 +56,13 @@ sed -E \
   -e "s#^(DATABASE_URL|MIGRATION_DATABASE_URL)=(postgres://[^@]*@)[^/]*/.*#\1=\2127.0.0.1:55432/$db#" \
   -e "s#^([A-Z_]+_FILE)=(secrets/.*)#\1=$root/\2#" \
   "$root/.env" > "$wt/.env"
+# Vitest starts one worker per CPU by default. With several suites running at
+# once across worktrees and sessions that crashed workers, so every run in this
+# worktree, targeted ones included, is capped (dotenv puts these in process.env
+# before vitest reads them).
+printf '\nVITEST_MAX_FORKS=3\nVITEST_MAX_THREADS=3\n' >> "$wt/.env"
+
+heavy="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/heavy.sh"
 
 # Pin bmad-build-auto to this worktree. The file sits in the worktree's private
 # copy of _bmad, so the main checkout never sees it.
@@ -66,7 +73,7 @@ persistent_facts = [
   "The project root for this run is $wt. Every file read, edit, test and git command targets that directory. Never touch anything outside $wt: not the main checkout $root, and not any other worktree.",
   "Run shell commands as \`cd $wt && ...\`, or use \`git -C $wt\`.",
   "Source files change only through the implementation subagent, review fixes included: send them to it again. The parent edits only the spec and files under _bmad-output/.",
-  "Testing: the implementation subagent runs the targeted tests and typechecks. The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full DB suite (\`npm test\`) exactly once. After a failure, re-run only the failing files. Never run \`npm run build\` while iterating; synthesis builds.",
+  "Testing: the implementation subagent runs the targeted tests and typechecks. The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full DB suite exactly once, run as \`bash $heavy 'cd $wt && npm test'\`. Typechecks also go through it, e.g. \`bash $heavy 'cd $wt/api && npm run typecheck'\`; it waits for machine capacity instead of overloading it. After a failure, re-run only the failing files. Never run \`npm run build\` while iterating; synthesis builds.",
   "file:AGENTS.md",
 ]
 
@@ -76,6 +83,8 @@ Launch a subagent with no prior conversation context, using the \`haiku-implemen
 > The project root is $wt. Every file you read or edit, and every command you run, must be inside that directory. Use absolute paths and \`cd $wt && ...\` for shell commands. Nothing outside $wt may change: not the main checkout $root, and not any other worktree.
 >
 > Read {spec_file} fully and implement it. The spec is the sole source of truth. Load every file listed in its frontmatter \`context:\` before you start.
+>
+> Run every typecheck through the machine-wide queue, for example \`bash $heavy 'cd $wt/api && npm run typecheck'\`; targeted test files can run directly.
 >
 > When you're done, report what you changed, how you verified it, and anything left incomplete or risky.
 """
@@ -89,9 +98,9 @@ fi
 # api's typecheck resolves @hive/contracts through packages/contracts/dist,
 # which is gitignored. Tests alias it to source, and the api build (nest build)
 # is only needed by synthesis, so only contracts is built here.
-(cd "$wt" && npm ci --no-audit --no-fund --loglevel=error >&2 && npm --workspace @hive/contracts run build >&2)
+bash "$heavy" "cd '$wt' && npm ci --no-audit --no-fund --loglevel=error && npm --workspace @hive/contracts run build" >&2
 if [ "$apps" = 1 ]; then
-  (cd "$wt/apps" && bun install --frozen-lockfile >&2)
+  bash "$heavy" "cd '$wt/apps' && bun install --frozen-lockfile" >&2
 fi
 
 echo "$wt"

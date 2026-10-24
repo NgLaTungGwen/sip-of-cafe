@@ -5,7 +5,8 @@ branch green and opens the PR. Launch it with `Agent`
 (`subagent_type: bmad-pb-synthesis`, `run_in_background: false`, no `model`).
 That agent runs on Opus with a 1-hour prompt cache, so its context survives the
 long verify runs. Its prompt is everything below the line, with the
-placeholders filled in.
+placeholders filled in. In lane mode `<iwt>` and `<ibranch>` are the lane's
+worktree and branch, and `<mode>` is `lane`.
 
 ---
 
@@ -14,6 +15,8 @@ You are the synthesis agent for a parallel BMAD build.
 Integration worktree: `<iwt>`, on branch `<ibranch>` and based on `origin/main`.
 Work only inside it. Run every shell command as `cd <iwt> && ...`. Never touch
 `<root>` (the main checkout) or a unit worktree.
+
+Mode: `<mode>` (`parallel` or `lane`). Skill scripts: `<skill>/scripts`.
 
 Run goal: <one paragraph from the approved split>
 
@@ -28,6 +31,11 @@ unit <unit: #task id>. If ticket creation failed: "none: <error>".
 Read `<iwt>/AGENTS.md` first.
 
 ## 1. Merge
+
+**Lane mode:** the units are already committed on `<ibranch>`, one after
+another, so there is nothing to merge. Skip to section 2 and, of its checks,
+run only migration numbers against `origin/main`, contracts drift and
+lockfiles.
 
 For each unit, in order, run `git merge --no-ff <branch> -m "merge: <title>"`.
 The unit branches are local refs that every worktree shares.
@@ -63,23 +71,20 @@ Commit each repair as its own `fix(merge): ...` commit.
 
 ## 3. Verify
 
-The checks are independent, so run them at the same time. Only typecheck has
-to wait for the build. Use one foreground Bash call with `timeout: 600000`:
+`verify.sh` runs build + typecheck, the test suite, and the `apps/` and
+`infra/` typechecks at the same time. `heavy.sh` holds it until the machine has
+room, shared with every other session, so a busy machine slows the verify
+instead of crashing it. Use one foreground Bash call with `timeout: 600000`,
+adding `--apps` if `apps/` changed and `--infra` if `infra/` changed:
 
 ```bash
-v=$(mktemp -d) && echo "logs: $v" && cd <iwt>
-(npm run build > $v/build.log 2>&1 && npm run typecheck > $v/typecheck.log 2>&1; echo $? > $v/build-typecheck.rc) &
-(npm test > $v/test.log 2>&1; echo $? > $v/test.rc) &
-# only if apps/ changed (bun, never npm, inside apps/):
-(cd apps && bun run typecheck > $v/apps.log 2>&1; echo $? > $v/apps.rc) &
-# only if infra/ changed:
-(cd infra && npm ci --no-audit --no-fund --loglevel=error && npm run typecheck > $v/infra.log 2>&1; echo $? > $v/infra.rc) &
-wait; grep . $v/*.rc
+bash "<skill>/scripts/heavy.sh" --weight 3 "bash '<skill>/scripts/verify.sh' '<iwt>' [--apps] [--infra]"
 ```
 
-The logs go to a temp folder outside the worktree, so the tree stays clean.
-Read only the failing part of each log whose check didn't return 0. If the call
-runs out of time, run the slow check again on its own.
+It prints the log folder and one `<check>.rc:<exit code>` line per check. The
+logs sit outside the worktree, so the tree stays clean. Read only the failing
+part of each log whose check didn't return 0. If the call runs out of time, run
+the slow check again on its own.
 
 While fixing, re-run only what failed: the failing test files
 (`cd api && npx vitest run <files>`, `cd apps && bun test <files>`), or the one

@@ -1,7 +1,9 @@
 # Worker
 
 One worker per unit. It runs `bmad-build-auto` inside the unit's worktree and
-nowhere else.
+nowhere else. In parallel mode every unit has its own worktree and branch; in
+lane mode the units take turns in one worktree on the run's branch (see "Lane
+mode" below).
 
 ## Pinned to its worktree
 
@@ -38,11 +40,12 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
 0. Prepare the worktree. Run each command below as its own foreground Bash
    call with `timeout: 600000`, in order, and stop at the first failure:
    a. bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<name>" "<branch>" --no-install
-   b. cd "<wt>" && npm ci --no-audit --no-fund --loglevel=error
-   c. cd "<wt>" && npm --workspace @hive/contracts run build
-   d. (only if this unit touches apps/) cd "<wt>/apps" && bun install --frozen-lockfile
-   If b, c or d fails, retry it once, because parallel installs can hit EBUSY
-   on Windows. If a fails, or a retry fails, reply with:
+   b. bash "<skill>/scripts/heavy.sh" "cd '<wt>' && npm ci --no-audit --no-fund --loglevel=error"
+   c. bash "<skill>/scripts/heavy.sh" "cd '<wt>' && npm --workspace @hive/contracts run build"
+   d. (only if this unit touches apps/) bash "<skill>/scripts/heavy.sh" "cd '<wt>/apps' && bun install --frozen-lockfile"
+   heavy.sh waits until the machine has room, shared with every other session,
+   and may print "waiting for capacity" first. If b, c or d fails, retry it
+   once, because parallel installs can hit EBUSY on Windows. If a fails, or a retry fails, reply with:
    SPEC: none
    STATUS: blocked
    BLOCKED: worktree preparation failed: <command and the last lines of output>
@@ -80,11 +83,48 @@ done
 The script prints `READY <commits>` or `NOT READY: <reasons>` for each unit.
 It checks the spec status (`done`, `built` or `in-review`), and the workflow's
 own traces in the spec: `baseline_revision`, `<intent-contract>` and at least
-one `### <date> — Review pass` entry under `## Review Triage Log`. It also checks for a clean tree, the right
-branch, and at least one commit ahead of `origin/main`. Synthesis merges the
-branch ref, so a worker that moved to another branch leaves nothing to merge.
+one `### <date> — Review pass` entry under `## Review Triage Log`. It also
+checks for a clean tree, the right branch, and at least one commit ahead of
+`origin/main` (or of the base passed as a fourth argument). Synthesis merges
+the branch ref, so a worker that moved to another branch leaves nothing to
+merge.
 
 | Result | Meaning |
 |---|---|
 | `READY` | Ready to merge. |
 | `NOT READY` | Record the unit, the reasons and the spec path. A missing workflow trace means the worker skipped plan or review: its code is unreviewed. SKILL.md section 6 decides what happens next. |
+
+## Lane mode
+
+The units run one after another in a single worktree, so nothing is merged and
+only one worktree is installed. The differences from parallel mode:
+
+- `<name>` is `<slug>` and `<branch>` is the run's branch
+  `jayson/<type>-<slug>` for every unit, so `<wt>` is the same for all of them.
+- Dispatch one worker at a time, in the order the split set, and wait for it.
+  Before each dispatch, record `git -C <wt> rev-parse HEAD` (for the first
+  unit, `origin/main`) as that unit's base.
+- The first unit's prompt is the one above. Run its step d if **any** unit in
+  the lane touches `apps/`.
+- Every lane unit's intent, the first one's included, starts with this line,
+  so bmad-build-auto's branch check doesn't halt on the shared name:
+  `This unit runs on the run's shared branch <branch> on purpose; the branch
+  name covers the whole run, not this unit.`
+- Every later unit's prompt replaces step 0 with:
+  ```text
+  0. The worktree is already prepared and on <branch>; earlier units of this
+     run are committed on it. Run `git -C <wt> status --porcelain` and
+     `git -C <wt> branch --show-current`. If the tree is dirty or the branch is
+     not <branch>, reply with:
+     SPEC: none
+     STATUS: blocked
+     BLOCKED: lane worktree not clean or on the wrong branch
+     HEAD: none
+  ```
+  and its intent starts with one line naming the units already on the branch,
+  so the worker builds on them rather than redoing them.
+- Gate each unit as soon as its worker returns, with its base as the fourth
+  argument:
+  `bash "<skill>/scripts/check-unit.sh" "<wt>" "<branch>" "<spec>" "<base>"`.
+  A `NOT READY` unit stops the lane, because later units build on it. SKILL.md
+  section 6 decides what happens next.

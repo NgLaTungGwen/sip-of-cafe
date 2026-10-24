@@ -22,7 +22,8 @@ never do:
 
 - Run only the test files you added or changed (`npx vitest run <files>` in
   `api/`, `bun test <files>` in `apps/`), and the typecheck of each workspace
-  you touched.
+  you touched. Run typechecks through the `heavy.sh` queue your prompt names;
+  it waits until the machine has memory for them.
 - Never run `npm test` for the whole repo or `npm run build`. If a command is
   moved to the background, wait for it with a bounded poll
   (`timeout 540 bash -c 'until grep -q "<done marker>" <log>; do sleep 15; done'`),

@@ -55,6 +55,40 @@ compacts at about 67k tokens; that needs v2.1.296 or later and auto-compact on
 On first run the skill copies the three agents into the project's
 `.claude/agents/`; edit those copies to change them.
 
+### Lane or parallel, chosen automatically
+
+After the split, the orchestrator estimates each unit's worker time from its
+size (S, M or L), and compares two estimates:
+
+- **lane:** the units take turns in one worktree on the run's branch, so
+  nothing is installed twice and nothing is merged;
+- **parallel:** one worktree per unit, all at once, then synthesis merges.
+
+One unit always runs as a lane, and five or more always run in parallel.
+Between those, the faster estimate wins, with ties going to the lane; a busy
+machine raises the lane's margin. The approval table shows the choice and both
+estimates, and you can switch.
+
+### Many runs on one machine
+
+`scripts/heavy.sh` admits every heavy command (installs, builds, full suites,
+typechecks, the synthesis verify) only while the machine has room. It counts
+the commands running across all sessions and checks free RAM, so parallel runs
+queue instead of crashing each other. Vitest is capped at 3 workers per suite.
+CPU and RAM can still run high; that is expected.
+
+The settings are environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BMAD_HEAVY_SLOTS` | CPU count | Commands allowed at once |
+| `BMAD_HEAVY_FLOOR_MB` | 2048 | RAM to keep free |
+| `BMAD_HEAVY_MAX_WAIT` | 1500 s | Wait before a command starts anyway |
+| `BMAD_HEAVY_DIR` | `~/.cache/bmad-heavy` | Where running commands are recorded |
+
+Free RAM is read from `/proc/meminfo` (Git Bash, Linux, WSL). Without that file
+only the slot count applies.
+
 ### Gate and measurement
 
 Before synthesis, `scripts/check-unit.sh` rejects a unit whose spec shows that

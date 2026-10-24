@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Gate one worker's unit before synthesis.
 #
-# usage: check-unit.sh <worktree> <branch> <spec file>
+# usage: check-unit.sh <worktree> <branch> <spec file> [<base rev>]
+#
+# <base rev> defaults to origin/main. In lane mode the units share one branch,
+# so pass the HEAD recorded before the unit started.
 #
 # Prints `READY <commits>` or `NOT READY: <reason>; <reason>` on one line and
 # exits 0 or 1. Besides the tree and branch checks it rejects a spec that shows
@@ -12,7 +15,7 @@
 # that coded first and wrote the spec afterwards produces exactly that shape.
 set -uo pipefail
 
-wt=$1 branch=$2 spec=$3
+wt=$1 branch=$2 spec=$3 base=${4:-origin/main}
 reasons=()
 
 if [ ! -f "$spec" ]; then
@@ -36,8 +39,8 @@ fi
 [ -z "$(git -C "$wt" status --porcelain)" ] || reasons+=("dirty tree")
 current=$(git -C "$wt" branch --show-current)
 [ "$current" = "$branch" ] || reasons+=("on branch '$current', expected '$branch'")
-commits=$(git -C "$wt" rev-list --count "origin/main..$branch" 2>/dev/null || echo 0)
-[ "$commits" -gt 0 ] || reasons+=("no commits ahead of origin/main")
+commits=$(git -C "$wt" rev-list --count "$base..$branch" 2>/dev/null || echo 0)
+[ "$commits" -gt 0 ] || reasons+=("no commits ahead of $base")
 
 if [ ${#reasons[@]} -eq 0 ]; then
   echo "READY $commits"
