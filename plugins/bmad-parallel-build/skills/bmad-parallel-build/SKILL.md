@@ -25,14 +25,22 @@ Paths in this skill:
   reported when it loaded this skill (under `.claude/skills/` for a copied
   install, under `~/.claude/plugins/` for a plugin install).
 
-## 0. Make sure BMAD and the agent are installed
+## 0. Make sure BMAD and the agents are installed
 
 Run `bash "<skill>/scripts/ensure-bmad.sh" "<root>"` before anything else. It
 leaves an existing BMAD install alone and otherwise installs the pinned
 `bmad-method` release into `<root>` (module `bmm`, tool `claude-code`), which
-takes a minute or two. It also copies the `haiku-implementer` agent into
-`<root>/.claude/agents/` if the project doesn't have it yet. If it fails, stop
-and show the user its output.
+takes a minute or two. It also copies the run's three agents into
+`<root>/.claude/agents/` when the project doesn't have them: `bmad-pb-worker`,
+`bmad-pb-synthesis` and `haiku-implementer`. A project copy that differs from
+the shipped one is kept and reported; pass that line on to the user. If the
+script fails, stop and show the user its output. The general-purpose agent is
+no substitute: it has no 1-hour cache and no workflow rules.
+
+**Tell the user when the run needs them.** Before every question to the user
+(the split approval, a gate failure, a stuck synthesis), send a
+`PushNotification` with one line saying what is needed, then ask. Load the tool
+with `ToolSearch` (`select:PushNotification`) if it is deferred.
 
 ## 1. Read the input
 
@@ -56,7 +64,8 @@ run can be resumed.
 ## 2. Split into units
 
 Read enough of the code to know where each change lands. `AGENTS.md` lists
-where things are.
+where things are. When you delegate the code mapping, use `Explore` with
+`model: sonnet`; it only reads and searches.
 
 A unit is a piece of work that one worker can build and test on its own, from
 `origin/main`, without seeing any other unit. Rules for splitting:
@@ -142,6 +151,15 @@ the two stop cases in sections 6 and 7.
 Nothing waits on anything else. Each worker prepares its own worktree and starts
 building as soon as that worktree is ready, so units never wait on each other.
 
+0. Preflight, in one Bash call, before anything is created:
+   ```bash
+   docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 && echo docker ok || echo docker DOWN
+   node -e "require('net').connect(55432,'127.0.0.1').on('connect',()=>{console.log('postgres ok');process.exit(0)}).on('error',()=>{console.log('postgres DOWN');process.exit(1)})"
+   ```
+   If either is down, notify and ask the user to start it, and check again
+   before launching. Every worker's DB suite needs Postgres at
+   `127.0.0.1:55432`; a run that started with Docker down once stalled for
+   nearly five hours.
 1. Fetch once with `git -C "<root>" fetch origin main --quiet`. Concurrent
    fetches into one `.git` race on `FETCH_HEAD`, which is why the scripts never
    fetch.
@@ -182,13 +200,20 @@ file.
 
 ## 6. Gate
 
-Apply the gate in `references/worker.md` to every unit and record the results
-in the run file.
+Apply the gate in `references/worker.md` to every unit, in one Bash call with
+`scripts/check-unit.sh`, and record the results in the run file.
 
 - **Every unit is ready:** continue to synthesis.
 - **Some units are not ready:** show which ones and why, with the spec paths.
-  Ask whether to continue without them, re-dispatch them with a corrected
-  intent, or stop.
+  Ask whether to continue without them, re-dispatch them, or stop. When a unit
+  failed only on workflow traces (no baseline, no intent contract, no review
+  pass), its code exists but is unreviewed; also offer to merge it anyway,
+  marked unreviewed in the PR.
+  To re-dispatch, clear the unit first, because `prepare-worktree.sh` refuses an
+  existing path and branch:
+  `bash "<skill>/scripts/remove-worktree.sh" "<root>" "<name>" "<branch>"`, then
+  `git -C "<root>" branch -D "<branch>"` (the script's `-d` keeps an unmerged
+  branch). Then send a fresh worker with the same, or a corrected, intent.
 
 ## 7. Synthesis
 
@@ -218,6 +243,11 @@ End with a short summary:
 - anything the user should look at first
 
 Don't remove the worktrees. Offer to clean them up after the PR merges.
+
+To measure the run, the user can run
+`python "<skill>/scripts/cost-report.py" <this session's .jsonl>`. It prints the
+cost, tokens and time per role, the tool waits, and the cache rewrites after
+idle gaps. The session file is under `~/.claude/projects/<project>/`.
 
 To clean up, run this for each worktree:
 

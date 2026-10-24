@@ -17,5 +17,16 @@ Keep your context small, because this session compacts at about 67k tokens:
   read only the failures.
 - After any compaction, re-read the spec file before you continue.
 
+Verify narrowly. The worker runs the full suite once after you return, so you
+never do:
+
+- Run only the test files you added or changed (`npx vitest run <files>` in
+  `api/`, `bun test <files>` in `apps/`), and the typecheck of each workspace
+  you touched.
+- Never run `npm test` for the whole repo or `npm run build`. If a command is
+  moved to the background, wait for it with a bounded poll
+  (`timeout 540 bash -c 'until grep -q "<done marker>" <log>; do sleep 15; done'`),
+  never an unbounded `until ... sleep` loop.
+
 When you finish, report what you changed, how you verified it, and anything left
 incomplete or risky.

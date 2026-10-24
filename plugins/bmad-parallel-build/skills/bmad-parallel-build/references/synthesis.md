@@ -2,8 +2,10 @@
 
 A single agent merges every ready unit into one integration branch, gets that
 branch green and opens the PR. Launch it with `Agent`
-(`subagent_type: general-purpose`, `model: opus`, `run_in_background: false`). Its prompt is
-everything below the line, with the placeholders filled in.
+(`subagent_type: bmad-pb-synthesis`, `run_in_background: false`, no `model`).
+That agent runs on Opus with a 1-hour prompt cache, so its context survives the
+long verify runs. Its prompt is everything below the line, with the
+placeholders filled in.
 
 ---
 
@@ -53,6 +55,9 @@ Parallel branches have caused these failures here before:
   `apps/src/contracts/`.
 - **Lockfiles.** Never hand-merge `package-lock.json` or `apps/bun.lock`.
   Regenerate them with `npm install`, or `bun install` in `apps/`.
+- **Dependencies.** The integration worktree was installed from `origin/main`.
+  Run `npm ci` (or `bun install` in `apps/`) again only if a merged unit changed
+  that lockfile: `git diff --quiet origin/main -- package-lock.json`.
 
 Commit each repair as its own `fix(merge): ...` commit.
 
@@ -73,8 +78,15 @@ wait; grep . $v/*.rc
 ```
 
 The logs go to a temp folder outside the worktree, so the tree stays clean.
-Read the log of every check that didn't return 0. If the call runs out of time,
-run the slow check again on its own.
+Read only the failing part of each log whose check didn't return 0. If the call
+runs out of time, run the slow check again on its own.
+
+While fixing, re-run only what failed: the failing test files
+(`cd api && npx vitest run <files>`, `cd apps && bun test <files>`), or the one
+check that failed. Run the full block above once more after the last fix,
+before the PR. If a check is moved to the background, wait for it with a
+bounded poll (`timeout 540 bash -c 'until grep -q "<done marker>" <log>; do sleep 15; done'`),
+never an unbounded `until ... sleep` loop.
 
 Tests alone are not enough. In this repo vitest can pass while typecheck fails.
 

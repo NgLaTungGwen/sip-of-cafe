@@ -4,8 +4,8 @@
 # usage: prepare-worktree.sh <main-root> <name> <branch> [--apps] [--no-install] [--base <rev>]
 #
 # --no-install stops after checkout, copies, .env and pin file, so a caller with
-# a per-command time limit can run `npm ci`, `npm run build` and `bun install`
-# as separate steps.
+# a per-command time limit can run `npm ci`, the contracts build and
+# `bun install` as separate steps.
 #
 # _bmad/ and .claude/ are gitignored, so a fresh worktree has neither the BMAD
 # runtime nor the skills. Both are copied in. Dependencies are installed inside
@@ -65,6 +65,8 @@ cat > "$wt/_bmad/custom/bmad-build-auto.toml" <<EOF
 persistent_facts = [
   "The project root for this run is $wt. Every file read, edit, test and git command targets that directory. Never touch anything outside $wt: not the main checkout $root, and not any other worktree.",
   "Run shell commands as \`cd $wt && ...\`, or use \`git -C $wt\`.",
+  "Source files change only through the implementation subagent, review fixes included: send them to it again. The parent edits only the spec and files under _bmad-output/.",
+  "Testing: the implementation subagent runs the targeted tests and typechecks. The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full DB suite (\`npm test\`) exactly once. After a failure, re-run only the failing files. Never run \`npm run build\` while iterating; synthesis builds.",
   "file:AGENTS.md",
 ]
 
@@ -84,8 +86,10 @@ if [ "$install" = 0 ]; then
   exit 0
 fi
 
-# api resolves @hive/contracts through packages/contracts/dist, which is gitignored.
-(cd "$wt" && npm ci --no-audit --no-fund --loglevel=error >&2 && npm run build >&2)
+# api's typecheck resolves @hive/contracts through packages/contracts/dist,
+# which is gitignored. Tests alias it to source, and the api build (nest build)
+# is only needed by synthesis, so only contracts is built here.
+(cd "$wt" && npm ci --no-audit --no-fund --loglevel=error >&2 && npm --workspace @hive/contracts run build >&2)
 if [ "$apps" = 1 ]; then
   (cd "$wt/apps" && bun install --frozen-lockfile >&2)
 fi

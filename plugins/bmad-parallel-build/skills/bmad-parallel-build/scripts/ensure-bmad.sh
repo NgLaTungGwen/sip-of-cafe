@@ -15,14 +15,20 @@ root="${1:?usage: ensure-bmad.sh <main-root>}"
 version="${BMAD_VERSION:-6.12.0}"
 skill="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The workers hand coding to the haiku-implementer agent, which has to be a
-# project agent so prepare-worktree.sh can copy it into every worktree. A copy
-# the project already has is left alone.
+# The run dispatches bmad-pb-worker and bmad-pb-synthesis, and the workers
+# hand coding to haiku-implementer. They have to be project agents so
+# prepare-worktree.sh can copy them into every worktree. A copy the project
+# already has is left alone; one that differs from the shipped version is
+# reported, so an older copy can be updated by hand.
 mkdir -p "$root/.claude/agents"
-if [[ ! -f "$root/.claude/agents/haiku-implementer.md" ]]; then
-  cp "$skill/agents/haiku-implementer.md" "$root/.claude/agents/"
-  echo "agents: installed haiku-implementer into $root/.claude/agents"
-fi
+for agent in bmad-pb-worker bmad-pb-synthesis haiku-implementer; do
+  if [[ ! -f "$root/.claude/agents/$agent.md" ]]; then
+    cp "$skill/agents/$agent.md" "$root/.claude/agents/"
+    echo "agents: installed $agent into $root/.claude/agents"
+  elif ! cmp -s "$skill/agents/$agent.md" "$root/.claude/agents/$agent.md"; then
+    echo "agents: kept the project's $agent.md, which differs from $skill/agents/$agent.md"
+  fi
+done
 
 if [[ -f "$root/_bmad/scripts/render_skill.py" && -f "$root/.claude/skills/bmad-build-auto/SKILL.md" ]]; then
   echo "bmad: already installed in $root"
