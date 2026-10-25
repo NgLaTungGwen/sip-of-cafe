@@ -198,7 +198,7 @@ def run(session_path):
     edits = collections.Counter()
     waits = collections.defaultdict(lambda: [0, 0.0])
     spans = collections.defaultdict(list)
-    quality = {"workers": [], "fix_merge": 0, "max_turns": collections.Counter()}
+    quality = {"workers": [], "fix_merge": 0, "max_turns": collections.Counter(), "worker_spans": []}
     ivals = collections.defaultdict(list)
     lines = load(session_path)
     s, e = main_span(lines)
@@ -222,6 +222,13 @@ def run(session_path):
         if span:
             spans[lab].append((ts(span[1]) - ts(span[0])).total_seconds())
             ends.setdefault(lab, []).append(span[1])
+            if lab == "worker":
+                # The worktree the worker ran in names its unit (<slug>-<n>), or
+                # the shared lane worktree (<slug>); see unit_minutes().
+                m = re.search(r"Project root: (\S+)", json.dumps(sub[0]) if sub else "")
+                name = re.split(r"[\\/]+", m.group(1).rstrip("\\/"))[-1] if m else None
+                quality["worker_spans"].append({"wt": name, "start": span[0],
+                                                "min": round((ts(span[1]) - ts(span[0])).total_seconds() / 60)})
         acc[lab]["agents"] += 1
     # Synthesis usually runs in the background, so its Agent result returns at
     # launch; the run ends at whichever is later, main or synthesis.
@@ -350,6 +357,7 @@ def report(paths):
             "units_with_high": sum(1 for u in scored_q if u["high"]),
             "fix_merge_commits": quality["fix_merge"],
             "max_turns": dict(quality["max_turns"]),
+            "worker_spans": quality["worker_spans"],
             # Code discovery per role: how many turns, how large the context each
             # turn re-reads, and how many lookups (Read, Grep/Glob, small Bash).
             "by_role": {lab: {
@@ -568,6 +576,38 @@ def build_row(session, slug, project, mode):
     return row, buf.getvalue()
 
 
+def unit_minutes(row, slug, root):
+    """Each unit's size and worker minutes, from the run's plan file, so
+    plan-waves.py can calibrate S/M/L from real runs. A unit is matched by its
+    worktree, <slug>-<n>; units that shared the lane worktree <slug> are
+    matched in the order they ran. Returns None when they can't be matched
+    one to one (no plan file, or a unit was dispatched twice)."""
+    path = os.path.join(root or "", ".claude", "worktrees", "_runs", f"{slug}-plan.json")
+    if not root or not os.path.exists(path):
+        return None
+    try:
+        plan = json.load(open(path, encoding="utf-8"))
+    except ValueError:
+        return None
+    size = {u["id"]: u.get("size") for u in plan.get("units", [])}
+    lane_ids = [i for w in plan.get("waves", []) if w.get("run") == "lane" for i in w["units"]]         or [u["id"] for u in plan.get("units", [])]
+    out, shared = [], []
+    for s in row.get("worker_spans", []):
+        m = re.fullmatch(re.escape(slug) + r"-(\d+)", s.get("wt") or "")
+        if m and int(m.group(1)) in size:
+            out.append({"id": int(m.group(1)), "size": size[int(m.group(1))], "min": s["min"]})
+        elif s.get("wt") == slug:
+            shared.append(s)
+    shared.sort(key=lambda s: s["start"])
+    if shared:
+        if len(shared) > len(lane_ids):
+            return None
+        out += [{"id": i, "size": size.get(i), "min": s["min"]} for i, s in zip(lane_ids, shared)]
+    if len({u["id"] for u in out}) != len(out):
+        return None
+    return out or None
+
+
 def record(slug, root):
     session = find_session(slug)
     if not session:
@@ -585,6 +625,7 @@ def record(slug, root):
     row, text = build_row(session, slug, os.path.basename(os.path.normpath(root)), mode)
     # Whether the split had a system map (check-map.py's verdict, from the run file).
     row["system_map"] = system_map
+    row["unit_minutes"] = unit_minutes(row, slug, root)
     os.makedirs(runs, exist_ok=True)
     with open(os.path.join(runs, f"{slug}-cost.txt"), "w", encoding="utf-8") as fh:
         fh.write(text)
@@ -599,7 +640,7 @@ def record(slug, root):
 
 
 def session_info(path):
-    """(invoked, slug, project) for one session log."""
+    """(invoked, slug, project, cwd) for one session log."""
     invoked, slug, cwd = False, None, None
     with open(path, encoding="utf-8", errors="ignore") as fh:
         for line in fh:
@@ -615,7 +656,7 @@ def session_info(path):
                 if m and not m.group(1).endswith(("-cost", "-synthesis", "-contracts", "-spec")):
                     slug = m.group(1)
     project = os.path.basename(os.path.normpath(cwd)) if cwd else os.path.basename(os.path.dirname(path))
-    return invoked, slug, project
+    return invoked, slug, project, cwd
 
 
 def archive(path, project):
@@ -661,12 +702,14 @@ def collect(quiet=False, refresh=False):
         old = rows.get(session)
         if old and old.get("session_mtime", 0) >= mtime - 1 and not refresh:
             continue
-        invoked, slug, project = session_info(path)
+        invoked, slug, project, cwd = session_info(path)
         if not invoked:
             continue
         archive(path, project)
         try:
             row, text = build_row(path, (old or {}).get("slug") or slug or session[:8], project, (old or {}).get("mode"))
+            row["unit_minutes"] = unit_minutes(row, row["slug"], cwd)
+            row["system_map"] = (old or {}).get("system_map")
         except Exception as exc:  # one unreadable log must not stop the rest
             print(f"collect: skipped {session[:8]}: {exc}")
             continue

@@ -1,7 +1,8 @@
 # Synthesis
 
-A single agent merges every ready unit into one integration branch, gets that
-branch green and opens the PR. Launch it with `Agent`
+A single agent merges the ready units into one integration branch, gets that
+branch green and, at the end of the run, opens the PR. In waves mode it also
+runs between waves, merging and verifying without a PR. Launch it with `Agent`
 (`subagent_type: bmad-batch-synthesis`, `run_in_background: false`, no `model`).
 That agent runs on Opus with a 1-hour prompt cache, so its context survives the
 long verify runs. Its prompt is everything below the line, with the
@@ -10,11 +11,16 @@ placeholders filled in.
 There is no separate integration worktree, so no extra install competes with
 the workers at the start of the run:
 
-- **Parallel:** `<iwt>` is the worktree of the first unit in merge order, and
-  `<installed>` is that unit's branch, the revision its `node_modules` came
-  from. Synthesis starts `<ibranch>` there, on top of that unit.
-- **Lane:** `<iwt>` and `<ibranch>` are the lane's worktree and branch,
-  `<installed>` is `none`, and `<mode>` is `lane`.
+- **First merge of a parallel wave 1** (`<new branch>` = `yes`): `<iwt>` is
+  the worktree of the first unit in merge order, and `<installed>` is that
+  unit's branch, the revision its `node_modules` came from. Synthesis starts
+  `<ibranch>` there, on top of that unit.
+- **Any other synthesis** (`<new branch>` = `no`): `<iwt>` is already on
+  `<ibranch>`. `<installed>` is the revision its install came from, or `none`
+  after lanes only. The units to merge are the parallel wave just finished, or
+  none.
+- `<final>` is `yes` for the last synthesis of the run, which opens the PR,
+  and `no` between waves.
 
 Merge-script output, interface lines and the state file keep the agent's own
 reading small: it opens a spec or a file only where a check points at it.
@@ -28,7 +34,7 @@ Integration worktree: `<iwt>`. Work only inside it. Run every shell command as
 worktree. The one file outside it you may write is the state file
 `<state>`.
 
-Mode: `<mode>` (`parallel` or `lane`). Skill scripts: `<skill>/scripts`.
+New branch: `<new branch>`. Final: `<final>`. Skill scripts: `<skill>/scripts`.
 
 Run goal: <one paragraph from the approved split>
 
@@ -44,18 +50,19 @@ Read `<iwt>/AGENTS.md` first.
 
 ## 1. Merge
 
-**Parallel mode:** first run `cd <iwt> && git switch -c <ibranch>`. The first
-unit is then already in, so merge the others.
+**New branch `yes`:** first run `cd <iwt> && git switch -c <ibranch>`. The
+first unit is then already in, so merge the others.
 
-Run the merge script once, with the units after the first in order (in lane
-mode, with none: the units are already committed on `<ibranch>`, so it only
-runs the checks):
+Run the merge script once, with the units to merge in order: after the first
+when the branch is new, or every unit of the wave otherwise. With none to
+merge (lanes), the units are already committed on `<ibranch>`, so it only runs
+the checks:
 
 ```bash
 bash "<skill>/scripts/merge-units.sh" "<iwt>" [--installed <installed>] "<branch 2>:<title 2>" "<branch 3>:<title 3>" ...
 ```
 
-Leave out `--installed` in lane mode. The script merges with `--no-ff`, skips
+Leave out `--installed` when `<installed>` is `none`. The script merges with `--no-ff`, skips
 any branch already in `HEAD`, and stops at the first conflict with
 `CONFLICT <branch>` and the conflicted files (exit 3). Resolve that conflict so
 both units' intent survives: read both specs, but only the parts about the
@@ -128,9 +135,14 @@ tried, and the open decision. Then reply with `RESULT: stuck` and the same
 facts. If the answer comes late, a fresh synthesis agent picks up from that
 file instead of re-writing this whole context.
 
+**Final `no`:** when every check is green, skip sections 4 and 5. Update
+`<state>` with what is merged and verified, then reply with `RESULT:
+wave-green` in the reply format of section 6 (`PR: none`, `TICKETS: none`).
+The next wave branches off `<ibranch>` as you leave it, so commit everything.
+
 ## 4. Open the PR
 
-Once every check is green:
+Once every check is green and Final is `yes`:
 
 1. Load the `create-pr` skill (Skill tool) and follow it from
    `<iwt>`. Its precondition checks must pass. Push with
@@ -166,7 +178,7 @@ calls take up to a minute each.
 Reply with exactly these lines and nothing else:
 
 ```text
-RESULT: pr | stuck
+RESULT: pr | wave-green | stuck
 PR: <url, or none>
 TICKETS: <linked #ids; whether close-on-complete is on; or none>
 MERGED: <unit titles>

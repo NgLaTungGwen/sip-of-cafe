@@ -63,19 +63,26 @@ On first run the skill copies the three agents into the project's
 the shipped one is kept and reported, so after upgrading the plugin, replace
 the copies you haven't customised.
 
-### Lane or parallel, chosen automatically
+### Lane, parallel or waves, chosen automatically
 
-After the split, the orchestrator estimates each unit's worker time from its
-size (S, M or L), and compares two estimates:
+At the split, every unit gets a size and the units whose code it needs to
+build or test (`depends_on`, with the reason). `scripts/plan-waves.py` sorts
+the units into waves, where a wave holds the units whose dependencies are all
+in earlier waves. Each wave then runs the faster way for itself:
 
-- **lane:** the units take turns in one worktree on the run's branch, so
-  nothing is installed twice and nothing is merged;
-- **parallel:** one worktree per unit, all at once, then synthesis merges.
+- **lane:** units take turns in one worktree on the run's branch. Nothing is
+  installed twice and nothing is merged.
+- **parallel:** each unit gets its own worktree, branched from the run's
+  integration branch as the earlier waves left it, and synthesis merges the
+  wave and verifies it before the next wave starts.
 
-One unit always runs as a lane, and five or more always run in parallel.
-Between those, the faster estimate wins, with ties going to the lane; a busy
-machine raises the lane's margin. The approval table shows the choice and both
-estimates, and you can switch.
+No dependencies and enough units gives plain parallel; a chain or small units
+give plain lane; anything else is waves. For example, a chart kit and new
+contract fields that three other units import make two parallel waves,
+{1, 2} then {3, 4, 5}: about 450 minutes against 670 for lane. The approval
+table shows each unit's dependencies and the estimates for lane, parallel and
+waves. Unit times calibrate from recorded runs once a size has five
+measurements (first calibration: S 50, M 100, L 160 min).
 
 ### Where the time and the cache go
 

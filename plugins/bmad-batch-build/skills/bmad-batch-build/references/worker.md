@@ -1,9 +1,10 @@
 # Worker
 
 One worker per unit. It runs `bmad-build-auto` inside the unit's worktree and
-nowhere else. In parallel mode every unit has its own worktree and branch; in
-lane mode the units take turns in one worktree on the run's branch (see "Lane
-mode" below).
+nowhere else. A unit in a parallel wave has its own worktree and branch; the
+units of a lane wave take turns in one worktree on the run's branch (see "Lane
+mode" below). Plain parallel and plain lane runs are one-wave and all-lane
+cases of the same thing.
 
 ## Pinned to its worktree
 
@@ -43,6 +44,9 @@ code itself is written by the `haiku-implementer` agent that the worktree's
 - `<name>`: `<slug>-<n>`
 - `<wt>`: `<root>/.claude/worktrees/<name>`
 - `<branch>`: the unit's branch
+- `<base>`: the wave's base. For wave 1 that is `origin/main`, and the
+  `--base` argument is left out. For a later wave it is `<ibranch>` (a local
+  branch; worktrees share the repository)
 
 ```text
 You are a Build Auto worker for one unit of a BMAD batch build.
@@ -52,7 +56,7 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
 
 0. Prepare the worktree:
    a. As one foreground Bash call with `timeout: 600000`:
-      bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<name>" "<branch>" --no-install
+      bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<name>" "<branch>" --no-install [--base <base>]
       If it fails, reply with:
       SPEC: none
       STATUS: blocked
@@ -84,7 +88,9 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
 Intent:
 <the unit's self-contained intent: goal, scope, the files it owns, acceptance
 criteria in Given/When/Then, and the excerpt of the source material it came
-from. The worker sees nothing else.>
+from. The worker sees nothing else. In a later wave, start it with the
+"Already on the branch" list: each earlier unit's title, spec path and
+INTERFACES line, and the note that this unit builds on that code as it is.>
 ```
 
 ## Gate
@@ -103,7 +109,8 @@ It checks the spec status (`done`, `built` or `in-review`), and the workflow's
 own traces in the spec: `baseline_revision`, `<intent-contract>` and at least
 one `### <date> — Review pass` entry under `## Review Triage Log`. It also
 checks for a clean tree, the right branch, and at least one commit ahead of
-`origin/main` (or of the base passed as a fourth argument). Synthesis merges
+`origin/main` (or of the base passed as a fourth argument). In a later wave,
+pass the wave's base revision as the fourth argument. Synthesis merges
 the branch ref, so a worker that moved to another branch leaves nothing to
 merge.
 
@@ -114,11 +121,14 @@ merge.
 
 ## Lane mode
 
-The units run one after another in a single worktree, so nothing is merged and
-only one worktree is installed. The differences from parallel mode:
+The units of a lane wave run one after another in a single worktree, so
+nothing is merged and only one worktree is installed. The differences from a
+parallel unit:
 
 - `<name>` is `<slug>` and `<branch>` is the run's branch
   `jayson/<type>-<slug>` for every unit, so `<wt>` is the same for all of them.
+  In a run that already has `<iwt>` (a lane wave after a parallel one), `<wt>`
+  is `<iwt>` and every unit uses the later-unit prompt below.
 - Dispatch one worker at a time, in the order the split set, and wait for it.
   Before each dispatch, record `git -C <wt> rev-parse HEAD` (for the first
   unit, `origin/main`) as that unit's base.

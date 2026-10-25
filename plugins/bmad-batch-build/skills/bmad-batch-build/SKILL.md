@@ -1,6 +1,6 @@
 ---
 name: bmad-batch-build
-description: 'Orchestrate a BMAD batch build from a meeting transcript or pasted work items. Splits the material into independent units and, after the user approves the split, runs one bmad-build-auto worker per unit: in parallel worktrees for larger runs, or in turn in one worktree (lane) for small ones, chosen automatically. It also creates the Azure DevOps tickets (a User Story and one Task per unit, reusing any pasted work items). A synthesis agent then merges the results into one branch, gets it green, and opens one PR linked to those tickets. Use when the user says "batch build", "parallel build", "fan out bmad-build", "orchestrate the build", or hands over a transcript or a set of work items to implement together.'
+description: 'Orchestrate a BMAD batch build from a meeting transcript or pasted work items. Splits the material into independent units and, after the user approves the split, runs one bmad-build-auto worker per unit: in parallel worktrees, in turn in one worktree (lane), or in dependency waves that mix both, chosen automatically from the units' sizes and dependencies. It also creates the Azure DevOps tickets (a User Story and one Task per unit, reusing any pasted work items). A synthesis agent then merges the results into one branch, gets it green, and opens one PR linked to those tickets. Use when the user says "batch build", "parallel build", "fan out bmad-build", "orchestrate the build", or hands over a transcript or a set of work items to implement together.'
 ---
 
 # BMAD Batch Build
@@ -12,17 +12,21 @@ yourself.
 The flow is: input → split → mode → **user approves** → ADO tickets +
 worktrees + workers → gate → synthesis → one PR linked to the tickets.
 
-The mode is chosen automatically from the split (section 2, "Choose the
-mode"):
+The schedule is chosen automatically from the split's dependencies (section
+2, "Schedule the units"):
 
 - **parallel:** every unit gets its own worktree and all workers start
   together, then synthesis merges them.
 - **lane:** the units take turns in one worktree on the run's branch, so
-  nothing is installed twice and nothing is merged. Small runs finish sooner
-  this way and load the machine less.
+  nothing is installed twice and nothing is merged. Small runs and chains of
+  dependent units go this way.
+- **waves:** when some units need others' code to build, the units run in
+  waves. Each wave runs as a lane or in parallel, and later waves start from
+  the integration branch that already holds the earlier ones.
 
 The only planned checkpoint is the split approval. You also stop and ask in two
-other cases: when a worker doesn't build, and when synthesis reports `stuck`.
+other cases: when a worker doesn't build, and when synthesis reports `stuck`
+(after a wave too).
 
 Two rules shape the flow, because most of a run is waiting:
 
@@ -125,10 +129,14 @@ A unit is a piece of work that one worker can build and test on its own, from
   migrations, all `packages/contracts` changes and all lockfile changes. If
   several units need contract changes, the owner unit makes them and the other
   units' intents describe the agreed shape.
-- **No cap on the count, and no waves.** Split as finely as file ownership
-  allows. Every unit starts in the same message, and no unit is ever held back
-  for a later round. Each unit should be one session-sized build. A single
-  unit is fine: it runs as a lane of one.
+- **Record real dependencies, and only those.** When unit B can't build or
+  test without unit A's code (it imports A's new module or types at compile
+  time, or its tests run A's code), and an agreed interface can't stand in
+  for that code, B depends on A. Write `depends_on` with the reason. Prefer an
+  agreed interface wherever one works: a dependency moves B to a later wave.
+- **No cap on the count.** Split as finely as file ownership allows. Each unit
+  should be one session-sized build. A single unit is fine: it runs as a lane
+  of one.
 
 Heavy commands (installs, builds, full test suites, the synthesis verify) go
 through `scripts/heavy.sh`. It admits a command only while the machine has room
@@ -149,8 +157,10 @@ For every unit, write:
   - **S:** up to 3 files, with no migration and no new module;
   - **M:** 4 to 10 files;
   - **L:** more than 10 files, a new module, or a migration plus API plus UI.
-- a branch, `jayson/<type>-<slug>-<n>` (parallel mode only; a lane uses the
-  run's branch)
+- `depends_on`: the units whose code it needs to build or test, each with the
+  reason (for example "imports the chart kit types"), or none
+- a branch, `jayson/<type>-<slug>-<n>`, used when the unit runs in a parallel
+  wave; a unit in a lane wave works on the run's branch
 - `--apps`, if the unit touches `apps/`
 - the files or areas it owns
 - a self-contained intent: the goal, the scope, what's out of scope, acceptance
@@ -160,44 +170,38 @@ For every unit, write:
 
 The worker sees only its intent.
 
-### Choose the mode
+### Schedule the units
 
-Decide it yourself from the units; don't ask. Estimate each unit's worker time
-from its size: S 50 min, M 100 min, L 160 min. These numbers were measured
-when the worker installed before planning; the install now overlaps planning
-and the full suite overlaps review, so real times should come in lower. They
-are a first calibration, made on a 12-CPU, 32 GB machine; correct them when
-`scripts/runs-summary.py` shows other worker times. Every recorded run carries
-its machine's CPUs and RAM, so a slower machine gets its own figures.
+Decide it yourself from the units; don't ask. Write the plan file
+`<root>/.claude/worktrees/_runs/<slug>-plan.json`, in the format documented in
+`<skill>/scripts/plan-waves.py`, with each unit's id, title, size,
+`depends_on` and reason. Then run it, adding `--busy` when the machine is busy:
 
-```text
-lane     = sum(unit minutes) - 10 * (units - 1) + 30   # one preparation, units in turn, one verify
-parallel = max(unit minutes) + 80                       # all at once, then synthesis merges and verifies
+```bash
+n=$(ls ~/.cache/bmad-heavy/run.* 2>/dev/null | wc -l); [ "$n" -ge $(( $(nproc) / 3 )) ] && b=--busy || b=
+python "<skill>/scripts/plan-waves.py" "<root>/.claude/worktrees/_runs/<slug>-plan.json" $b
 ```
 
-- **1 unit:** lane.
-- **2 to 4 units:** lane when `lane <= parallel + margin`, otherwise parallel.
-  - The margin is 20 min.
-  - It is 40 min when the machine is already busy, meaning the running heavy
-    commands number a third of the CPU count or more (4 on 12 CPUs). Check
-    with
-    `n=$(ls ~/.cache/bmad-heavy/run.* 2>/dev/null | wc -l); [ "$n" -ge $(( $(nproc) / 3 )) ] && echo busy || echo free`.
-  - A tie goes to lane, because lane costs less, merges nothing and loads the
-    machine less.
-- **5 or more units:** parallel.
+It sorts the units into waves: a wave holds the units whose dependencies are
+all in earlier waves. Each wave then runs as a lane or in parallel, whichever
+is faster for that wave by more than a margin. The margin is 20 min, or 40 min
+on a busy machine, and a tie goes to lane, because lane costs less and merges
+nothing. The script estimates whole-run times for lane, parallel (only when no
+unit depends on another) and waves, and picks the mode:
 
-Examples:
+- **parallel:** one wave, run in parallel. No unit depends on another.
+- **lane:** every wave runs as a lane: one unit, small units, or a chain.
+- **waves:** anything else.
 
-| Units | Lane | Parallel | Result |
-|---|---|---|---|
-| 2 × S | 120 | 130 | lane |
-| 3 × S | 160 | 130 + 20 | parallel |
-| 2 × M | 220 | 180 + 20 | parallel |
-| L + S | 230 | 240 | lane |
+Unit times come from measured runs once a size has five measurements, and
+until then from the first calibration: S 50 min, M 100 min, L 160 min. The
+script writes the schedule back into the plan file and prints the **Mode**
+line for the approval table. Recording the run later matches each unit's
+measured time to its size, so the estimates calibrate themselves.
 
-In lane mode the units run in dependency order, owner of migrations and
-contracts first. Disjoint files and pinned interfaces still help the review,
-but a later unit may build directly on an earlier one.
+A worked example: units 1 (chart kit) and 2 (contract fields) are
+independent, and units 3, 4 and 5 import both. That makes two parallel waves,
+{1, 2} then {3, 4, 5}: about 450 min, against 670 min for lane.
 
 ### Tickets
 
@@ -229,14 +233,16 @@ acceptance criteria in brief. Above the table, give the story or stories (`#id`
 reused, or `new User Story: <title>`). List the open ambiguities underneath.
 Approving the split also approves creating the new tickets.
 
-Add a size column to the table, and one **Mode** line under it: the chosen
-mode and both estimates, for example
-`Mode: lane (≈120 min; parallel ≈130 min)`. This is information, not a
-question. The user can still switch modes by choosing "adjust".
+Add a size column and a **depends on** column (unit ids and the reason, or
+`-`) to the table. Under it, paste the **Mode** line that `plan-waves.py`
+printed: the chosen mode, every estimate, the wave order and the
+dependencies, for example
+`Mode: waves (≈450 min; lane ≈670 min, parallel not possible, waves ≈450 min). Order: {1,2} → {3,4,5}.`
+This is information, not a question. The user can still change the schedule,
+or a dependency, by choosing "adjust". Re-run the script after any change.
 
-Write the same line into the run file, with each unit's size. Sizes and
-estimates set against the measured times are how the mode constants get
-calibrated.
+Write the same line into the run file. The plan file keeps the sizes and the
+waves.
 
 Combining tasks is the one way the split loses parallelism. If you put more
 than one input task into a single unit, add a **Combined** line under the table
@@ -250,15 +256,17 @@ the two stop cases in sections 6 and 7.
 
 ## 4. Launch
 
-In parallel mode nothing waits on anything else. Each worker prepares its own
-worktree, starts its install in the background and plans while it runs, so
-units never wait on each other. There is no separate integration worktree:
-synthesis later works in the first unit's worktree, so no extra install
-competes with the workers.
+The run's integration branch is `<ibranch>` = `jayson/<type>-<slug>`. Its
+worktree `<iwt>` is the first worktree that holds it:
 
-In lane mode, steps 0 to 2 are the same, except that only the first unit's
-worker is sent, using the lane prompt in `references/worker.md`. Its worktree
-is `<root>/.claude/worktrees/<slug>`, on `jayson/<type>-<slug>`.
+- When wave 1 is a lane, `<iwt>` is `<root>/.claude/worktrees/<slug>`, which
+  the first unit's worker prepares on `<ibranch>`.
+- When wave 1 is parallel, `<iwt>` is the first unit's worktree. Synthesis
+  creates `<ibranch>` there when it merges wave 1. Plain parallel mode is this
+  case with one wave.
+
+There is never a separate integration worktree, so no extra install competes
+with the workers.
 
 0. Preflight, in one Bash call, before anything is created:
    ```bash
@@ -267,9 +275,9 @@ is `<root>/.claude/worktrees/<slug>`, on `jayson/<type>-<slug>`.
    ```
    Skip the Postgres check when `<root>/.env` has no `DATABASE_URL`, and the
    Docker check too when the project doesn't use Docker. If either is down,
-   notify and ask the user to start it, and check again before launching. Every worker's DB suite needs Postgres at
-   `127.0.0.1:55432`; a run that started with Docker down once stalled for
-   nearly five hours.
+   notify and ask the user to start it, and check again before launching.
+   Every worker's DB suite needs Postgres at `127.0.0.1:55432`; a run that
+   started with Docker down once stalled for nearly five hours.
 1. Fetch once with `git -C "<root>" fetch origin main --quiet`. Concurrent
    fetches into one `.git` race on `FETCH_HEAD`, which is why the scripts never
    fetch.
@@ -281,10 +289,10 @@ is `<root>/.claude/worktrees/<slug>`, on `jayson/<type>-<slug>`.
      The IDs are written back into that file. If the call fails, re-run it once;
      it creates only what is still missing. If it fails again, carry on with the
      build and report the error at the end. Tickets never block the code.
-   - **Every worker:** one foreground `Agent` call per unit, using the prompt in
+   - **Wave 1's workers:** one foreground `Agent` call per unit for a parallel
+     wave, or the first unit's worker for a lane wave, using the prompts in
      `<skill>/references/worker.md`. Each worker runs `bmad-build-auto`, which
-     starts its own review subagents, so the calls must stay in the
-     foreground.
+     starts its own review subagents, so the calls must stay in the foreground.
 
 The ticket call finishes long before the workers; its notification may arrive
 while they run. Just note it.
@@ -294,16 +302,35 @@ Each worktree gets its own `.env` that points at a private test database,
 run the DB suites side by side without deleting each other's rows. Never `cd`
 your own shell into a worktree.
 
-## 5. Wait for the workers
+## 5. Run the waves
 
-**Parallel:** all the `Agent` calls return together. Record each worker's reply
-in the run file, its `INTERFACES` line included: synthesis checks those against
-the agreed interfaces.
+Work through the waves in order. Within a wave:
 
-**Lane:** when a worker returns, record its reply and gate its unit straight
-away (section 6, with its base). Then send the next unit's worker with the
-lane prompt, whose intent lists the units already on the branch with their
-spec paths and `INTERFACES` lines. Go to synthesis after the last unit passes.
+- **Parallel wave:** all its `Agent` calls go in one message and return
+  together. Record each worker's reply in the run file, its `INTERFACES` line
+  included: synthesis checks those against the agreed interfaces. Then gate
+  every unit (section 6) against the wave's base.
+- **Lane wave:** send one worker at a time in `<iwt>`, with the lane prompt.
+  When a worker returns, record its reply and gate its unit straight away
+  (section 6, with its base) before sending the next.
+
+A wave's **base** is where its units start. For wave 1 that is `origin/main`.
+For a later wave it is `<ibranch>` as the previous wave left it: record
+`git -C <iwt> rev-parse HEAD` when the wave starts. Workers in a later
+parallel wave prepare their worktree from that base (`--base <ibranch>` in
+their step 0). Workers in any later wave get the "Already on the branch" list:
+each earlier unit's title, spec path and `INTERFACES` line.
+
+**Between waves.** Synthesis (section 7) runs with `<final>` = `no` after a
+parallel wave, to merge it, and before a parallel wave, so that the wave
+branches off a verified base. It merges what there is to merge, verifies
+`<ibranch>` and replies `RESULT: wave-green`. One synthesis covers both cases
+when a parallel wave follows another. Between two lane waves the unit gates
+are enough, as in a plain lane run. If the wave synthesis replies `stuck`,
+stop and ask before starting the next wave.
+
+After the last wave, run the final synthesis (`<final>` = `yes`), which opens
+the PR.
 
 **Turn budgets.** Each agent has a `maxTurns` budget in its agent file: worker
 300, Haiku coder 300, synthesis 400, about twice the longest run that
@@ -317,7 +344,8 @@ budget" as the reason. Section 6 then decides what happens next.
 Apply the gate in `references/worker.md` to every unit, in one Bash call with
 `scripts/check-unit.sh`, and record the results in the run file.
 
-- **Every unit is ready:** continue to synthesis.
+- **Every unit is ready:** continue (the next unit in a lane wave, or the
+  wave's synthesis or the next wave).
 - **Some units are not ready:** show which ones and why, with the spec paths.
   Ask whether to continue without them, re-dispatch them, or stop. When a unit
   failed only on workflow traces (no baseline, no intent contract, no review
@@ -329,7 +357,8 @@ Apply the gate in `references/worker.md` to every unit, in one Bash call with
   `git -C "<root>" branch -D "<branch>"` (the script's `-d` keeps an unmerged
   branch). Then send a fresh worker with the same, or a corrected, intent.
 - **A lane unit is not ready:** the lane stops there, because later units
-  build on it. Ask whether to:
+  build on it. A unit that later waves depend on stops the run the same way.
+  Ask whether to:
   - keep it marked unreviewed and continue with the next unit;
   - re-dispatch it: reset the lane to the unit's base with
     `git -C <wt> reset --hard <base>`, then send a fresh worker. This discards
@@ -338,22 +367,31 @@ Apply the gate in `references/worker.md` to every unit, in one Bash call with
 
 ## 7. Synthesis
 
-Read the ticket IDs from `<slug>-tickets.json`. If the ticket call is still
-running, wait for its notification. Then read `<skill>/references/synthesis.md`,
-fill in its placeholders, and launch one foreground `Agent` with that prompt.
-List the ready units in dependency order. If they have no dependencies, put the
-unit that owns migrations and contracts first. Give each unit its agreed
-interfaces from the split and its worker's `INTERFACES` line.
+Synthesis runs once at the end of every run (`<final>` = `yes`), and in
+waves mode also between waves (`<final>` = `no`, section 5). Each one is a
+fresh agent: a wave can take longer than its 1-hour cache.
 
-- **Parallel:** `<iwt>` is the first listed unit's worktree, `<installed>` its
-  branch, and `<ibranch>` is `jayson/<type>-<slug>`.
-- **Lane:** `<mode>` is `lane`, `<iwt>` and `<ibranch>` are the lane's
-  worktree and branch; synthesis then skips the merge.
+For the final one, read the ticket IDs from `<slug>-tickets.json`, and if the
+ticket call is still running, wait for its notification. Then read
+`<skill>/references/synthesis.md`, fill in its placeholders, and launch one
+foreground `Agent` with that prompt. List the units to merge in dependency
+order; with no dependencies, put the unit that owns migrations and contracts
+first. Give each unit its agreed interfaces from the split and its worker's
+`INTERFACES` line.
+
+- **To merge** are the ready units of the parallel wave just finished, or
+  none (a lane wave, or a verify before a parallel wave).
+- **`<new branch>`** is `yes` only for the first merge of a run whose wave 1
+  is parallel. Synthesis then creates `<ibranch>` in `<iwt>`, the first unit's
+  worktree, and `<installed>` is that unit's branch. Otherwise it is `no`, and
+  `<installed>` is the `<ibranch>` revision `<iwt>`'s install came from: the
+  wave's base, or `none` in a run that only had lanes.
 - `<state>` is `<root>/.claude/worktrees/_runs/<slug>-synthesis.md`, and
   `<tickets json>` is `<root>/.claude/worktrees/_runs/<slug>-tickets.json`.
 
 Then:
 
+- **`RESULT: wave-green`:** start the next wave.
 - **`RESULT: pr`:** go to step 8.
 - **`RESULT: stuck`:** show the failure and the decision it needs. Note the
   time with `date +%s`. When the user answers:
@@ -409,7 +447,7 @@ To clean up, run this for each worktree:
 bash "<skill>/scripts/remove-worktree.sh" "<root>" "<name>" "<branch>"
 ```
 
-In parallel mode the first unit's worktree is on the run's branch, so pass
+When wave 1 ran in parallel, the first unit's worktree is on the run's branch, so pass
 `jayson/<type>-<slug>` for it, then delete that unit's own branch with
 `git -C "<root>" branch -d <its branch>`.
 
