@@ -18,6 +18,11 @@ def med(values):
     return statistics.median(values) if values else None
 
 
+def machine(r):
+    hw = r.get("hardware") or {}
+    return f" [{hw.get('cpus', '?')} CPU, {hw.get('ram_gb', '?')} GB]" if hw else ""
+
+
 def fmt(v, unit=""):
     if v is None:
         return "-"
@@ -44,7 +49,7 @@ def main(args):
     by_version = collections.defaultdict(list)
     for row in rows:
         by_version[row.get("skill_version") or "?"].append(row)
-    head = (f"{'version':9} {'runs':>4} {'$/run':>6} {'wall-user':>9} {'slowest wkr':>11} {'synth':>6} "
+    head = (f"{'version':14} {'runs':>4} {'$/run':>6} {'wall-user':>9} {'slowest wkr':>11} {'synth':>6} "
             f"{'rest':>5} {'reviewed':>8} {'hi+med':>6} {'fix(merge)':>10} {'1h writes':>9} {'budget hit':>10}")
     if rows:
         lines += ["Medians per run (minutes exclude user wait)", head]
@@ -52,7 +57,7 @@ def main(args):
         units = sum(r["workers"] for r in rs)
         reviewed = sum(r["units_reviewed"] for r in rs)
         lines.append(
-            f"{version:9} {len(rs):4} {fmt(med(r['usd'] for r in rs), ''):>6} "
+            f"{version:14} {len(rs):4} {fmt(med(r['usd'] for r in rs), ''):>6} "
             f"{fmt(med(r['min_wall'] - r['min_user_wait'] for r in rs), 'm'):>9} "
             f"{fmt(med(r['min_slowest_worker'] for r in rs), 'm'):>11} {fmt(med(r['min_synthesis'] for r in rs), 'm'):>6} "
             f"{fmt(med(r['min_rest'] for r in rs), 'm'):>5} {f'{reviewed}/{units}':>8} "
@@ -63,10 +68,11 @@ def main(args):
         lines += ["", "Per run"]
         for r in sorted(rows, key=lambda r: r["start"]):
             lines.append(
-                f"  {r['start'][:10]} {r.get('project', '?'):14} {r['slug'][:28]:28} v{r.get('skill_version') or '?':6} "
+                f"  {r['start'][:10]} {r.get('project', '?'):14} {r['slug'][:28]:28} {r.get('skill_version') or '?':14} "
                 f"${r['usd']:6.1f} {r['min_wall'] - r['min_user_wait']:4}m {r['workers']:2} units, reviewed {r['units_reviewed']}"
                 f"{', BUDGET HIT ' + '/'.join(r['turn_budget_hit']) if r['turn_budget_hit'] else ''}"
-                f"{', no 1h-TTL writes' if r['mtok_w1h_subagents'] == 0 else ''}")
+                f"{', no 1h-TTL writes' if r['mtok_w1h_subagents'] == 0 else ''}"
+                f"{machine(r)}")
         lines += ["", "Checks: '1h writes' should be every run (otherwise the agents' cacheTtl did not apply);",
                   "'budget hit' should be 0 (otherwise raise maxTurns or look at that agent)."]
     text = "\n".join(lines) + "\n"

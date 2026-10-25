@@ -120,8 +120,9 @@ Heavy commands (installs, builds, full test suites, the synthesis verify) go
 through `scripts/heavy.sh`. It admits a command only while the machine has room
 for it, counting every session and run on this machine, so many runs can go at
 once without crashing; they queue instead. Waiting commands start in arrival
-order. CPU and RAM may still run high, and that is expected. Vitest is capped
-at 3 workers per suite.
+order. CPU and RAM may still run high, and that is expected. The limits follow
+the machine: one slot per CPU, a free-RAM check, and Vitest capped at a quarter
+of the CPUs per suite (3 on 12 CPUs).
 
 `scripts/heavy_hook.py` is an optional PreToolUse hook the user can enable. It
 routes a heavy command that an agent typed without `heavy.sh` through the
@@ -151,8 +152,9 @@ Decide it yourself from the units; don't ask. Estimate each unit's worker time
 from its size: S 50 min, M 100 min, L 160 min. These numbers were measured
 when the worker installed before planning; the install now overlaps planning
 and the full suite overlaps review, so real times should come in lower. They
-are a first calibration; correct them when `scripts/cost-report.py` shows
-other worker times.
+are a first calibration, made on a 12-CPU, 32 GB machine; correct them when
+`scripts/runs-summary.py` shows other worker times. Every recorded run carries
+its machine's CPUs and RAM, so a slower machine gets its own figures.
 
 ```text
 lane     = sum(unit minutes) - 10 * (units - 1) + 30   # one preparation, units in turn, one verify
@@ -162,9 +164,10 @@ parallel = max(unit minutes) + 80                       # all at once, then synt
 - **1 unit:** lane.
 - **2 to 4 units:** lane when `lane <= parallel + margin`, otherwise parallel.
   - The margin is 20 min.
-  - It is 40 min when the machine is already busy. Check with
-    `ls ~/.cache/bmad-heavy/run.* 2>/dev/null | wc -l`: four or more running
-    heavy commands means another session is busy.
+  - It is 40 min when the machine is already busy, meaning the running heavy
+    commands number a third of the CPU count or more (4 on 12 CPUs). Check
+    with
+    `n=$(ls ~/.cache/bmad-heavy/run.* 2>/dev/null | wc -l); [ "$n" -ge $(( $(nproc) / 3 )) ] && echo busy || echo free`.
   - A tie goes to lane, because lane costs less, merges nothing and loads the
     machine less.
 - **5 or more units:** parallel.

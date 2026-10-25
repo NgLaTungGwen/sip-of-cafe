@@ -62,8 +62,10 @@ fi
 # Vitest starts one worker per CPU by default. With several suites running at
 # once across worktrees and sessions that crashed workers, so every run in this
 # worktree, targeted ones included, is capped (dotenv puts these in process.env
-# before vitest reads them).
-printf '\nVITEST_MAX_FORKS=3\nVITEST_MAX_THREADS=3\n' >> "$wt/.env"
+# before vitest reads them). The cap is a quarter of the CPUs, at least 2, as in
+# heavy.sh: 3 on a 12-CPU machine.
+vt=$(( $(nproc 2>/dev/null || echo 8) / 4 )); [ "$vt" -lt 2 ] && vt=2
+printf '\nVITEST_MAX_FORKS=%s\nVITEST_MAX_THREADS=%s\n' "$vt" "$vt" >> "$wt/.env"
 
 scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 heavy="$scripts/heavy.sh" bg="$scripts/bg.sh"

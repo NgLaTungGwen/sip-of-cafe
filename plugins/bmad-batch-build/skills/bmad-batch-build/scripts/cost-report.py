@@ -2,6 +2,7 @@
 
 Usage: python cost-report.py <session.jsonl> [<session.jsonl> ...]
        python cost-report.py --record <slug> [--root <main checkout>]
+       python cost-report.py --collect
 
 --record is what the orchestrator runs at the end of every run. It finds the
 session that ran <slug> (the newest session log under ~/.claude/projects that
@@ -9,7 +10,12 @@ mentions the run file _runs/<slug>.md), writes the report to
 <root>/.claude/worktrees/_runs/<slug>-cost.txt, and appends one JSON row to
 ~/.claude/bmad-batch-runs/runs.jsonl (BMAD_RUNS_DIR overrides the folder), one
 row per run across every project, replacing an earlier row of the same run.
-scripts/runs-summary.py reads that file.
+Rows also carry the machine's CPUs and RAM. scripts/runs-summary.py reads that file.
+
+--collect records every session on this machine that ran the skill and has no
+current row: runs whose --record call was missed, crashed runs, and runs from
+before recording existed. Reports go to ~/.claude/bmad-batch-runs/reports/.
+--record runs it too, so each finished run sweeps up any that were missed.
 
 The main session is counted only from the skill invocation to the last
 synthesis Agent result, so unrelated work in the same session is excluded.
@@ -469,48 +475,104 @@ def invokes(line):
     return False
 
 
-def record(slug, root):
+def store_dir():
+    return os.environ.get("BMAD_RUNS_DIR") or os.path.expanduser("~/.claude/bmad-batch-runs")
+
+
+def load_rows():
+    path = os.path.join(store_dir(), "runs.jsonl")
+    rows = []
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                pass
+    return rows
+
+
+def save_row(row):
+    """Adds the row, replacing any earlier row of the same session."""
+    rows = [r for r in load_rows() if r.get("session") != row["session"]] + [row]
+    rows.sort(key=lambda r: r.get("start") or "")
+    os.makedirs(store_dir(), exist_ok=True)
+    path = os.path.join(store_dir(), "runs.jsonl")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("".join(json.dumps(r) + "\n" for r in rows))
+    return path
+
+
+def hardware():
+    """The machine the run used, so runs from different machines compare fairly."""
+    import platform
+    ram = None
+    try:
+        if os.path.exists("/proc/meminfo"):
+            ram = int(open("/proc/meminfo").read().split("MemTotal:")[1].split()[0]) // 1024 // 1024
+        elif sys.platform == "win32":
+            import ctypes
+
+            class MemStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            st = MemStatus()
+            st.dwLength = ctypes.sizeof(MemStatus)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st))
+            ram = round(st.ullTotalPhys / 1024 ** 3)
+        elif sys.platform == "darwin":
+            ram = int(os.popen("sysctl -n hw.memsize").read()) // 1024 ** 3
+    except Exception:  # hardware info is a nice-to-have
+        pass
+    return {"host": platform.node(), "os": platform.system(), "cpus": os.cpu_count(), "ram_gb": ram}
+
+
+def version_for(start):
+    """VERSION holds '<version> <release date>'. A session that started on or
+    after the release ran this version; an older one ran something earlier."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
+    if not os.path.exists(path):
+        return None
+    parts = open(path).read().split()
+    version, released = parts[0], (parts[1] if len(parts) > 1 else "")
+    return version if (start or "")[:10] >= released else f"before-{version}"
+
+
+def build_row(session, slug, project, mode):
     import contextlib
     import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        row = report([session])[0]
+    row.update({
+        "slug": slug, "project": project, "mode": mode,
+        "skill_version": version_for(row["start"]),
+        "turn_budget_hit": sorted(k for k, v in row["max_turns"].items() if v >= TURN_BUDGET.get(k, 10 ** 9)),
+        "hardware": hardware(),
+        "session_mtime": os.path.getmtime(session),
+        "recorded": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    })
+    return row, buf.getvalue()
+
+
+def record(slug, root):
     session = find_session(slug)
     if not session:
         print(f"record: no session log mentions _runs/{slug}.md")
         return 1
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        rows = report([session])
-    text = buf.getvalue()
     runs = os.path.join(root, ".claude", "worktrees", "_runs")
-    os.makedirs(runs, exist_ok=True)
-    with open(os.path.join(runs, f"{slug}-cost.txt"), "w", encoding="utf-8") as fh:
-        fh.write(text)
-    row = rows[0]
     run_file = os.path.join(runs, f"{slug}.md")
     mode = None
     if os.path.exists(run_file):
         m = re.search(r"^.*Mode:.*$", open(run_file, encoding="utf-8").read(), re.M)
         mode = m.group(0).strip() if m else None
-    version_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
-    row.update({
-        "slug": slug, "project": os.path.basename(os.path.normpath(root)), "mode": mode,
-        "skill_version": open(version_file).read().strip() if os.path.exists(version_file) else None,
-        "turn_budget_hit": sorted(k for k, v in row["max_turns"].items() if v >= TURN_BUDGET.get(k, 10 ** 9)),
-        "recorded": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-    })
-    store = os.environ.get("BMAD_RUNS_DIR") or os.path.expanduser("~/.claude/bmad-batch-runs")
-    os.makedirs(store, exist_ok=True)
-    path = os.path.join(store, "runs.jsonl")
-    kept = []
-    if os.path.exists(path):
-        for line in open(path, encoding="utf-8"):
-            try:
-                old = json.loads(line)
-            except ValueError:
-                continue
-            if (old.get("session"), old.get("slug")) != (row["session"], slug):
-                kept.append(line.rstrip("\n"))
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(kept + [json.dumps(row)]) + "\n")
+    row, text = build_row(session, slug, os.path.basename(os.path.normpath(root)), mode)
+    os.makedirs(runs, exist_ok=True)
+    with open(os.path.join(runs, f"{slug}-cost.txt"), "w", encoding="utf-8") as fh:
+        fh.write(text)
+    path = save_row(row)
     # The headline for the orchestrator's final report.
     print(f"recorded {slug}: ${row['usd']:.1f}, wall {row['min_wall']}m (user wait {row['min_user_wait']}m, "
           f"rest {row['min_rest']}m), {row['workers']} workers, reviewed {row['units_reviewed']}, "
@@ -520,9 +582,71 @@ def record(slug, root):
     return 0
 
 
+def session_info(path):
+    """(invoked, slug, project) for one session log."""
+    invoked, slug, cwd = False, None, None
+    with open(path, encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            if not invoked and invokes(line):
+                invoked = True
+            if cwd is None and '"cwd"' in line:
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except ValueError:
+                    pass
+            if slug is None and "_runs" in line:
+                m = re.search(r"_runs[/\\\\]+([\w.-]+?)\.md", line)
+                if m and not m.group(1).endswith(("-cost", "-synthesis", "-contracts", "-spec")):
+                    slug = m.group(1)
+    project = os.path.basename(os.path.normpath(cwd)) if cwd else os.path.basename(os.path.dirname(path))
+    return invoked, slug, project
+
+
+def collect(quiet=False):
+    """Records every session on this machine that ran the skill and has no
+    current row: missed --record calls, crashed runs and older runs alike.
+
+    A session written to in the last 15 minutes may still be running, so it
+    waits for the next collect. A session that grew after its row was written
+    (a resumed run) is recorded again.
+    """
+    rows = {r["session"]: r for r in load_rows()}
+    reports = os.path.join(store_dir(), "reports")
+    os.makedirs(reports, exist_ok=True)
+    now = dt.datetime.now().timestamp()
+    added = []
+    for path in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
+        session = os.path.basename(path)[:-6]
+        mtime = os.path.getmtime(path)
+        if now - mtime < 900:
+            continue
+        old = rows.get(session)
+        if old and old.get("session_mtime", 0) >= mtime - 1:
+            continue
+        invoked, slug, project = session_info(path)
+        if not invoked:
+            continue
+        try:
+            row, text = build_row(path, (old or {}).get("slug") or slug or session[:8], project, (old or {}).get("mode"))
+        except Exception as exc:  # one unreadable log must not stop the rest
+            print(f"collect: skipped {session[:8]}: {exc}")
+            continue
+        with open(os.path.join(reports, f"{session}.txt"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        save_row(row)
+        added.append(f"{row['start'][:10]} {project} {row['slug']}")
+    if not quiet or added:
+        print(f"collect: {len(added)} session(s) recorded" + "".join(f"\n  {a}" for a in added))
+    return 0
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     if args[:1] == ["--record"]:
         root = args[args.index("--root") + 1] if "--root" in args else os.getcwd()
-        sys.exit(record(args[1], root))
+        code = record(args[1], root)
+        collect(quiet=True)
+        sys.exit(code)
+    if args[:1] == ["--collect"]:
+        sys.exit(collect())
     report(args)

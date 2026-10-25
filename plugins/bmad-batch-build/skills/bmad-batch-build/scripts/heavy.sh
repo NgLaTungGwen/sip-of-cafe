@@ -14,8 +14,8 @@
 # The first command always starts, so nothing waits forever, and after
 # BMAD_HEAVY_MAX_WAIT seconds (default 1500) a command starts anyway with a
 # warning. Vitest is capped at VITEST_MAX_FORKS / VITEST_MAX_THREADS workers
-# (default 3; its own default is one per CPU, which is what crashed workers
-# when several suites ran at once).
+# (default a quarter of the CPUs, at least 2; its own default is one per CPU,
+# which is what crashed workers when several suites ran at once).
 #
 # Waiting commands start in arrival order. State lives in BMAD_HEAVY_DIR
 # (default ~/.cache/bmad-heavy): a wait.* ticket per waiting command and a
@@ -123,5 +123,7 @@ while :; do
   waited=$((waited + 5))
 done
 
-export VITEST_MAX_FORKS="${VITEST_MAX_FORKS:-3}" VITEST_MAX_THREADS="${VITEST_MAX_THREADS:-3}"
+# A quarter of the CPUs per suite, at least 2 (3 on a 12-CPU machine).
+vt=$(( $(nproc 2>/dev/null || echo 8) / 4 )); [ "$vt" -lt 2 ] && vt=2
+export VITEST_MAX_FORKS="${VITEST_MAX_FORKS:-$vt}" VITEST_MAX_THREADS="${VITEST_MAX_THREADS:-$vt}"
 bash -c "$cmd"

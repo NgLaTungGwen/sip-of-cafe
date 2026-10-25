@@ -187,7 +187,17 @@ Every run records itself: at the end the orchestrator runs
 and appends one row per run to `~/.claude/bmad-batch-runs/runs.jsonl`, across
 all projects. `scripts/runs-summary.py [--since YYYY-MM-DD]` compares the
 recorded runs by skill version (median cost and time, review coverage,
-findings, repairs, 1-hour cache, turn budgets).
+findings, repairs, 1-hour cache, turn budgets). `cost-report.py --collect`
+sweeps every session on the machine that ran the skill and records any without
+a row: missed records, crashed runs and runs from before recording existed.
+Each `--record` runs it too.
+
+The machine limits are not hardcoded. heavy.sh gives one slot per CPU and
+checks free RAM, Vitest gets a quarter of the CPUs per suite (at least 2), and
+the "machine is busy" test for the mode choice is a third of the CPUs. The
+worker-time estimates (S/M/L) were measured on a 12-CPU, 32 GB machine; every
+recorded run carries its machine's CPUs and RAM, so they can be recalibrated
+per machine.
 
 ### Requirements
 
