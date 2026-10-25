@@ -50,6 +50,7 @@ code itself is written by the `haiku-implementer` agent that the worktree's
 
 ```text
 You are a Build Auto worker for one unit of a BMAD batch build.
+Unit: <n>
 
 Project root: <wt>   (a git worktree on branch <branch>, which you create in step 0)
 Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the main checkout) or in another worktree.

@@ -374,13 +374,18 @@ fresh agent: a wave can take longer than its 1-hour cache.
 For the final one, read the ticket IDs from `<slug>-tickets.json`, and if the
 ticket call is still running, wait for its notification. Then read
 `<skill>/references/synthesis.md`, fill in its placeholders, and launch one
-foreground `Agent` with that prompt. List the units to merge in dependency
-order; with no dependencies, put the unit that owns migrations and contracts
-first. Give each unit its agreed interfaces from the split and its worker's
-`INTERFACES` line.
+foreground `Agent` with that prompt. Synthesis gets two lists:
 
-- **To merge** are the ready units of the parallel wave just finished, or
+- **Units in the run so far:** every ready unit of every wave up to now, in
+  dependency order, with its agreed interfaces from the split, its worker's
+  `INTERFACES` line and its Task. With no dependencies, put the unit that owns
+  migrations and contracts first. The final synthesis builds the PR, the
+  ticket links and the drift check from this list, so it must hold the whole
+  run, including a plain lane's units.
+- **To merge now:** the ready units of the parallel wave just finished, or
   none (a lane wave, or a verify before a parallel wave).
+
+The units left out are kept across waves too.
 - **`<new branch>`** is `yes` only for the first merge of a run whose wave 1
   is parallel. Synthesis then creates `<ibranch>` in `<iwt>`, the first unit's
   worktree, and `<installed>` is that unit's branch. Otherwise it is `no`, and

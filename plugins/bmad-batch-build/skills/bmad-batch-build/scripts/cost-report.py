@@ -198,7 +198,8 @@ def run(session_path):
     edits = collections.Counter()
     waits = collections.defaultdict(lambda: [0, 0.0])
     spans = collections.defaultdict(list)
-    quality = {"workers": [], "fix_merge": 0, "max_turns": collections.Counter(), "worker_spans": []}
+    quality = {"workers": [], "fix_merge": 0, "max_turns": collections.Counter(), "worker_spans": [],
+               "busy_iv": []}
     ivals = collections.defaultdict(list)
     lines = load(session_path)
     s, e = main_span(lines)
@@ -222,12 +223,16 @@ def run(session_path):
         if span:
             spans[lab].append((ts(span[1]) - ts(span[0])).total_seconds())
             ends.setdefault(lab, []).append(span[1])
+            if lab in ("worker", "synthesis"):
+                quality["busy_iv"].append((ts(span[0]), ts(span[1])))
             if lab == "worker":
                 # The worktree the worker ran in names its unit (<slug>-<n>), or
                 # the shared lane worktree (<slug>); see unit_minutes().
                 m = re.search(r"Project root: (\S+)", json.dumps(sub[0]) if sub else "")
                 name = re.split(r"[\\/]+", m.group(1).rstrip("\\/"))[-1] if m else None
-                quality["worker_spans"].append({"wt": name, "start": span[0],
+                u = re.search(r"Unit: (\d+)", json.dumps(sub[0]) if sub else "")
+                quality["worker_spans"].append({"wt": name, "unit": int(u.group(1)) if u else None,
+                                                "start": span[0],
                                                 "min": round((ts(span[1]) - ts(span[0])).total_seconds() / 60)})
         acc[lab]["agents"] += 1
     # Synthesis usually runs in the background, so its Agent result returns at
@@ -339,6 +344,9 @@ def report(paths):
               f"{tok_in / 1e6:8.1f} {tok_out / 1e3:8.0f}")
         ask = acc["main"]["user_wait"]
         wall, slowest, synth = spans["main"][0], max(spans["worker"], default=0), sum(spans["synthesis"])
+        # Time no worker or synthesis was running: the split, the gates, waits
+        # between waves or lane units, and stalls. Correct for every mode.
+        rest_s = max(wall - ask - union(quality["busy_iv"]), 0)
         q = quality["workers"]
         scored_q = [u for u in q if u["high"] is not None or u["medium"] is not None]
         rows.append({
@@ -350,7 +358,7 @@ def report(paths):
             "mtok_w1h_subagents": round(sum(v["tok_w1h"] for k, v in acc.items() if k != "main") / 1e6, 2),
             "min_wall": round(wall / 60), "min_user_wait": round(ask / 60),
             "min_slowest_worker": round(slowest / 60), "min_synthesis": round(synth / 60),
-            "min_rest": round(max(wall - ask - slowest - synth, 0) / 60),
+            "min_rest": round(rest_s / 60),
             "workers": acc["worker"]["agents"],
             "units_reviewed": sum(u["reviewed"] for u in q), "units_haiku": sum(u["haiku"] for u in q),
             "first_review_high_medium": round(sum((u["high"] or 0) + (u["medium"] or 0) for u in scored_q) / len(scored_q), 1) if scored_q else None,
@@ -369,7 +377,7 @@ def report(paths):
             } for lab, v in acc.items() if not lab.startswith("_") and v["turns"]},
         })
         timing.append((os.path.basename(p)[:8], spans["main"][0], ask, max(spans["worker"], default=0),
-                       sum(spans["synthesis"]), tok_in + tok_out, sum(usd.values())))
+                       sum(spans["synthesis"]), tok_in + tok_out, sum(usd.values()), rest_s))
     import statistics
     total = sum(cost(v) for v in grand.values())
     n = max(len(paths), 1)
@@ -392,18 +400,17 @@ def report(paths):
     # includes the user's time at the split approval (the "user wait" column).
     print("Timing per run (m = minutes)")
     print(f"{'session':10} {'wall':>6} {'user wait':>9} {'wall-user':>9} {'slowest wkr':>11} {'synthesis':>9} {'rest':>9} {'Mtok/run':>8} {'Mtok/$':>7}")
-    for name, wall, ask, worker, synth, tk, usd in timing:
-        rest = max(wall - ask - worker - synth, 0)
+    for name, wall, ask, worker, synth, tk, usd, rest in timing:
         print(f"{name:10} {mins(wall):>6} {mins(ask):>9} {mins(wall - ask):>9} {mins(worker):>11} {mins(synth):>9} "
               f"{mins(rest):>9}{' !' if rest > 3600 else '  '}{tk / 1e6:6.1f} {tk / 1e6 / usd if usd else 0:7.1f}")
     if timing:
         for label, f in (("average", statistics.mean), ("median", statistics.median)):
             v = [f([t[i] for t in timing]) for i in range(1, 5)]
             nu = f([t[1] - t[2] for t in timing])
-            rest = f([max(t[1] - t[2] - t[3] - t[4], 0) for t in timing])
+            rest = f([t[7] for t in timing])
             print(f"{label:10} {mins(v[0]):>6} {mins(v[1]):>9} {mins(nu):>9} {mins(v[2]):>11} {mins(v[3]):>9} {mins(rest):>9}")
-    print("rest = wall - user wait - slowest worker - synthesis: the split and Explore, preflight, tickets, the gate,\n"
-          "lane units after the first, and any stall (a permission prompt nobody answered, a session left idle).\n"
+    print("rest = wall - user wait - time any worker or synthesis ran: the split and Explore, preflight, tickets, gates,\n"
+          "waits between units and waves, and any stall (a permission prompt nobody answered, a session left idle).\n"
           "'!' marks rest over an hour; look at the main session's gaps for that run.")
 
     print("\nTool wait time (tool_use -> tool_result). 'total' sums every call; 'union' counts time\n"
@@ -578,10 +585,11 @@ def build_row(session, slug, project, mode):
 
 def unit_minutes(row, slug, root):
     """Each unit's size and worker minutes, from the run's plan file, so
-    plan-waves.py can calibrate S/M/L from real runs. A unit is matched by its
-    worktree, <slug>-<n>; units that shared the lane worktree <slug> are
-    matched in the order they ran. Returns None when they can't be matched
-    one to one (no plan file, or a unit was dispatched twice)."""
+    plan-waves.py can calibrate S/M/L from real runs. A worker is matched to
+    its unit by the `Unit: <n>` line of its prompt, or else by its worktree
+    name, <slug>-<n>; a lane worker without the line can't be matched. When a
+    unit was dispatched twice, the last worker counts. Returns None without a
+    plan file."""
     path = os.path.join(root or "", ".claude", "worktrees", "_runs", f"{slug}-plan.json")
     if not root or not os.path.exists(path):
         return None
@@ -590,22 +598,15 @@ def unit_minutes(row, slug, root):
     except ValueError:
         return None
     size = {u["id"]: u.get("size") for u in plan.get("units", [])}
-    lane_ids = [i for w in plan.get("waves", []) if w.get("run") == "lane" for i in w["units"]]         or [u["id"] for u in plan.get("units", [])]
-    out, shared = [], []
-    for s in row.get("worker_spans", []):
-        m = re.fullmatch(re.escape(slug) + r"-(\d+)", s.get("wt") or "")
-        if m and int(m.group(1)) in size:
-            out.append({"id": int(m.group(1)), "size": size[int(m.group(1))], "min": s["min"]})
-        elif s.get("wt") == slug:
-            shared.append(s)
-    shared.sort(key=lambda s: s["start"])
-    if shared:
-        if len(shared) > len(lane_ids):
-            return None
-        out += [{"id": i, "size": size.get(i), "min": s["min"]} for i, s in zip(lane_ids, shared)]
-    if len({u["id"] for u in out}) != len(out):
-        return None
-    return out or None
+    by_unit = {}
+    for s in sorted(row.get("worker_spans", []), key=lambda s: s["start"]):
+        unit = s.get("unit")
+        if unit is None:
+            m = re.fullmatch(re.escape(slug) + r"-(\d+)", s.get("wt") or "")
+            unit = int(m.group(1)) if m else None
+        if unit in size:
+            by_unit[unit] = {"id": unit, "size": size[unit], "min": s["min"]}
+    return [by_unit[k] for k in sorted(by_unit)] or None
 
 
 def record(slug, root):

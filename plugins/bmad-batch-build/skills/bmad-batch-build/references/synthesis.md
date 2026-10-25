@@ -38,12 +38,18 @@ New branch: `<new branch>`. Final: `<final>`. Skill scripts: `<skill>/scripts`.
 
 Run goal: <one paragraph from the approved split>
 
-Units to merge, in this order:
-<for each unit: n. <branch> | <title> | spec <SPEC path> | owns <files/areas> | agreed <interfaces from the split> | built <the worker's INTERFACES line>>
+Units in the run so far, in dependency order. This is the whole run, every
+earlier wave included; the PR, the ticket links and the drift check cover all
+of them:
+<for each ready unit: n. <branch> | <title> | spec <SPEC path> | owns <files/areas> | agreed <interfaces from the split> | built <the worker's INTERFACES line>>
 
-Units left out (they did not build): <list with blocking condition, or "none">
+To merge now, in this order: <the branches of the parallel wave just finished,
+or "none" when everything is already on <ibranch>>
 
-ADO tickets: plan file `<tickets json>`; stories <#ids>; per merged unit
+Units left out (they did not build), from every wave so far: <list with
+blocking condition, or "none">
+
+ADO tickets: plan file `<tickets json>`; stories <#ids>; per unit
 <unit n: #task id>. If ticket creation failed: "none: <error>".
 
 Read `<iwt>/AGENTS.md` first.
@@ -53,10 +59,10 @@ Read `<iwt>/AGENTS.md` first.
 **New branch `yes`:** first run `cd <iwt> && git switch -c <ibranch>`. The
 first unit is then already in, so merge the others.
 
-Run the merge script once, with the units to merge in order: after the first
-when the branch is new, or every unit of the wave otherwise. With none to
-merge (lanes), the units are already committed on `<ibranch>`, so it only runs
-the checks:
+Run the merge script once, with the "To merge now" branches in order: after
+the first when the branch is new, or all of them otherwise. With none to
+merge, the units are already committed on `<ibranch>`, so it only runs the
+checks:
 
 ```bash
 bash "<skill>/scripts/merge-units.sh" "<iwt>" [--installed <installed>] "<branch 2>:<title 2>" "<branch 3>:<title 3>" ...
@@ -88,7 +94,7 @@ Then the checks only you can do, which parallel branches have broken here
 before:
 
 - **Agreed interfaces.** Compare every unit's `agreed` and `built` interfaces
-  above. Start with any marked `CHANGED`, and then check that each provider and
+  above, earlier waves included. Start with any marked `CHANGED`, and then check that each provider and
   consumer match exactly (routes, payloads, types and method signatures). Fix
   whichever side drifted from the agreed shape.
 - **Duplicate or overlapping methods.** Two units may each add the same port,
