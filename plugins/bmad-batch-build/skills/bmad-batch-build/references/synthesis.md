@@ -111,7 +111,7 @@ While fixing, re-run only what failed: the failing test files
 (`cd api && npx vitest run <files>`, `cd apps && bun test <files>`), or the one
 check that failed. Run the full block above once more after the last fix,
 before the PR. If a check is moved to the background, wait for it with a
-bounded poll (`timeout 540 bash -c 'until grep -q "<done marker>" <log>; do sleep 15; done'`),
+bounded poll (`timeout 240 bash -c 'until grep -q "<done marker>" <log>; do sleep 15; done'`),
 never an unbounded `until ... sleep` loop.
 
 Tests alone are not enough. In this repo vitest can pass while typecheck fails.

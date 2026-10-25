@@ -103,7 +103,19 @@ waits off the critical path and out of large contexts:
   1-hour cache has expired, a fresh agent resumes from that file.
 
 `bg.sh run|wait` carries the background commands; their logs sit in the
-worktree's git dir, so the tree stays clean for the gate.
+worktree's git dir, so the tree stays clean for the gate. Every wait returns
+within 4 minutes, under the default 5-minute cache TTL that the coder and the
+reviewers use, so a wait never expires their cache.
+
+Each check has one owner. The Haiku coder runs the targeted tests (with a
+compact reporter) and the typechecks of what it touched, after every pass. The
+worker doesn't repeat them; it runs only the full suite, once. Only synthesis
+builds.
+
+Each agent file sets a `maxTurns` budget: worker 300, coder 300, synthesis
+400, about twice the longest run that finished. A stuck agent stops there
+instead of running up the bill. Claude Code has no per-agent cost cap, so the
+turn budget is the limit.
 
 ### Many runs on one machine
 
@@ -163,7 +175,12 @@ unreviewed, or leave it out.
 tokens per role, time per role, tool waits, cache rewrites after idle gaps,
 first-review findings per unit, and synthesis repair commits. A gap counts as
 an idle rewrite when it beats the TTL the write used: 5 minutes, or 1 hour for
-the worker and synthesis agents.
+the worker and synthesis agents. That figure is an upper bound, because a write
+after a gap also holds new content. The report gives the median cost per run
+and the mean without outliers (over twice the median cost or time), and counts
+parallel tool calls once ("union"). It splits uncached input from output. It
+also explains the "rest" time that is not workers or synthesis, and flags any
+over an hour.
 
 ### Requirements
 

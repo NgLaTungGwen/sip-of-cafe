@@ -287,6 +287,13 @@ away (section 6, with its base). Then send the next unit's worker with the
 lane prompt, whose intent lists the units already on the branch with their
 spec paths and `INTERFACES` lines. Go to synthesis after the last unit passes.
 
+**Turn budgets.** Each agent has a `maxTurns` budget in its agent file: worker
+300, Haiku coder 300, synthesis 400, about twice the longest run that
+finished. A budget stops a stuck agent; it isn't meant to be hit. A worker
+reply without its `SPEC:`/`STATUS:` lines means the worker ran out. Gate the
+unit anyway, because its branch may hold usable commits, and record "turn
+budget" as the reason. Section 6 then decides what happens next.
+
 ## 6. Gate
 
 Apply the gate in `references/worker.md` to every unit, in one Bash call with
@@ -339,6 +346,10 @@ Then:
     one line at the top: `Resume: read <state> first. The merges and the
     repairs it lists are committed on <ibranch>. The user's decision: <answer>.
     Go on from section 3.`
+- **No `RESULT:` line:** synthesis ran out of turns. Treat it as stuck. If
+  `<state>` doesn't exist, the resume line says `Resume: read
+  git log --oneline origin/main..<ibranch> first; the merges and repairs it
+  shows are committed.` instead.
 
 ## 8. Report
 

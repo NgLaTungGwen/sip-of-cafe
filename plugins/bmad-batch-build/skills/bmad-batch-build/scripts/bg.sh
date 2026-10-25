@@ -8,8 +8,10 @@
 # command and writes <name>.log and then <name>.rc into the worktree's private
 # git dir (<git dir>/bmad/), so the working tree stays clean for the gate.
 #
-# `wait` returns as soon as <name>.rc exists, or after <seconds> (default 540,
-# under the Bash tool's 600 s limit). It prints one line, and exits:
+# `wait` returns as soon as <name>.rc exists, or after <seconds> (default 240).
+# Four minutes keeps every wait under the default 5-minute prompt-cache TTL,
+# which the Haiku coder and the reviewers use, and which every agent falls
+# back to when the 1-hour TTL does not apply. Calling again is cheap. It prints one line, and exits:
 #   0  "<name>: ok"
 #   1  "<name>: failed (rc N)" followed by the last 40 lines of the log
 #   2  "<name>: still running", so call it again
@@ -37,7 +39,7 @@ case $mode in
     exit "$code"
     ;;
   wait)
-    limit=${4:-540} waited=0
+    limit=${4:-240} waited=0
     until [ -f "$rc" ]; do
       # Give a run that was launched just now 30 s to write its pid.
       if [ ! -f "$dir/$name.pid" ] && [ "$waited" -ge 30 ]; then

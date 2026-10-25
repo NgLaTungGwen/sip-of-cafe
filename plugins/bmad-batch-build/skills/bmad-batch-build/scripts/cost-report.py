@@ -83,9 +83,11 @@ def wait_kind(block):
     return block["name"]
 
 
-def profile(lines, lab, acc, edits, waits):
+def profile(lines, lab, acc, edits, waits, spans=None):
     """Adds token and cost totals to acc[lab], and tool waits to waits.
 
+    spans, when given, collects each tool call's (start, end) per (lab, kind),
+    so parallel calls can be counted once (see union()).
     Returns (first, last) timestamps of the agent, or None.
     """
     calls = {}
@@ -99,24 +101,33 @@ def profile(lines, lab, acc, edits, waits):
                     t0, kind = pending.pop(b["tool_use_id"])
                     waits[(lab, kind)][0] += 1
                     waits[(lab, kind)][1] += (ts(x["timestamp"]) - ts(t0)).total_seconds()
+                    if spans is not None:
+                        spans[(lab, kind)].append((ts(t0), ts(x["timestamp"])))
             continue
         if x.get("type") != "assistant" or not isinstance(m, dict) or m.get("model") == "<synthetic>":
             continue
         for b in m.get("content", []) if isinstance(m.get("content"), list) else []:
             if b.get("type") == "tool_use" and x.get("timestamp"):
                 pending[b["id"]] = (x["timestamp"], wait_kind(b))
-        if "usage" in m and m["id"] not in calls:
-            calls[m["id"]] = [x["timestamp"], m["model"], m["usage"], None]
+        # One message is logged as one line per content block, each carrying
+        # usage; only the last line has the final output count, so keep the
+        # first timestamp and the last usage.
+        if "usage" in m:
+            if m["id"] in calls:
+                calls[m["id"]][2] = m["usage"]
+            else:
+                calls[m["id"]] = [x["timestamp"], m["model"], m["usage"], set()]
         for b in m.get("content", []) if isinstance(m.get("content"), list) else []:
             if b.get("type") == "tool_use":
                 if m.get("id") in calls:
-                    calls[m["id"]][3] = wait_kind(b)
+                    calls[m["id"]][3].add(wait_kind(b))
                 if b["name"] in ("Edit", "Write") and lab == "worker":
                     p = b["input"].get("file_path", "").replace("\\", "/")
                     edits["spec/output" if re.search(r"_bmad|\.md$", p) else "source"] += 1
     prev = None
     c = acc[lab]
-    for t, model, u, tool in sorted(calls.values()):
+    for t, model, u, tools in sorted(calls.values(), key=lambda c: c[0]):
+        tool = " + ".join(sorted(tools)) or "-"
         pin, pout, pcr = price(model)
         cw = u.get("cache_creation_input_tokens", 0)
         w1 = (u.get("cache_creation") or {}).get("ephemeral_1h_input_tokens", 0)
@@ -128,10 +139,13 @@ def profile(lines, lab, acc, edits, waits):
         c["tok_out"] += out
         c["usd_write"] += cw_usd
         c["usd_read"] += cr * pcr / 1e6
-        c["usd_out"] += out * pout / 1e6 + u.get("input_tokens", 0) * pin / 1e6
+        c["usd_out"] += out * pout / 1e6
+        c["usd_in"] += u.get("input_tokens", 0) * pin / 1e6
         c["turns"] += 1
         # The cache expired if the gap beat the TTL the write used: 5 min, or
         # 1 h for agents with cacheTtl 1h (they re-write as 1h after a gap).
+        # An upper bound: a write after a long gap is counted whole, even when
+        # part of it would have been written anyway (new tool output).
         gap = (ts(t) - ts(prev[0])).total_seconds() if prev else 0
         if gap > (3600 if w1 else 300) and cw > 2000:
             c["usd_idle"] += cw_usd
@@ -140,17 +154,38 @@ def profile(lines, lab, acc, edits, waits):
     return (stamps[0], stamps[-1]) if stamps else None
 
 
+def cost(v):
+    return v["usd_write"] + v["usd_read"] + v["usd_out"] + v["usd_in"]
+
+
+def union(intervals):
+    """Seconds covered by a list of (start, end), counting overlaps once."""
+    total, cur = 0.0, None
+    for a, b in sorted(intervals):
+        if cur and a <= cur[1]:
+            cur[1] = max(cur[1], b)
+            continue
+        if cur:
+            total += (cur[1] - cur[0]).total_seconds()
+        cur = [a, b]
+    return total + ((cur[1] - cur[0]).total_seconds() if cur else 0)
+
+
 def run(session_path):
-    """Returns (acc, edits, start, waits, spans); spans maps role -> list of seconds."""
+    """Returns (acc, edits, start, waits, spans, quality, ivals).
+
+    spans maps role -> list of seconds; ivals maps (role, kind) -> tool-call intervals.
+    """
     base = session_path[:-6]
     acc = collections.defaultdict(collections.Counter)
     edits = collections.Counter()
     waits = collections.defaultdict(lambda: [0, 0.0])
     spans = collections.defaultdict(list)
     quality = {"workers": [], "fix_merge": 0}
+    ivals = collections.defaultdict(list)
     lines = load(session_path)
     s, e = main_span(lines)
-    main_ts = profile(lines[s:e], "main", acc, edits, waits)
+    main_ts = profile(lines[s:e], "main", acc, edits, waits, ivals)
     ends = {}
     acc["main"]["agents"] += 1
     for f in glob.glob(base + "/subagents/*.jsonl"):
@@ -164,7 +199,7 @@ def run(session_path):
             quality["fix_merge"] += sum(1 for b in tool_uses(sub) if b["name"] == "Bash"
                                         and "fix(merge)" in b["input"].get("command", "")
                                         and "commit" in b["input"].get("command", ""))
-        span = profile(sub, lab, acc, edits, waits)
+        span = profile(sub, lab, acc, edits, waits, ivals)
         if span:
             spans[lab].append((ts(span[1]) - ts(span[0])).total_seconds())
             ends.setdefault(lab, []).append(span[1])
@@ -191,7 +226,7 @@ def run(session_path):
     start = main_ts[0] if main_ts else ""
     end = max([main_ts[1]] + ends.get("synthesis", [])) if main_ts else ""
     spans["main"].append((ts(end) - ts(start)).total_seconds() if main_ts else 0)
-    return acc, edits, start, waits, spans, quality
+    return acc, edits, start, waits, spans, quality, ivals
 
 
 def tool_uses(lines):
@@ -249,12 +284,15 @@ if __name__ == "__main__":
     idle = collections.Counter()
     edits = collections.Counter()
     all_waits = collections.defaultdict(lambda: [0, 0.0])
+    all_union = collections.Counter()
     timing = []
     units = []
     fix_merge = []
-    print(f"{'session':10} {'date':10} {'workers':>7} {'$total':>7} {'$main':>6} {'$work':>6} {'$rev':>5} {'$haiku':>6} {'$synth':>6} {'$idle':>6} {'Mtok in':>8} {'Ktok out':>8}")
+    print(f"{'session':10} {'date':10} {'workers':>7} {'$total':>7} {'$main':>6} {'$work':>6} {'$rev':>5} {'$haiku':>6} {'$synth':>6} {'$idle≤':>6} {'Mtok in':>8} {'Ktok out':>8}")
     for p in sys.argv[1:]:
-        acc, ed, start, waits, spans, quality = run(p)
+        acc, ed, start, waits, spans, quality, ivals = run(p)
+        for k, iv in ivals.items():
+            all_union[k] += union(iv)
         units += quality["workers"]
         fix_merge.append(quality["fix_merge"])
         edits.update(ed)
@@ -262,7 +300,7 @@ if __name__ == "__main__":
         for k, (n, sec) in waits.items():
             all_waits[k][0] += n
             all_waits[k][1] += sec
-        usd = {k: v["usd_write"] + v["usd_read"] + v["usd_out"] for k, v in acc.items()}
+        usd = {k: cost(v) for k, v in acc.items()}
         for k, v in acc.items():
             grand[k].update(v)
         tok_in = sum(v["tok_in"] for v in acc.values())
@@ -274,39 +312,57 @@ if __name__ == "__main__":
         ask = acc["main"]["user_wait"]
         timing.append((os.path.basename(p)[:8], spans["main"][0], ask, max(spans["worker"], default=0),
                        sum(spans["synthesis"]), tok_in + tok_out, sum(usd.values())))
-    total = sum(v["usd_write"] + v["usd_read"] + v["usd_out"] for v in grand.values())
+    import statistics
+    total = sum(cost(v) for v in grand.values())
     n = max(len(sys.argv) - 1, 1)
     tok = sum(v["tok_in"] + v["tok_out"] for v in grand.values())
-    print(f"\nTOTAL ${total:.0f}, {tok / 1e6:.0f} Mtok; per run ${total / n:.1f}, {tok / n / 1e6:.1f} Mtok\n")
+    print(f"\nTOTAL ${total:.0f}, {tok / 1e6:.0f} Mtok; per run mean ${total / n:.1f}, {tok / n / 1e6:.1f} Mtok")
+    # Means hide outliers (one stuck run once cost $449 alone), so also give the
+    # median and the mean without runs above twice the median cost or twice the
+    # median time excluding user wait.
+    if timing:
+        med_usd = statistics.median(t[6] for t in timing)
+        med_net = statistics.median(t[1] - t[2] for t in timing)
+        outliers = sorted(t[0] for t in timing if t[6] > 2 * med_usd or (med_net and t[1] - t[2] > 2 * med_net))
+        kept = [t[6] for t in timing if t[0] not in outliers]
+        print(f"per run median ${med_usd:.1f}; mean without outliers "
+              f"{'$%.1f' % statistics.mean(kept) if kept else '-'} over {len(kept)} runs; "
+              f"outliers (>2x median cost or time): {', '.join(outliers) or 'none'}")
+    print()
 
     # Wall-clock runs from the skill invocation to the synthesis reply, so it
-    # includes the user's time at the split approval (the "approval" column).
+    # includes the user's time at the split approval (the "user wait" column).
     print("Timing per run (m = minutes)")
-    print(f"{'session':10} {'wall':>6} {'user wait':>9} {'wall-user':>9} {'slowest wkr':>11} {'synthesis':>9} {'orchestr.':>9} {'Mtok/run':>8} {'Mtok/$':>7}")
+    print(f"{'session':10} {'wall':>6} {'user wait':>9} {'wall-user':>9} {'slowest wkr':>11} {'synthesis':>9} {'rest':>9} {'Mtok/run':>8} {'Mtok/$':>7}")
     for name, wall, ask, worker, synth, tk, usd in timing:
         rest = max(wall - ask - worker - synth, 0)
         print(f"{name:10} {mins(wall):>6} {mins(ask):>9} {mins(wall - ask):>9} {mins(worker):>11} {mins(synth):>9} "
-              f"{mins(rest):>9} {tk / 1e6:8.1f} {tk / 1e6 / usd if usd else 0:7.1f}")
+              f"{mins(rest):>9}{' !' if rest > 3600 else '  '}{tk / 1e6:6.1f} {tk / 1e6 / usd if usd else 0:7.1f}")
     if timing:
-        import statistics
         for label, f in (("average", statistics.mean), ("median", statistics.median)):
             v = [f([t[i] for t in timing]) for i in range(1, 5)]
             nu = f([t[1] - t[2] for t in timing])
-            print(f"{label:10} {mins(v[0]):>6} {mins(v[1]):>9} {mins(nu):>9} {mins(v[2]):>11} {mins(v[3]):>9}")
+            rest = f([max(t[1] - t[2] - t[3] - t[4], 0) for t in timing])
+            print(f"{label:10} {mins(v[0]):>6} {mins(v[1]):>9} {mins(nu):>9} {mins(v[2]):>11} {mins(v[3]):>9} {mins(rest):>9}")
+    print("rest = wall - user wait - slowest worker - synthesis: the split and Explore, preflight, tickets, the gate,\n"
+          "lane units after the first, and any stall (a permission prompt nobody answered, a session left idle).\n"
+          "'!' marks rest over an hour; look at the main session's gaps for that run.")
 
-    print("\nTool wait time (tool_use -> tool_result; parallel calls overlap, so sums can exceed wall-clock)")
-    print(f"{'role':10} {'kind':22} {'calls':>5} {'total':>7} {'avg':>7} {'per run':>8}")
-    for (lab, kind), (cnt, sec) in sorted(all_waits.items(), key=lambda kv: -kv[1][1]):
+    print("\nTool wait time (tool_use -> tool_result). 'total' sums every call; 'union' counts time\n"
+          "covered by parallel calls once, so it is what the role actually spent waiting on that kind.")
+    print(f"{'role':10} {'kind':22} {'calls':>5} {'total':>7} {'union':>7} {'avg':>7} {'union/run':>9}")
+    for (lab, kind), (cnt, sec) in sorted(all_waits.items(), key=lambda kv: -all_union[kv[0]]):
         if sec < 600:
             continue
-        print(f"{lab:10} {kind:22} {cnt:5} {sec / 3600:6.1f}h {sec / cnt / 60:6.1f}m {sec / n / 60:7.0f}m")
+        u = all_union[(lab, kind)]
+        print(f"{lab:10} {kind:22} {cnt:5} {sec / 3600:6.1f}h {u / 3600:6.1f}h {sec / cnt / 60:6.1f}m {u / n / 60:8.0f}m")
     print()
-    print(f"{'role':10} {'agents':>6} {'turns':>6} {'Mtok in':>8} {'Mtok out':>8} {'$write':>7} {'$read':>6} {'$out':>6} {'$total':>7} {'$idle-rewrite':>13}")
-    for k, v in sorted(grand.items(), key=lambda kv: -(kv[1]["usd_write"] + kv[1]["usd_read"] + kv[1]["usd_out"])):
-        t = v["usd_write"] + v["usd_read"] + v["usd_out"]
+    print("$in is uncached input; $idle≤ is an upper bound (a whole write after a long gap is counted).")
+    print(f"{'role':10} {'agents':>6} {'turns':>6} {'Mtok in':>8} {'Mtok out':>8} {'$write':>7} {'$read':>6} {'$in':>5} {'$out':>6} {'$total':>7} {'$idle≤':>7}")
+    for k, v in sorted(grand.items(), key=lambda kv: -cost(kv[1])):
         print(f"{k:10} {v['agents']:6} {v['turns']:6} {v['tok_in']/1e6:8.1f} {v['tok_out']/1e6:8.2f} {v['usd_write']:7.1f} "
-              f"{v['usd_read']:6.1f} {v['usd_out']:6.1f} {t:7.1f} {v['usd_idle']:13.1f}")
-    print("\nIdle cache rewrites (gap beyond the 5 min or 1 h TTL), by what the agent was waiting on:")
+              f"{v['usd_read']:6.1f} {v['usd_in']:5.1f} {v['usd_out']:6.1f} {cost(v):7.1f} {v['usd_idle']:7.1f}")
+    print("\nIdle cache rewrites, upper bound (gap beyond the 5 min or 1 h TTL), by what the agent was waiting on:")
     for (lab, tool), v in idle.most_common(10):
         print(f"  ${v:5.1f}  {lab:9} {tool}")
     print(f"\nWorker Edit/Write calls: {dict(edits)}")

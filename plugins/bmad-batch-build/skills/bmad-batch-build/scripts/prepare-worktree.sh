@@ -76,7 +76,7 @@ persistent_facts = [
   "Run shell commands as \`cd $wt && ...\`, or use \`git -C $wt\`.",
   "Source files change only through the implementation subagent, review fixes included: send them to it again. The parent edits only the spec and files under _bmad-output/.",
   "Dependencies install in the background while you plan; planning needs only the checkout. Before any command that needs node_modules (tests, typecheck, build, lint), run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, halt with its output as the blocking condition.",
-  "Testing: the implementation subagent runs the targeted tests and typechecks. The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full DB suite exactly once. Run that full suite off the critical path: as soon as the implementation subagent returns, start \`bash $bg run $wt suite \"bash $heavy 'cd $wt && npm test'\"\` as a Bash call with run_in_background: true, and launch the review straight away. Before review triage, run \`bash $bg wait $wt suite\` (again while it prints still running) and triage a failure like any other review finding. Typechecks also go through the queue, e.g. \`bash $heavy 'cd $wt/api && npm run typecheck'\`; it waits for machine capacity instead of overloading it. After a failure, re-run only the failing files. Never run \`npm run build\` while iterating; synthesis builds.",
+  "Testing has one owner per check. The implementation subagent runs the targeted test files and the typecheck of each workspace it touched, after its first pass and after every review fix, and reports the results. You do not re-run them: if it reports one it could not get green, send that back to it. The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full DB suite exactly once; the full suite is the only check you run. Run that full suite off the critical path: as soon as the implementation subagent returns, start \`bash $bg run $wt suite \"bash $heavy 'cd $wt && npm test'\"\` as a Bash call with run_in_background: true, and launch the review straight away. Before review triage, run \`bash $bg wait $wt suite\` (again while it prints still running) and triage a failure like any other review finding. After a suite failure, send the fix to the implementation subagent, which re-runs only the failing files. Never run \`npm run build\`; synthesis builds.",
   "file:AGENTS.md",
 ]
 
@@ -89,7 +89,7 @@ Launch a subagent with no prior conversation context, using the \`haiku-implemen
 >
 > Read {spec_file} fully and implement it. The spec is the sole source of truth. Load every file listed in its frontmatter \`context:\` before you start.
 >
-> Run every typecheck through the machine-wide queue, for example \`bash $heavy 'cd $wt/api && npm run typecheck'\`; targeted test files can run directly.
+> You own the targeted checks; the parent does not repeat them. Run the test files you added or changed, with a compact reporter (\`cd $wt/api && npx vitest run <files> --reporter=dot\`), and the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $wt/api && npm run typecheck'\`). Run them again after every review fix you are sent. Report each result.
 >
 > When you're done, report what you changed, how you verified it, and anything left incomplete or risky.
 """
