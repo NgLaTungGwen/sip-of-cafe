@@ -53,10 +53,12 @@ fi
 # referenced by absolute path, never copied. 127.0.0.1, not localhost: the
 # localhost relay on this machine wedges.
 db="hive_pb_$(printf '%s' "$name" | tr -c 'a-zA-Z0-9\n' '_' | tr 'A-Z' 'a-z')"
-sed -E \
-  -e "s#^(DATABASE_URL|MIGRATION_DATABASE_URL)=(postgres://[^@]*@)[^/]*/.*#\1=\2127.0.0.1:55432/$db#" \
-  -e "s#^([A-Z_]+_FILE)=(secrets/.*)#\1=$root/\2#" \
-  "$root/.env" > "$wt/.env"
+if [ -f "$root/.env" ]; then
+  sed -E \
+    -e "s#^(DATABASE_URL|MIGRATION_DATABASE_URL)=(postgres://[^@]*@)[^/]*/.*#\1=\2127.0.0.1:55432/$db#" \
+    -e "s#^([A-Z_]+_FILE)=(secrets/.*)#\1=$root/\2#" \
+    "$root/.env" > "$wt/.env"
+fi
 # Vitest starts one worker per CPU by default. With several suites running at
 # once across worktrees and sessions that crashed workers, so every run in this
 # worktree, targeted ones included, is capped (dotenv puts these in process.env

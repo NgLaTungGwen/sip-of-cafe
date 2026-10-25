@@ -83,7 +83,7 @@ if [ -n "$installed" ]; then
     bash "$heavy" "npm ci --no-audit --no-fund --loglevel=error > /dev/null" || { need=1; deps="$deps npm-ci-failed"; }
     deps="$deps npm"
   fi
-  if ! git diff --quiet "$installed" -- packages/contracts || [[ $deps == *npm* ]]; then
+  if [ -d packages/contracts ] && { ! git diff --quiet "$installed" -- packages/contracts || [[ $deps == *npm* ]]; }; then
     bash "$heavy" "npm --workspace @hive/contracts run build > /dev/null" || { need=1; deps="$deps contracts-build-failed"; }
     deps="$deps contracts-build"
   fi

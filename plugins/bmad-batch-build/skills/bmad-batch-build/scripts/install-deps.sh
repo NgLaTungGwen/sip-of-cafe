@@ -22,7 +22,9 @@ step() {
 }
 
 step "cd '$wt' && npm ci --no-audit --no-fund --loglevel=error" || exit 1
-step "cd '$wt' && npm --workspace @hive/contracts run build" || exit 1
+if [ -d "$wt/packages/contracts" ]; then
+  step "cd '$wt' && npm --workspace @hive/contracts run build" || exit 1
+fi
 if [ "$apps" = 1 ]; then
   step "cd '$wt/apps' && bun install --frozen-lockfile" || exit 1
 fi

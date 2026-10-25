@@ -248,8 +248,9 @@ is `<root>/.claude/worktrees/<slug>`, on `jayson/<type>-<slug>`.
    docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 && echo docker ok || echo docker DOWN
    node -e "require('net').connect(55432,'127.0.0.1').on('connect',()=>{console.log('postgres ok');process.exit(0)}).on('error',()=>{console.log('postgres DOWN');process.exit(1)})"
    ```
-   If either is down, notify and ask the user to start it, and check again
-   before launching. Every worker's DB suite needs Postgres at
+   Skip the Postgres check when `<root>/.env` has no `DATABASE_URL`, and the
+   Docker check too when the project doesn't use Docker. If either is down,
+   notify and ask the user to start it, and check again before launching. Every worker's DB suite needs Postgres at
    `127.0.0.1:55432`; a run that started with Docker down once stalled for
    nearly five hours.
 1. Fetch once with `git -C "<root>" fetch origin main --quiet`. Concurrent
