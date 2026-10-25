@@ -182,6 +182,13 @@ parallel tool calls once ("union"). It splits uncached input from output. It
 also explains the "rest" time that is not workers or synthesis, and flags any
 over an hour.
 
+Every run records itself: at the end the orchestrator runs
+`cost-report.py --record <slug>`. That saves the report next to the run file
+and appends one row per run to `~/.claude/bmad-batch-runs/runs.jsonl`, across
+all projects. `scripts/runs-summary.py [--since YYYY-MM-DD]` compares the
+recorded runs by skill version (median cost and time, review coverage,
+findings, repairs, 1-hour cache, turn budgets).
+
 ### Requirements
 
 - BMAD comes with it: on first run the skill installs `bmad-method` 6.12.0

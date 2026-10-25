@@ -1,6 +1,15 @@
 """Token and cost profile of bmad-batch-build runs (formerly bmad-parallel-build).
 
-Usage: python cost_report.py <session.jsonl> [<session.jsonl> ...]
+Usage: python cost-report.py <session.jsonl> [<session.jsonl> ...]
+       python cost-report.py --record <slug> [--root <main checkout>]
+
+--record is what the orchestrator runs at the end of every run. It finds the
+session that ran <slug> (the newest session log under ~/.claude/projects that
+mentions the run file _runs/<slug>.md), writes the report to
+<root>/.claude/worktrees/_runs/<slug>-cost.txt, and appends one JSON row to
+~/.claude/bmad-batch-runs/runs.jsonl (BMAD_RUNS_DIR overrides the folder), one
+row per run across every project, replacing an earlier row of the same run.
+scripts/runs-summary.py reads that file.
 
 The main session is counted only from the skill invocation to the last
 synthesis Agent result, so unrelated work in the same session is excluded.
@@ -181,7 +190,7 @@ def run(session_path):
     edits = collections.Counter()
     waits = collections.defaultdict(lambda: [0, 0.0])
     spans = collections.defaultdict(list)
-    quality = {"workers": [], "fix_merge": 0}
+    quality = {"workers": [], "fix_merge": 0, "max_turns": collections.Counter()}
     ivals = collections.defaultdict(list)
     lines = load(session_path)
     s, e = main_span(lines)
@@ -199,7 +208,9 @@ def run(session_path):
             quality["fix_merge"] += sum(1 for b in tool_uses(sub) if b["name"] == "Bash"
                                         and "fix(merge)" in b["input"].get("command", "")
                                         and "commit" in b["input"].get("command", ""))
+        before = acc[lab]["turns"]
         span = profile(sub, lab, acc, edits, waits, ivals)
+        quality["max_turns"][lab] = max(quality["max_turns"][lab], acc[lab]["turns"] - before)
         if span:
             spans[lab].append((ts(span[1]) - ts(span[0])).total_seconds())
             ends.setdefault(lab, []).append(span[1])
@@ -279,7 +290,9 @@ def mins(sec):
     return f"{sec / 60:.0f}m" if sec else "-"
 
 
-if __name__ == "__main__":
+def report(paths):
+    """Prints the report for these sessions; returns one data row per session."""
+    rows = []
     grand = collections.defaultdict(collections.Counter)
     idle = collections.Counter()
     edits = collections.Counter()
@@ -289,7 +302,7 @@ if __name__ == "__main__":
     units = []
     fix_merge = []
     print(f"{'session':10} {'date':10} {'workers':>7} {'$total':>7} {'$main':>6} {'$work':>6} {'$rev':>5} {'$haiku':>6} {'$synth':>6} {'$idle≤':>6} {'Mtok in':>8} {'Ktok out':>8}")
-    for p in sys.argv[1:]:
+    for p in paths:
         acc, ed, start, waits, spans, quality, ivals = run(p)
         for k, iv in ivals.items():
             all_union[k] += union(iv)
@@ -310,11 +323,31 @@ if __name__ == "__main__":
               f"{usd.get('haiku', 0):6.2f} {usd.get('synthesis', 0):6.1f} {sum(v['usd_idle'] for v in acc.values()):6.1f} "
               f"{tok_in / 1e6:8.1f} {tok_out / 1e3:8.0f}")
         ask = acc["main"]["user_wait"]
+        wall, slowest, synth = spans["main"][0], max(spans["worker"], default=0), sum(spans["synthesis"])
+        q = quality["workers"]
+        scored_q = [u for u in q if u["high"] is not None or u["medium"] is not None]
+        rows.append({
+            "session": os.path.basename(p)[:-6], "start": start,
+            "usd": round(sum(usd.values()), 2),
+            "usd_by_role": {k: round(v, 2) for k, v in usd.items()},
+            "usd_idle_max": round(sum(v["usd_idle"] for v in acc.values()), 2),
+            "mtok_in": round(tok_in / 1e6, 2), "ktok_out": round(tok_out / 1e3, 1),
+            "mtok_w1h_subagents": round(sum(v["tok_w1h"] for k, v in acc.items() if k != "main") / 1e6, 2),
+            "min_wall": round(wall / 60), "min_user_wait": round(ask / 60),
+            "min_slowest_worker": round(slowest / 60), "min_synthesis": round(synth / 60),
+            "min_rest": round(max(wall - ask - slowest - synth, 0) / 60),
+            "workers": acc["worker"]["agents"],
+            "units_reviewed": sum(u["reviewed"] for u in q), "units_haiku": sum(u["haiku"] for u in q),
+            "first_review_high_medium": round(sum((u["high"] or 0) + (u["medium"] or 0) for u in scored_q) / len(scored_q), 1) if scored_q else None,
+            "units_with_high": sum(1 for u in scored_q if u["high"]),
+            "fix_merge_commits": quality["fix_merge"],
+            "max_turns": dict(quality["max_turns"]),
+        })
         timing.append((os.path.basename(p)[:8], spans["main"][0], ask, max(spans["worker"], default=0),
                        sum(spans["synthesis"]), tok_in + tok_out, sum(usd.values())))
     import statistics
     total = sum(cost(v) for v in grand.values())
-    n = max(len(sys.argv) - 1, 1)
+    n = max(len(paths), 1)
     tok = sum(v["tok_in"] + v["tok_out"] for v in grand.values())
     print(f"\nTOTAL ${total:.0f}, {tok / 1e6:.0f} Mtok; per run mean ${total / n:.1f}, {tok / n / 1e6:.1f} Mtok")
     # Means hide outliers (one stuck run once cost $449 alone), so also give the
@@ -386,3 +419,110 @@ if __name__ == "__main__":
     print(f"  synthesis fix(merge) commits per run: {fix_merge}")
     w1 = sum(v["tok_w1h"] for v in grand.values() if v is not grand["main"])
     print(f"  subagent 1h-TTL cache writes: {w1 / 1e6:.1f} Mtok (0 means the agents' cacheTtl did not take effect)")
+    return rows
+
+
+# maxTurns in the shipped agent files; a role at its budget ran out of turns.
+TURN_BUDGET = {"worker": 300, "haiku": 300, "synthesis": 400}
+
+
+def find_session(slug):
+    """The newest session log that invoked the skill and wrote this run's run file.
+
+    A later session that only mentions the run file (a clean-up, a re-read)
+    has no skill invocation, so it is skipped.
+    """
+    needles = (f"_runs/{slug}.md", f"_runs\\\\{slug}.md")
+    logs = glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl"))
+    for path in sorted(logs, key=os.path.getmtime, reverse=True)[:40]:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            lines = fh.readlines()
+        if any(n in line for line in lines for n in needles) and any(invokes(line) for line in lines):
+            return path
+    return None
+
+
+SKILL_NAMES = ("bmad-batch-build", "bmad-parallel-build")
+
+
+def invokes(line):
+    """True for a typed /bmad-batch-build command or a Skill call that loads it.
+
+    Text that merely quotes the command (an edit, a tool result) doesn't count.
+    """
+    if not any(n in line for n in SKILL_NAMES):
+        return False
+    try:
+        x = json.loads(line)
+    except ValueError:
+        return False
+    m = x.get("message")
+    if not isinstance(m, dict):
+        return False
+    c = m.get("content")
+    if x.get("type") == "user":
+        texts = [c] if isinstance(c, str) else [b.get("text", "") for b in c or [] if b.get("type") == "text"]
+        return any(f"<command-name>/{n}</command-name>" in t for t in texts for n in SKILL_NAMES)
+    if x.get("type") == "assistant" and isinstance(c, list):
+        return any(b.get("type") == "tool_use" and b.get("name") == "Skill"
+                   and (b.get("input") or {}).get("skill") in SKILL_NAMES for b in c)
+    return False
+
+
+def record(slug, root):
+    import contextlib
+    import io
+    session = find_session(slug)
+    if not session:
+        print(f"record: no session log mentions _runs/{slug}.md")
+        return 1
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rows = report([session])
+    text = buf.getvalue()
+    runs = os.path.join(root, ".claude", "worktrees", "_runs")
+    os.makedirs(runs, exist_ok=True)
+    with open(os.path.join(runs, f"{slug}-cost.txt"), "w", encoding="utf-8") as fh:
+        fh.write(text)
+    row = rows[0]
+    run_file = os.path.join(runs, f"{slug}.md")
+    mode = None
+    if os.path.exists(run_file):
+        m = re.search(r"^.*Mode:.*$", open(run_file, encoding="utf-8").read(), re.M)
+        mode = m.group(0).strip() if m else None
+    version_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
+    row.update({
+        "slug": slug, "project": os.path.basename(os.path.normpath(root)), "mode": mode,
+        "skill_version": open(version_file).read().strip() if os.path.exists(version_file) else None,
+        "turn_budget_hit": sorted(k for k, v in row["max_turns"].items() if v >= TURN_BUDGET.get(k, 10 ** 9)),
+        "recorded": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    })
+    store = os.environ.get("BMAD_RUNS_DIR") or os.path.expanduser("~/.claude/bmad-batch-runs")
+    os.makedirs(store, exist_ok=True)
+    path = os.path.join(store, "runs.jsonl")
+    kept = []
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            try:
+                old = json.loads(line)
+            except ValueError:
+                continue
+            if (old.get("session"), old.get("slug")) != (row["session"], slug):
+                kept.append(line.rstrip("\n"))
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(kept + [json.dumps(row)]) + "\n")
+    # The headline for the orchestrator's final report.
+    print(f"recorded {slug}: ${row['usd']:.1f}, wall {row['min_wall']}m (user wait {row['min_user_wait']}m, "
+          f"rest {row['min_rest']}m), {row['workers']} workers, reviewed {row['units_reviewed']}, "
+          f"first-review high+medium {row['first_review_high_medium']}, fix(merge) {row['fix_merge_commits']}, "
+          f"1h-TTL writes {row['mtok_w1h_subagents']} Mtok, turn budget hit: {', '.join(row['turn_budget_hit']) or 'none'}")
+    print(f"report: {os.path.join(runs, slug + '-cost.txt')}; data: {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if args[:1] == ["--record"]:
+        root = args[args.index("--root") + 1] if "--root" in args else os.getcwd()
+        sys.exit(record(args[1], root))
+    report(args)

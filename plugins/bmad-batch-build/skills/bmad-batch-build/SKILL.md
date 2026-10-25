@@ -354,7 +354,20 @@ Then:
 
 ## 8. Report
 
-End with a short summary:
+First record the run's data, in one Bash call:
+
+```bash
+python "<skill>/scripts/cost-report.py" --record <slug> --root "<root>"
+```
+
+It finds this session's log, saves the full report to
+`<root>/.claude/worktrees/_runs/<slug>-cost.txt`, and appends one row to
+`~/.claude/bmad-batch-runs/runs.jsonl`: cost, time, review and repair counts,
+cache and turn-budget checks. Every run is measured this way, so never skip
+it. Record the run the same way when it ends early (cancelled, stopped at the
+gate, or left stuck). If the call fails, say so in the summary and go on.
+
+Then end with a short summary:
 
 - the PR link
 - the tickets, with links: the story, each Task and which unit it belongs to,
@@ -365,13 +378,13 @@ End with a short summary:
 - the repairs synthesis made
 - the verification results
 - anything the user should look at first
+- the `recorded` line from the call above: cost, time, and whether the 1-hour
+  cache took effect and any agent ran out of turns
 
 Don't remove the worktrees. Offer to clean them up after the PR merges.
 
-To measure the run, the user can run
-`python "<skill>/scripts/cost-report.py" <this session's .jsonl>`. It prints the
-cost, tokens and time per role, the tool waits, and the cache rewrites after
-idle gaps. The session file is under `~/.claude/projects/<project>/`.
+`python "<skill>/scripts/runs-summary.py"` compares all recorded runs by skill
+version.
 
 To clean up, run this for each worktree:
 
