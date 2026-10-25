@@ -5,8 +5,9 @@ usage: python check-map.py <root> [--map docs/architecture/system-map.md] [--str
 The map is the split's first stop: business terms and modules mapped to code
 paths, so Explore starts from the right folders instead of searching. A map
 that names paths which moved sends it the wrong way, so the orchestrator runs
-this before reading it. Paths are the backticked tokens that contain a `/` or
-end in a file extension; a `*` is matched as a glob.
+this before reading it. Paths are the backticked tokens that name a folder:
+they contain a `/` and don't start with one (`/mcp` is a route). A `*` is
+matched as a glob.
 
 Prints `MAP none` (no map), `MAP ok <n> paths`, or `MAP stale` with the missing
 paths. Exits 0 unless --strict is given and a path is missing (for CI).
@@ -25,7 +26,7 @@ def paths(text):
         token = token.rstrip("/")
         if token.startswith(("http", "-", ".")) and not token.startswith(("./", ".claude/", ".github/")):
             continue
-        if "/" not in token and not re.search(r"\.[a-z]{1,5}$", token):
+        if "/" not in token or token.startswith("/"):
             continue
         if token not in seen:
             seen.append(token)
