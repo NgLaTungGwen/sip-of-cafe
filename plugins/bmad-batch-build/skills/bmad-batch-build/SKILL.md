@@ -88,8 +88,22 @@ Find where each change lands without reading the code yourself. Your context
 is re-written in full every time a worker, synthesis or the user answers after
 a long gap, since this session's cache keeps the session's own TTL, so every
 file you read here is paid for again at each of those returns. Read only
-`AGENTS.md`, then delegate the code mapping to one `Explore` agent with
-`model: sonnet`, and ask it for a compact map, not file contents: for each
+`AGENTS.md` and, when the project has one, its system map. First run
+`python "<skill>/scripts/check-map.py" "<root>"`:
+
+- `MAP none`: there is no map; go straight to Explore.
+- `MAP ok`: read `docs/architecture/system-map.md`. Its glossary turns the
+  input's business terms into modules and paths.
+- `MAP stale`: read it, but treat the listed paths as moved, and mention them
+  in the approval message so the map gets fixed.
+
+Write the `MAP ...` line into the run file. The run's recorded data reads it,
+so runs with and without a map can be compared.
+
+Then delegate the code mapping to one `Explore` agent with `model: sonnet`.
+When there is a map, tell Explore to start from the modules and paths it names
+for each requirement and to search beyond them only where they don't cover the
+requirement. Ask it for a compact map, not file contents: for each
 requirement, the files it would change, the existing interfaces it touches,
 and any shared hotspot (migrations, `packages/contracts`, lockfiles, a file
 two requirements both need). Send a second `Explore` only for a gap in that

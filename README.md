@@ -190,7 +190,17 @@ recorded runs by skill version (median cost and time, review coverage,
 findings, repairs, 1-hour cache, turn budgets). `cost-report.py --collect`
 sweeps every session on the machine that ran the skill and records any without
 a row: missed records, crashed runs and runs from before recording existed.
-Each `--record` runs it too.
+Each `--record` runs it too. Collected runs keep a gzipped copy of their logs
+under `~/.claude/bmad-batch-runs/sessions/`, because Claude Code deletes
+transcripts after 30 days by default. `--collect --refresh` rebuilds every row
+after a metric change. Rows also measure code discovery per role (turns,
+context per turn, Read, Grep/Glob and small Bash calls), and Explore counts as
+its own role.
+
+When the project has `docs/architecture/system-map.md` (modules, ownership,
+data flow, and a glossary from business terms to paths), the split reads it
+before sending Explore, and `scripts/check-map.py <root> [--strict]` first
+checks that every path it names still exists.
 
 The machine limits are not hardcoded. heavy.sh gives one slot per CPU and
 checks free RAM, Vitest gets a quarter of the CPUs per suite (at least 2), and

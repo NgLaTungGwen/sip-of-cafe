@@ -76,6 +76,8 @@ def role(meta, first_line):
     agent = meta.get("agentType")
     if agent == "haiku-implementer":
         return "haiku"
+    if agent == "Explore":
+        return "explore"
     if agent in ("bmad-batch-synthesis", "bmad-pb-synthesis") or "ynthesis" in meta.get("description", ""):
         return "synthesis"
     if agent in ("bmad-batch-worker", "bmad-pb-worker") or "Build Auto worker" in first_line:
@@ -348,6 +350,15 @@ def report(paths):
             "units_with_high": sum(1 for u in scored_q if u["high"]),
             "fix_merge_commits": quality["fix_merge"],
             "max_turns": dict(quality["max_turns"]),
+            # Code discovery per role: how many turns, how large the context each
+            # turn re-reads, and how many lookups (Read, Grep/Glob, small Bash).
+            "by_role": {lab: {
+                "agents": v["agents"], "turns": v["turns"],
+                "ktok_ctx_per_turn": round(v["tok_in"] / v["turns"] / 1e3, 1) if v["turns"] else None,
+                "read": waits.get((lab, "Read"), [0])[0],
+                "grep_glob": waits.get((lab, "Grep"), [0])[0] + waits.get((lab, "Glob"), [0])[0],
+                "bash_other": waits.get((lab, "Bash other"), [0])[0],
+            } for lab, v in acc.items() if not lab.startswith("_") and v["turns"]},
         })
         timing.append((os.path.basename(p)[:8], spans["main"][0], ask, max(spans["worker"], default=0),
                        sum(spans["synthesis"]), tok_in + tok_out, sum(usd.values())))
@@ -564,11 +575,16 @@ def record(slug, root):
         return 1
     runs = os.path.join(root, ".claude", "worktrees", "_runs")
     run_file = os.path.join(runs, f"{slug}.md")
-    mode = None
+    mode = system_map = None
     if os.path.exists(run_file):
-        m = re.search(r"^.*Mode:.*$", open(run_file, encoding="utf-8").read(), re.M)
+        run_text = open(run_file, encoding="utf-8").read()
+        m = re.search(r"^.*Mode:.*$", run_text, re.M)
         mode = m.group(0).strip() if m else None
+        m = re.search(r"\bMAP (none|ok|stale)\b", run_text)
+        system_map = m.group(1) if m else None
     row, text = build_row(session, slug, os.path.basename(os.path.normpath(root)), mode)
+    # Whether the split had a system map (check-map.py's verdict, from the run file).
+    row["system_map"] = system_map
     os.makedirs(runs, exist_ok=True)
     with open(os.path.join(runs, f"{slug}-cost.txt"), "w", encoding="utf-8") as fh:
         fh.write(text)
@@ -602,9 +618,31 @@ def session_info(path):
     return invoked, slug, project
 
 
-def collect(quiet=False):
+def archive(path, project):
+    """Gzipped copy of a session log and its subagent logs under
+    <store>/sessions/, because Claude Code deletes transcripts after
+    cleanupPeriodDays (30 by default) and old runs must stay re-measurable.
+    Copies only files that are new or changed since the last archive."""
+    import gzip
+    import shutil
+    session = os.path.basename(path)[:-6]
+    dest = os.path.join(store_dir(), "sessions", project, session)
+    sources = [(path, os.path.join(dest, session + ".jsonl.gz"))]
+    sub = path[:-6]
+    for f in glob.glob(os.path.join(sub, "subagents", "*")):
+        sources.append((f, os.path.join(dest, "subagents", os.path.basename(f) + ".gz")))
+    for src, dst in sources:
+        if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(src, "rb") as fi, gzip.open(dst, "wb") as fo:
+            shutil.copyfileobj(fi, fo)
+
+
+def collect(quiet=False, refresh=False):
     """Records every session on this machine that ran the skill and has no
-    current row: missed --record calls, crashed runs and older runs alike.
+    current row: missed --record calls, crashed runs and older runs alike, and
+    archives their logs. --refresh rebuilds every row (after a metric change).
 
     A session written to in the last 15 minutes may still be running, so it
     waits for the next collect. A session that grew after its row was written
@@ -621,11 +659,12 @@ def collect(quiet=False):
         if now - mtime < 900:
             continue
         old = rows.get(session)
-        if old and old.get("session_mtime", 0) >= mtime - 1:
+        if old and old.get("session_mtime", 0) >= mtime - 1 and not refresh:
             continue
         invoked, slug, project = session_info(path)
         if not invoked:
             continue
+        archive(path, project)
         try:
             row, text = build_row(path, (old or {}).get("slug") or slug or session[:8], project, (old or {}).get("mode"))
         except Exception as exc:  # one unreadable log must not stop the rest
@@ -648,5 +687,5 @@ if __name__ == "__main__":
         collect(quiet=True)
         sys.exit(code)
     if args[:1] == ["--collect"]:
-        sys.exit(collect())
+        sys.exit(collect(refresh="--refresh" in args))
     report(args)

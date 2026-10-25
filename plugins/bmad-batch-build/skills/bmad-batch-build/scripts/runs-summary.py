@@ -64,6 +64,27 @@ def main(args):
             f"{fmt(med(r['first_review_high_medium'] for r in rs)):>6} {fmt(med(r['fix_merge_commits'] for r in rs)):>10} "
             f"{sum(1 for r in rs if r['mtok_w1h_subagents'] > 0)}/{len(rs):<7} "
             f"{sum(1 for r in rs if r['turn_budget_hit']):>10}")
+    # Code discovery: lookups and context size per role, medians per run.
+    roles = ("explore", "worker", "haiku", "synthesis")
+    with_roles = [r for r in rows if r.get("by_role")]
+    if with_roles:
+        lines += ["", "Code discovery, medians per run: turns, context per turn (k tokens), Read + Grep/Glob + small Bash calls"]
+        lines.append(f"{'version':14} " + " ".join(f"{role:>24}" for role in roles))
+        for version, rs in sorted(by_version.items()):
+            rs = [r for r in rs if r.get("by_role")]
+            if not rs:
+                continue
+            cells = []
+            for role in roles:
+                got = [r["by_role"].get(role) for r in rs if r["by_role"].get(role)]
+                if not got:
+                    cells.append(f"{'-':>24}")
+                    continue
+                turns = med(g["turns"] for g in got)
+                ctx = med(g["ktok_ctx_per_turn"] for g in got)
+                look = med(g["read"] + g["grep_glob"] + g["bash_other"] for g in got)
+                cells.append(f"{fmt(turns) + 't ' + fmt(ctx) + 'k ' + fmt(look) + ' look':>24}")
+            lines.append(f"{version:14} " + " ".join(cells))
     if rows:
         lines += ["", "Per run"]
         for r in sorted(rows, key=lambda r: r["start"]):
