@@ -72,6 +72,12 @@ printf '\nVITEST_MAX_FORKS=%s\nVITEST_MAX_THREADS=%s\nVITEST_MIN_FORKS=1\nVITEST
 scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 heavy="$scripts/heavy.sh" bg="$scripts/bg.sh"
 
+# The implementer's targeted checks run where the project keeps them: api/ in a
+# monorepo like hive-factory, the root in a single-package repo like HealthPro.
+# Naming api/ in a repo without one sent implementers to a missing directory.
+checks="$wt"
+[ -d "$wt/api" ] && checks="$wt/api"
+
 # Pin bmad-build-auto to this worktree. The file sits in the worktree's private
 # copy of _bmad, so the main checkout never sees it.
 cat > "$wt/_bmad/custom/bmad-build-auto.toml" <<EOF
@@ -95,7 +101,7 @@ Launch a subagent with no prior conversation context, using the \`haiku-implemen
 >
 > Read {spec_file} fully and implement it. The spec is the sole source of truth. Load every file listed in its frontmatter \`context:\` before you start.
 >
-> You own the targeted checks; the parent does not repeat them. Run the test files you added or changed, with a compact reporter (\`cd $wt/api && npx vitest run <files> --reporter=dot\`), and the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $wt/api && npm run typecheck'\`). Run them again after every review fix you are sent. Report each result.
+> You own the targeted checks; the parent does not repeat them. Run the test files you added or changed, with a compact reporter (\`cd $checks && npx vitest run <files> --reporter=dot\`), and the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $checks && npm run typecheck'\`). Run them again after every review fix you are sent. Report each result.
 >
 > When you're done, report what you changed, how you verified it, and anything left incomplete or risky.
 """

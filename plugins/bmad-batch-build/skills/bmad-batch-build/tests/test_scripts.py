@@ -220,5 +220,36 @@ class HeavyShell(unittest.TestCase):
         self.assertLessEqual(lo_f, hi_f)
 
 
+class PrepareWorktree(unittest.TestCase):
+    def pinned(self, with_api):
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        root = tempfile.mkdtemp().replace("\\", "/")
+        os.makedirs(os.path.join(root, "_bmad", "custom"))
+        os.makedirs(os.path.join(root, ".claude", "skills"))
+        if with_api:
+            os.makedirs(os.path.join(root, "api"))
+            open(os.path.join(root, "api", "package.json"), "w").close()
+        open(os.path.join(root, "package.json"), "w").close()
+        git = ["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run(["git", "init", "-q", root], check=True)
+        subprocess.run(git + ["add", "package.json"] + (["api"] if with_api else []), check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "init"], check=True)
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "prepare-worktree.sh"), root, "u1", "b1",
+                            "--no-install", "--base", "HEAD"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        wt = r.stdout.strip().splitlines()[-1]
+        with open(os.path.join(wt, "_bmad", "custom", "bmad-build-auto.toml"), encoding="utf-8") as f:
+            return wt, f.read()
+
+    def test_handoff_names_no_api_dir_in_a_repo_without_one(self):
+        wt, toml = self.pinned(with_api=False)
+        self.assertNotIn(wt + "/api", toml)
+        self.assertIn("cd " + wt + " && npx vitest run", toml)
+
+    def test_handoff_uses_api_dir_when_the_repo_has_one(self):
+        wt, toml = self.pinned(with_api=True)
+        self.assertIn("cd " + wt + "/api && npx vitest run", toml)
+
+
 if __name__ == "__main__":
     unittest.main()
