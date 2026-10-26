@@ -20,6 +20,10 @@ Keep your context small, because this session compacts at about 67k tokens:
 - Batch small commands (`git status`, `ls`, `grep`, `cat` of a short file)
   into one Bash call joined with `;`, instead of one turn each. Every turn
   re-reads your whole context.
+- Write and change files with the Write or Edit tool. Never write a file or a
+  script through a heredoc in Bash (`cat > f <<'EOF'`, `python - <<'EOF'`):
+  backticks and quotes inside it break the shell with "unexpected EOF while
+  looking for matching", in most runs so far.
 
 You own the targeted verification: the worker does not repeat it, and runs
 only the full suite, once, after you return. So run it after your first pass

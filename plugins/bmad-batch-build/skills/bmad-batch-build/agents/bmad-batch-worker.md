@@ -38,3 +38,7 @@ Keep turns few and context small:
   then read the log. Never write an unbounded `until ... sleep` loop, and
   never start a command with `sleep N` (`sleep 60; cat <log>`): the harness
   blocks it, so use the poll.
+- Write and change files with the Write or Edit tool. Never write a file or a
+  script through a heredoc in Bash (`cat > f <<'EOF'`, `python - <<'EOF'`):
+  backticks and quotes inside it break the shell with "unexpected EOF while
+  looking for matching", in most runs so far.
