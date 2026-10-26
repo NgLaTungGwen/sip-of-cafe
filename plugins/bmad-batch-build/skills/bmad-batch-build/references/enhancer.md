@@ -9,8 +9,10 @@ then `scripts/ship-enhancement.sh` pushes it and installs it.
 Fill in:
 
 - `<store>`: `~/.claude/bmad-batch-runs`, as an absolute path
-- `<src>`: `<store>/src/sip-of-cafe`, the skill's source clone
-- `<skillsrc>`: `<src>/plugins/bmad-batch-build/skills/bmad-batch-build`
+- `<src>`: `<store>/src/sip-of-cafe`, the skill's source clone, shared by
+  every session on the machine: it stays on `main` and nobody edits it
+- `<wt>`: `<store>/src/wt-<today>-<slug>`, this enhancer's own worktree
+- `<skillsrc>`: `<wt>/plugins/bmad-batch-build/skills/bmad-batch-build`
 - `<journal>`: the run's journal, `<root>/.claude/worktrees/_runs/<slug>-journal.md`
 - `<roots>`: the project roots to self-test against: every `root` in
   `<store>/install/installs.json`, or `<root>` when that file is missing
@@ -20,17 +22,19 @@ Fill in:
 You are the enhancer for the run <slug>. Improve the bmad-batch-build skill
 from what happened in its runs: one change, tested, on a branch. Do not push.
 
-Source clone: <src>   Skill source: <skillsrc>   Store: <store>
+Source clone: <src> (shared; never switch its branch or edit it)
+Your worktree: <wt>   Skill source: <skillsrc>   Store: <store>
 Journal of this run: <journal>
 Self-test roots: <roots>
 
-0. Prepare the clone, in one Bash call:
+0. Prepare your worktree, in one Bash call:
      [ -d "<src>/.git" ] || git clone -q https://github.com/NgLaTungGwen/sip-of-cafe.git "<src>"
-     cd "<src>" && git fetch -q origin && git status --short && git branch --list 'enhance/*' --no-merged origin/main
-   If the tree is dirty, stop and reply ENHANCE: failed (dirty clone).
-   Unshipped enhance/* branches are drafts waiting for the user: read their
-   last commit message (git log -1) so you don't draft the same fix again.
-   Then: git switch -c enhance/<today>-<slug> origin/main
+     git -C "<src>" fetch -q origin && git -C "<src>" branch --list 'enhance/*' --no-merged origin/main
+     git -C "<src>" worktree add -q -b enhance/<today>-<slug> "<wt>" origin/main
+   Other sessions' enhancers and ships use the same clone at the same time,
+   which is why you work only in <wt>. Unshipped enhance/* branches are
+   drafts waiting for the user: read their last commit message
+   (git -C "<src>" log -1 <branch>) so you don't draft the same fix again.
 
 1. Read, in one turn:
    - <journal>
@@ -62,16 +66,18 @@ Self-test roots: <roots>
    - If nothing qualifies, skip to step 6 with ENHANCE: none.
 
 4. Make the change in <skillsrc> with the Write or Edit tool. For a script
-   fix, add a case to tests/test_scripts.py that fails without the fix. Bump
-   the patch version: VERSION becomes "<x.y.z+1> <today>", and the "version"
-   in <src>/plugins/bmad-batch-build/.claude-plugin/plugin.json the same.
+   fix, add a case to tests/test_scripts.py that fails without the fix.
+   Leave VERSION and plugin.json alone: ship-enhancement.sh sets the version
+   when the fix ships, so two drafts never claim the same one.
 
 5. Test: bash "<skillsrc>/scripts/self-test.sh" <roots>
    It must end with "self-test: ok". If it fails, fix and re-run, at most
-   twice; if it still fails, discard the branch (git switch --detach
-   origin/main; git branch -D enhance/<today>-<slug>) and reply ENHANCE: failed.
-   On success, commit:
-     git -C "<src>" add -A && git -C "<src>" commit -q -m "fix(bmad-batch-build): <what changed>" -m "<the problem, its evidence (runs and count), and why this prevents it>" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+   twice; if it still fails, discard it (git -C "<src>" worktree remove
+   --force "<wt>"; git -C "<src>" branch -D enhance/<today>-<slug>) and reply
+   ENHANCE: failed.
+   On success, commit, then remove the worktree (the branch keeps the draft):
+     git -C "<wt>" add -A && git -C "<wt>" commit -q -m "fix(bmad-batch-build): <what changed>" -m "<the problem, its evidence (runs and count), and why this prevents it>" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+     git -C "<src>" worktree remove "<wt>"
 
 6. Append to <store>/enhance-log.md (create it with a "# Enhancement log"
    heading if missing), with the Write or Edit tool:

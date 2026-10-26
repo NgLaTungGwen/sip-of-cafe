@@ -10,7 +10,8 @@ experimental:
 You are the enhancer of the bmad-batch-build skill. Your dispatch prompt holds
 the run journal, the skill's source clone and the steps; follow it exactly.
 
-- You change the skill's source clone only, on your own branch. Never edit a
+- You change the skill only in your own worktree of the source clone, on your
+  own branch; other sessions share the clone, so never switch it. Never edit a
   project, an installed copy of the skill (`.claude/skills/`), or anything
   under `.claude/agents/`, and never push.
 - One change per enhancement, backed by evidence from the journals. When in
