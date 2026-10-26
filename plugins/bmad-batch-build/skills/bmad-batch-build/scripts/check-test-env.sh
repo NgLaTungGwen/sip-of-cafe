@@ -14,8 +14,15 @@ vt="$root/node_modules/vitest/vitest.mjs"
 # A root that isn't there is a caller's mistake, not a project without Vitest:
 # reporting "none" for it once let a self-test pass without testing anything.
 [ -d "$root" ] || { echo "vitest BROKEN: no such project root: $root"; exit 1; }
+# Not at the root: the first package folder of the project profile that has it.
+if [ ! -f "$vt" ]; then
+  . "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
+  while IFS=$'\t' read -r d _; do
+    [ -n "$d" ] && [ -f "$root/$d/node_modules/vitest/vitest.mjs" ] && { vt="$root/$d/node_modules/vitest/vitest.mjs"; break; }
+  done <<< "$(profile_get "$root" install)"
+fi
 [ -f "$vt" ] || { echo "vitest none"; exit 0; }
-ver=$(cd "$root" && node -p "require('./node_modules/vitest/package.json').version" 2>/dev/null)
+ver=$(node -p "require(process.argv[1]).version" "$(dirname "$vt")/package.json" 2>/dev/null)
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

@@ -25,6 +25,17 @@ step() {
 }
 
 . "$(dirname "${BASH_SOURCE[0]}")/lib-packages.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
+
+# The project profile's install commands, when the project has one.
+if installs=$(profile_get "$wt" install); then
+  while IFS=$'\t' read -r d cmd; do
+    [ -n "$cmd" ] || continue
+    step "cd '$wt/$d' && $cmd" || exit 1
+  done <<< "$installs"
+  echo "install-deps: done (profile)"
+  exit 0
+fi
 
 # No lockfile at the root: install each package folder with its own manager.
 root_pm=$(pm_of "$wt")

@@ -3,6 +3,7 @@
 Each case builds a small fake repository, puts a fake npm/bun on PATH that
 only records its calls, and runs the real script. Run by scripts/self-test.sh.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -71,6 +72,109 @@ class Layouts(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(sorted(c.split(" @ ")[0] for c in calls), ["npm run test", "npm run typecheck"])
         self.assertIn("app-test.rc:0", r.stdout)
+
+
+def git(*args, cwd=None):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+class Profile(Layouts):
+    """The project profile (profile.py) and the scripts that follow it."""
+
+    def profile(self, *args):
+        r = subprocess.run(["python", os.path.join(SCRIPTS, "profile.py"), *args], capture_output=True, text=True)
+        return r.returncode, r.stdout.replace("\r", "")
+
+    def ioc_like(self):
+        write(os.path.join(self.repo, "app", "package.json"), json.dumps(
+            {"name": "app", "scripts": {"test": "vitest run", "typecheck": "tsc --noEmit", "lint": "eslint ."},
+             "devDependencies": {"vitest": "2"}}))
+        write(os.path.join(self.repo, "app", "package-lock.json"), "{}")
+
+    def test_detect_an_app_folder_repository(self):
+        self.ioc_like()
+        self.profile("detect", self.repo, "--write")
+        prof = json.load(open(os.path.join(self.repo, ".claude", "bmad-batch-project.json"), encoding="utf-8"))
+        self.assertEqual(prof["install"], [{"dir": "app", "cmd": "npm ci --no-audit --no-fund --loglevel=error"}])
+        self.assertEqual(prof["suite"], {"dir": "app", "cmd": "npm run test"})
+        self.assertEqual(prof["targeted"]["test"], "npx vitest run <files> --reporter=dot")
+        self.assertEqual(sorted(c["name"] for c in prof["checks"]), ["app-lint", "app-test", "app-typecheck"])
+        self.assertIsNone(prof["confirmed"])
+
+    def test_detect_finds_the_test_runner_in_a_workspace_member(self):
+        write(os.path.join(self.repo, "package.json"), json.dumps(
+            {"name": "mono", "workspaces": ["api", "web"], "scripts": {"test": "npm -w api test"}}))
+        write(os.path.join(self.repo, "package-lock.json"), "{}")
+        write(os.path.join(self.repo, "api", "package.json"), json.dumps(
+            {"name": "api", "scripts": {"test": "jest"}, "devDependencies": {"jest": "29"}}))
+        self.profile("detect", self.repo, "--write")
+        prof = json.load(open(os.path.join(self.repo, ".claude", "bmad-batch-project.json"), encoding="utf-8"))
+        self.assertEqual(prof["targeted"]["dir"], "api")
+        self.assertEqual(prof["targeted"]["test"], "npx jest <files>")
+
+    def test_check_walks_none_unconfirmed_ok_stale(self):
+        self.ioc_like()
+        self.assertEqual(self.profile("check", self.repo)[1].split()[:2], ["PROFILE", "none"])
+        self.profile("detect", self.repo, "--write")
+        self.assertIn("PROFILE unconfirmed", self.profile("check", self.repo)[1])
+        self.profile("confirm", self.repo)
+        self.assertIn("PROFILE ok", self.profile("check", self.repo)[1])
+        write(os.path.join(self.repo, "app", "package.json"), '{"name": "app", "scripts": {"test": "jest"}}')
+        self.assertIn("PROFILE stale", self.profile("check", self.repo)[1])
+
+    def test_install_and_verify_follow_the_profile(self):
+        self.ioc_like()
+        self.profile("detect", self.repo, "--write")
+        path = os.path.join(self.repo, ".claude", "bmad-batch-project.json")
+        prof = json.load(open(path, encoding="utf-8"))
+        # As the orchestrator would after reading "use bun" in the repo's docs.
+        prof["install"] = [{"dir": "app", "cmd": "bun install --frozen-lockfile"}]
+        prof["checks"] = [{"name": "types", "dir": "app", "cmd": "bun run typecheck"}]
+        json.dump(prof, open(path, "w", encoding="utf-8"))
+        r, calls = self.run_script("install-deps.sh", self.repo)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c.split(" @ ")[0] for c in calls], ["bun install --frozen-lockfile"])
+        os.remove(self.calls)
+        r, calls = self.run_script("verify.sh", self.repo)
+        self.assertEqual([c.split(" @ ")[0] for c in calls], ["bun run typecheck"])
+        self.assertIn("types.rc:0", r.stdout)
+
+    def prepared(self, with_profile):
+        # With a profile the base is the repository's own default branch
+        # (develop here); without one it stays origin/main, as it always was.
+        remote = os.path.join(self.tmp, "remote.git")
+        git("init", "-q", "--bare", "-b", "develop" if with_profile else "main", remote)
+        git("clone", "-q", remote, self.repo)
+        os.makedirs(os.path.join(self.repo, "_bmad", "custom"))
+        self.ioc_like()
+        write(os.path.join(self.repo, ".env"), "DATABASE_URL=postgres://u:p@db.example:5432/app\n")
+        write(os.path.join(self.repo, ".gitignore"), ".env\n_bmad/\n.claude/\n")
+        git("add", "-A", cwd=self.repo)
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init", cwd=self.repo)
+        git("push", "-q", "origin", "HEAD", cwd=self.repo)
+        if with_profile:
+            self.profile("detect", self.repo, "--write")
+        r, _ = self.run_script("prepare-worktree.sh", self.repo, "u-1", "feat/u-1", "--no-install")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        wt = os.path.join(self.repo, ".claude", "worktrees", "u-1")
+        toml = open(os.path.join(wt, "_bmad", "custom", "bmad-build-auto.toml"), encoding="utf-8").read()
+        return wt, toml, open(os.path.join(wt, ".env"), encoding="utf-8").read()
+
+    def test_prepare_worktree_pins_the_profile_commands(self):
+        wt, toml, env = self.prepared(with_profile=True)
+        self.assertIn("&& npm run test'", toml)
+        self.assertIn("/u-1/app && npx vitest run <files> --reporter=dot", toml)
+        self.assertNotIn("/u-1 && npm test", toml)
+        # The base is the profile's (origin/HEAD is develop here), and the
+        # database URL is left alone: per_worktree is hive-factory's setup.
+        self.assertIn("db.example:5432", env)
+        branch = subprocess.run(["git", "-C", wt, "log", "-1", "--format=%D"], capture_output=True, text=True).stdout
+        self.assertIn("develop", branch)
+
+    def test_prepare_worktree_without_a_profile_keeps_the_original_commands(self):
+        wt, toml, env = self.prepared(with_profile=False)
+        self.assertIn("/u-1 && npm test'", toml)
+        self.assertIn("127.0.0.1:55432", env)
 
 
 class HeavyQueue(unittest.TestCase):

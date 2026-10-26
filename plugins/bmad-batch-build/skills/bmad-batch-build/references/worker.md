@@ -46,7 +46,7 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 - `<name>`: `<slug>-<n>`
 - `<wt>`: `<root>/.claude/worktrees/<name>`
 - `<branch>`: the unit's branch
-- `<base>`: the wave's base. For wave 1 that is `origin/main`, and the
+- `<base>`: the wave's base. For wave 1 that is `origin/<base>` (SKILL.md), and the
   `--base` argument is left out. For a later wave it is `<ibranch>` (a local
   branch; worktrees share the repository)
 
@@ -116,7 +116,7 @@ It checks the spec status (`done`, `built` or `in-review`), and the workflow's
 own traces in the spec: `baseline_revision`, `<intent-contract>` and at least
 one `### <date> — Review pass` entry under `## Review Triage Log`. It also
 checks for a clean tree, the right branch, and at least one commit ahead of
-`origin/main` (or of the base passed as a fourth argument). In a later wave,
+`origin/<base>` (or of the base passed as a fourth argument). In a later wave,
 pass the wave's base revision as the fourth argument. Synthesis merges
 the branch ref, so a worker that moved to another branch leaves nothing to
 merge.
@@ -138,7 +138,7 @@ parallel unit:
   is `<iwt>` and every unit uses the later-unit prompt below.
 - Dispatch one worker at a time, in the order the split set, and wait for it.
   Before each dispatch, record `git -C <wt> rev-parse HEAD` (for the first
-  unit, `origin/main`) as that unit's base.
+  unit, `origin/<base>`) as that unit's base.
 - The first unit's prompt is the one above. Add `--apps` to its step 0b if
   **any** unit in the lane touches `apps/`. Later units find the install done,
   so their waits return at once.

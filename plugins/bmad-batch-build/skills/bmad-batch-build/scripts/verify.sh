@@ -23,6 +23,23 @@ done
 v=$(mktemp -d)
 cd "$wt" || exit 2
 . "$(dirname "${BASH_SOURCE[0]}")/lib-packages.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
+
+# The project profile's checks, all at once, when the project has a profile;
+# with none listed, its full suite. --apps and --infra don't apply.
+if profile_get "$wt" base > /dev/null; then
+  checks=$(profile_get "$wt" checks)
+  [ -n "$checks" ] || checks=$(profile_get "$wt" suite | awk -F'\t' '{a[$1]=$2} END {if (a["cmd"] != "") print "suite\t" a["dir"] "\t" a["cmd"]}')
+  [ -n "$checks" ] || { echo "no checks: the project profile lists none"; exit 0; }
+  while IFS=$'\t' read -r name d cmd; do
+    [ -n "$cmd" ] || continue
+    (cd "$wt/$d" && bash -c "$cmd" > "$v/$name.log" 2>&1; echo $? > "$v/$name.rc") &
+  done <<< "$checks"
+  wait
+  echo "logs: $v"
+  grep -H . "$v"/*.rc | sed 's#.*/##'
+  exit 0
+fi
 
 # No package.json at the root (packages in app/ and the like): run, in every
 # package folder, each of build, typecheck, lint and test that it defines.
@@ -36,7 +53,7 @@ if [ ! -f package.json ]; then
   done
   wait
   echo "logs: $v"
-  grep . "$v"/*.rc 2>/dev/null | sed 's#.*/##' || echo "no checks: no package folder defines build, typecheck, lint or test"
+  grep -H . "$v"/*.rc 2>/dev/null | sed 's#.*/##' || echo "no checks: no package folder defines build, typecheck, lint or test"
   exit 0
 fi
 

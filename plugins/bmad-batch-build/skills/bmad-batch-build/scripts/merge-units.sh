@@ -24,6 +24,11 @@ if [ "${1:-}" = --installed ]; then installed=$2; shift 2; fi
 cd "$wt" || exit 2
 scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 heavy="$scripts/heavy.sh"
+. "$scripts/lib-profile.sh"
+# The branch units start from: the project profile's base, else main.
+base="origin/$(profile_get "$wt" base || echo main)"
+has_profile=0
+profile_get "$wt" base > /dev/null && has_profile=1
 
 for arg in "$@"; do
   br=${arg%%:*} title=${arg#*:}
@@ -43,7 +48,7 @@ done
 need=0
 
 # Migration numbers: the numeric prefixes of every migration on HEAD must be
-# unique, so a unit's new file must not reuse a number from origin/main or
+# unique, so a unit's new file must not reuse a number from the base or
 # from another unit.
 mig=compose/db/migrations
 if [ -d "$mig" ]; then
@@ -54,13 +59,13 @@ if [ -d "$mig" ]; then
     need=1
     for n in $dups; do
       echo "MIGRATIONS collide on $n: $(ls "$mig" | grep -E "^$n([^0-9]|$)" | tr '\n' ' ')"
-      echo "  added since origin/main: $(git diff --name-only --diff-filter=A origin/main -- "$mig" | grep -E "/$n([^0-9]|$)" | tr '\n' ' ')"
+      echo "  added since $base: $(git diff --name-only --diff-filter=A "$base" -- "$mig" | grep -E "/$n([^0-9]|$)" | tr '\n' ' ')"
     done
   fi
 fi
 
 # Contracts: regenerate the apps/ copy whenever the source changed.
-if git diff --quiet origin/main -- packages/contracts/src; then
+if git diff --quiet "$base" -- packages/contracts/src; then
   echo "CONTRACTS unchanged"
 else
   if node apps/scripts/sync-contracts.mjs > /dev/null 2>&1; then
@@ -74,6 +79,40 @@ else
     need=1
     echo "CONTRACTS sync failed: node apps/scripts/sync-contracts.mjs"
   fi
+fi
+
+# The project profile's after-merge steps (code generation and the like),
+# committed when they change tracked files.
+if [ "$has_profile" = 1 ] && steps=$(profile_get "$wt" after_merge) && [ -n "$steps" ]; then
+  while IFS=$'\t' read -r d cmd; do
+    [ -n "$cmd" ] || continue
+    if (cd "$wt/$d" && bash -c "$cmd") > /dev/null 2>&1; then
+      if [ -n "$(git status --porcelain)" ]; then
+        git add -A && git commit -qm "fix(merge): $cmd"
+        echo "AFTER_MERGE $d: $cmd: changed files, committed"
+      else
+        echo "AFTER_MERGE $d: $cmd: ok"
+      fi
+    else
+      need=1
+      echo "AFTER_MERGE $d: $cmd: FAILED"
+    fi
+  done <<< "$steps"
+fi
+
+# Dependencies with a project profile: rerun each install whose folder's
+# lockfile or package.json the merges changed.
+if [ -n "$installed" ] && [ "$has_profile" = 1 ]; then
+  deps=""
+  while IFS=$'\t' read -r d cmd; do
+    [ -n "$cmd" ] || continue
+    git diff --quiet "$installed" -- "$d/package-lock.json" "$d/bun.lock" "$d/bun.lockb" "$d/pnpm-lock.yaml" \
+      "$d/yarn.lock" "$d/package.json" "$d/requirements.txt" "$d/pyproject.toml" "$d/go.sum" "$d/Cargo.lock" && continue
+    bash "$heavy" "cd '$wt/$d' && $cmd > /dev/null" || { need=1; deps="$deps $d-failed"; }
+    deps="$deps $d"
+  done <<< "$(profile_get "$wt" install)"
+  echo "DEPS ${deps:+reinstalled:}${deps:-unchanged}"
+  installed=""
 fi
 
 # Dependencies: reinstall only what a merged lockfile changed.

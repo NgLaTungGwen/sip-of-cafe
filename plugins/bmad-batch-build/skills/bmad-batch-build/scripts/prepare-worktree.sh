@@ -22,7 +22,8 @@ set -euo pipefail
 
 root=$1 name=$2 branch=$3
 shift 3
-apps=0 install=1 base=origin/main agents=""
+. "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
+apps=0 install=1 base="origin/$(profile_get "$root" base || echo main)" agents=""
 while [ $# -gt 0 ]; do
   case $1 in
     --apps) apps=1 ;;
@@ -61,7 +62,13 @@ fi
 # referenced by absolute path, never copied. 127.0.0.1, not localhost: the
 # localhost relay on this machine wedges.
 db="hive_pb_$(printf '%s' "$name" | tr -c 'a-zA-Z0-9\n' '_' | tr 'A-Z' 'a-z')"
-if [ -f "$root/.env" ]; then
+per_db=1
+if profile_get "$root" base > /dev/null; then
+  [ "$(profile_get "$root" database.per_worktree)" = True ] || per_db=0
+fi
+if [ -f "$root/.env" ] && [ "$per_db" = 0 ]; then
+  sed -E -e "s#^([A-Z_]+_FILE)=(secrets/.*)#\1=$root/\2#" "$root/.env" > "$wt/.env"
+elif [ -f "$root/.env" ]; then
   sed -E \
     -e "s#^(DATABASE_URL|MIGRATION_DATABASE_URL)=(postgres://[^@]*@)[^/]*/.*#\1=\2127.0.0.1:55432/$db#" \
     -e "s#^([A-Z_]+_FILE)=(secrets/.*)#\1=$root/\2#" \
@@ -85,12 +92,27 @@ heavy="$scripts/heavy.sh" bg="$scripts/bg.sh"
 # Naming api/ in a repo without one sent implementers to a missing directory.
 checks="$wt"
 [ -d "$wt/api" ] && checks="$wt/api"
+suite_dir="$wt" suite_cmd="npm test"
+t_test="npx vitest run <files> --reporter=dot" t_tc="npm run typecheck"
 # No root package.json (packages in app/ and the like): the first package folder.
 if [ ! -d "$wt/api" ] && [ ! -f "$wt/package.json" ]; then
   . "$(dirname "${BASH_SOURCE[0]}")/lib-packages.sh"
   first=$(package_dirs "$wt" | head -1)
   [ -n "$first" ] && checks="$wt/$first"
 fi
+# The project profile's commands, when it has them.
+if s=$(profile_get "$root" suite); then
+  d=$(printf '%s\n' "$s" | awk -F'\t' '$1=="dir"{print $2}'); c=$(printf '%s\n' "$s" | awk -F'\t' '$1=="cmd"{print $2}')
+  [ -n "$c" ] && suite_dir="$wt/$d" suite_cmd="$c"
+fi
+if s=$(profile_get "$root" targeted); then
+  d=$(printf '%s\n' "$s" | awk -F'\t' '$1=="dir"{print $2}')
+  checks="$wt/${d:-.}"
+  t_test=$(printf '%s\n' "$s" | awk -F'\t' '$1=="test"{print $2}')
+  t_tc=$(printf '%s\n' "$s" | awk -F'\t' '$1=="typecheck"{print $2}')
+fi
+[ -n "$t_test" ] || t_test="the project's test command, limited to those files"
+[ -n "$t_tc" ] || t_tc="the project's typecheck or build check"
 
 # Pin bmad-build-auto to this worktree. The file sits in the worktree's private
 # copy of _bmad, so the main checkout never sees it.
@@ -102,7 +124,7 @@ persistent_facts = [
   "Run shell commands as \`cd $wt && ...\`, or use \`git -C $wt\`.",
   "Source files change only through the implementation subagent, review fixes included: send them to it again. The parent edits only the spec and files under _bmad-output/.",
   "Dependencies install in the background while you plan; planning needs only the checkout. Before any command that needs node_modules (tests, typecheck, build, lint), run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, halt with its output as the blocking condition.",
-  "Testing has one owner per check. The implementation subagent runs the targeted test files and the typecheck of each workspace it touched, after its first pass and after every review fix, and reports the results. You do not re-run them: if it reports one it could not get green, send that back to it. The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full DB suite exactly once; the full suite is the only check you run. Run that full suite off the critical path: as soon as the implementation subagent returns, start \`bash $bg run $wt suite \"bash $heavy 'cd $wt && npm test'\"\` as a Bash call with run_in_background: true, and launch the review straight away. Before review triage, run \`bash $bg wait $wt suite\` (again while it prints still running) and triage a failure like any other review finding. After a suite failure, send the fix to the implementation subagent, which re-runs only the failing files. Never run \`npm run build\`; synthesis builds.",
+  "Testing has one owner per check. The implementation subagent runs the targeted test files and the typecheck of each workspace it touched, after its first pass and after every review fix, and reports the results. You do not re-run them: if it reports one it could not get green, send that back to it. The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full DB suite exactly once; the full suite is the only check you run. Run that full suite off the critical path: as soon as the implementation subagent returns, start \`bash $bg run $wt suite \"bash $heavy 'cd $suite_dir && $suite_cmd'\"\` as a Bash call with run_in_background: true, and launch the review straight away. Before review triage, run \`bash $bg wait $wt suite\` (again while it prints still running) and triage a failure like any other review finding. After a suite failure, send the fix to the implementation subagent, which re-runs only the failing files. Never run \`npm run build\`; synthesis builds.",
   "file:AGENTS.md",
 ]
 
@@ -115,7 +137,7 @@ Launch a subagent with no prior conversation context, using the \`${agents}haiku
 >
 > Read {spec_file} fully and implement it. The spec is the sole source of truth. Load every file listed in its frontmatter \`context:\` before you start.
 >
-> You own the targeted checks; the parent does not repeat them. Run the test files you added or changed, with a compact reporter (\`cd $checks && npx vitest run <files> --reporter=dot\`), and the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $checks && npm run typecheck'\`). Run them again after every review fix you are sent. Report each result.
+> You own the targeted checks; the parent does not repeat them. Run the test files you added or changed, with a compact reporter (\`cd $checks && $t_test\`), and the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $checks && $t_tc'\`). Run them again after every review fix you are sent. Report each result.
 >
 > When you're done, report what you changed, how you verified it, and anything left incomplete or risky.
 """

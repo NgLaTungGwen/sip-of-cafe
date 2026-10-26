@@ -3,7 +3,7 @@
 #
 # usage: check-unit.sh <worktree> <branch> <spec file> [<base rev>]
 #
-# <base rev> defaults to origin/main. In lane mode the units share one branch,
+# <base rev> defaults to origin/<the project profile's base>, else origin/main. In lane mode the units share one branch,
 # so pass the HEAD recorded before the unit started.
 #
 # Prints `READY <commits>` or `NOT READY: <reason>; <reason>` on one line and
@@ -15,7 +15,9 @@
 # that coded first and wrote the spec afterwards produces exactly that shape.
 set -uo pipefail
 
-wt=$1 branch=$2 spec=$3 base=${4:-origin/main}
+wt=$1 branch=$2 spec=$3
+. "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
+base=${4:-origin/$(profile_get "$wt" base || echo main)}
 reasons=()
 
 if [ ! -f "$spec" ]; then

@@ -85,6 +85,35 @@ branch of type `<type>` (feat, fix, ...) about `<slug>`, in the convention the
 repository's AGENTS.md or CLAUDE.md states (in hive-factory,
 `jayson/<type>-<slug>`). Without a stated convention it is `<type>/<slug>`.
 
+**Adapt to the project.** The scripts install, build and test with the
+commands in the project profile, `<root>/.claude/bmad-batch-project.json`
+(`<skill>/scripts/profile.py`). Run `python "<skill>/scripts/profile.py" check "<root>"`:
+
+- `PROFILE ok`: nothing to do. The approval table says "Project commands:
+  confirmed <date>".
+- `PROFILE none`: if `~/.claude/bmad-batch-runs/install/installs.json` lists
+  `<root>` with `"legacy": true`, skip the profile; the scripts keep their
+  original commands. Otherwise run
+  `python "<skill>/scripts/profile.py" detect "<root>" --write`, which drafts
+  the profile from the lockfiles and package scripts. Then read the
+  repository's AGENTS.md, CLAUDE.md, README and CONTRIBUTING for how it
+  installs, builds, tests and typechecks, and correct the file with Edit
+  where they differ (they win: "use bun, never npm" changes every command)
+  and fill in what the draft left empty. Every command runs from its `dir`
+  without prompting; `targeted.test` keeps the `<files>` placeholder; leave
+  `database.per_worktree` false. Show `profile.py show "<root>"` in the
+  approval table under "Project commands (first run in this repository)",
+  and after approval run `python "<skill>/scripts/profile.py" confirm "<root>"`.
+  A correction from the user goes into the file before confirming.
+- `PROFILE stale`: lockfiles or package scripts changed since it was
+  confirmed. Run `profile.py detect "<root>"` without `--write`, update the
+  file where the commands changed, show what changed in the approval table,
+  and confirm after approval.
+- `PROFILE unconfirmed`: show it in the approval table and confirm after
+  approval.
+
+`<base>` is the profile's `base` branch, `main` without a profile.
+
 **Tell the user when the run needs them.** Before every question to the user
 (the split approval, a gate failure, a stuck synthesis), send a
 `PushNotification` with one line saying what is needed, then ask. Load the tool
@@ -137,7 +166,7 @@ two requirements both need). Send a second `Explore` only for a gap in that
 map.
 
 A unit is a piece of work that one worker can build and test on its own, from
-`origin/main`, without seeing any other unit. Rules for splitting:
+`origin/<base>`, without seeing any other unit. Rules for splitting:
 
 - **Disjoint files.** Two units must never edit the same file. If they would,
   merge them into one unit.
@@ -297,8 +326,11 @@ with the workers.
    node -e "require('net').connect(55432,'127.0.0.1').on('connect',()=>{console.log('postgres ok');process.exit(0)}).on('error',()=>{console.log('postgres DOWN');process.exit(1)})"
    bash "<skill>/scripts/check-test-env.sh" "<root>"
    ```
-   Skip the Postgres check when `<root>/.env` has no `DATABASE_URL`, and the
-   Docker check too when the project doesn't use Docker. If either is down,
+   Run the Postgres check only for a project without a profile whose
+   `<root>/.env` has `DATABASE_URL`, or whose profile sets
+   `database.per_worktree`; skip the Docker check when the project doesn't
+   use Docker. When a profile lists a database without `per_worktree`, tell
+   the user the test suite may need it running. If either is down,
    notify and ask the user to start it, and check again before launching.
    Every worker's DB suite needs Postgres at `127.0.0.1:55432`; a run that
    started with Docker down once stalled for nearly five hours.
@@ -306,7 +338,7 @@ with the workers.
    starting at all, so every unit's tests would fail before running. Do not
    launch: tell the user the error line; it is a fault in the skill, not in
    the project.
-1. Fetch once with `git -C "<root>" fetch origin main --quiet`. Concurrent
+1. Fetch once with `git -C "<root>" fetch origin <base> --quiet`. Concurrent
    fetches into one `.git` race on `FETCH_HEAD`, which is why the scripts never
    fetch.
 2. In **one message**, send all of the following:
@@ -345,7 +377,7 @@ Work through the waves in order. Within a wave:
   When a worker returns, record its reply and gate its unit straight away
   (section 6, with its base) before sending the next.
 
-A wave's **base** is where its units start. For wave 1 that is `origin/main`.
+A wave's **base** is where its units start. For wave 1 that is `origin/<base>`.
 For a later wave it is `<ibranch>` as the previous wave left it: record
 `git -C <iwt> rev-parse HEAD` when the wave starts. Workers in a later
 parallel wave prepare their worktree from that base (`--base <ibranch>` in
@@ -440,7 +472,7 @@ Then:
     Go on from section 3.`
 - **No `RESULT:` line:** synthesis ran out of turns. Treat it as stuck. If
   `<state>` doesn't exist, the resume line says `Resume: read
-  git log --oneline origin/main..<ibranch> first; the merges and repairs it
+  git log --oneline origin/<base>..<ibranch> first; the merges and repairs it
   shows are committed.` instead.
 
 ## 8. Report

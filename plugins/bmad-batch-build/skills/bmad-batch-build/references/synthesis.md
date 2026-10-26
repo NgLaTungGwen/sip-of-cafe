@@ -82,7 +82,7 @@ After the last merge the script prints its checks and has already done the
 mechanical repairs:
 
 - `MIGRATIONS ok`, or the numbers that collide and the files added since
-  `origin/main`. Renumber the later units' files so the sequence is strictly
+  `origin/<base>`. Renumber the later units' files so the sequence is strictly
   increasing, and fix any references to them.
 - `CONTRACTS`: if `packages/contracts/src` changed, it ran
   `node apps/scripts/sync-contracts.mjs` and committed the result. If it says
@@ -107,7 +107,9 @@ Commit each repair as its own `fix(merge): ...` commit.
 ## 3. Verify
 
 `verify.sh` runs build + typecheck, the test suite, and the `apps/` and
-`infra/` typechecks at the same time. `heavy.sh` holds it until the machine has
+`infra/` typechecks at the same time; in a project with a profile
+(`.claude/bmad-batch-project.json`) it runs the profile's checks instead and
+ignores `--apps` and `--infra`. `heavy.sh` holds it until the machine has
 room, shared with every other session, so a busy machine slows the verify
 instead of crashing it. Use one foreground Bash call with `timeout: 600000`,
 adding `--apps` if `apps/` changed and `--infra` if `infra/` changed:
