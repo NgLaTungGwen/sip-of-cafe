@@ -35,4 +35,6 @@ Keep turns few and context small:
   them. Other long commands run in the foreground with `timeout: 600000`. If
   one is moved to the background, wait for it with a bounded poll, for example
   `timeout 240 bash -c 'until grep -q "<done marker>" <log>; do sleep 15; done'`,
-  then read the log. Never write an unbounded `until ... sleep` loop.
+  then read the log. Never write an unbounded `until ... sleep` loop, and
+  never start a command with `sleep N` (`sleep 60; cat <log>`): the harness
+  blocks it, so use the poll.

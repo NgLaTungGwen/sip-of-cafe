@@ -32,7 +32,8 @@ and again after every review fix you are sent, and report each result:
 - Never run `npm test` for the whole repo or `npm run build`. If a command is
   moved to the background, wait for it with a bounded poll
   (`timeout 240 bash -c 'until grep -q "<done marker>" <log>; do sleep 15; done'`),
-  never an unbounded `until ... sleep` loop.
+  never an unbounded `until ... sleep` loop. Never start a command with
+  `sleep N` (`sleep 60; cat <log>`): the harness blocks it, so use the poll.
 
 When you finish, report what you changed, how you verified it, and anything left
 incomplete or risky.
