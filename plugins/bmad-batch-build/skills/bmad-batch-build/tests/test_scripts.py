@@ -250,6 +250,13 @@ class PrepareWorktree(unittest.TestCase):
         wt, toml = self.pinned(with_api=True)
         self.assertIn("cd " + wt + "/api && npx vitest run", toml)
 
+    def test_build_is_not_banned_when_the_project_requires_it(self):
+        # An unconditional "Never run npm run build" made workers skip a build
+        # that the intent or AGENTS.md required (healthpro-seed-fix, healthpro-cyber).
+        wt, toml = self.pinned(with_api=False)
+        self.assertNotIn("Never run", toml)
+        self.assertIn("unless the intent, the spec's Verification or AGENTS.md requires one", toml)
+
 
 if __name__ == "__main__":
     unittest.main()
