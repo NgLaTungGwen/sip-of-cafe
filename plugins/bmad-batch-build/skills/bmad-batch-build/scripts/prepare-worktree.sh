@@ -63,9 +63,11 @@ fi
 # once across worktrees and sessions that crashed workers, so every run in this
 # worktree, targeted ones included, is capped (dotenv puts these in process.env
 # before vitest reads them). The cap is a quarter of the CPUs, at least 2, as in
-# heavy.sh: 3 on a 12-CPU machine.
+# heavy.sh: 3 on a 12-CPU machine. The minimum goes with it: Vitest 2 defaults
+# it to CPUs - 1 and refuses to start ("minThreads and maxThreads must not
+# conflict") when that is above the maximum.
 vt=$(( $(nproc 2>/dev/null || echo 8) / 4 )); [ "$vt" -lt 2 ] && vt=2
-printf '\nVITEST_MAX_FORKS=%s\nVITEST_MAX_THREADS=%s\n' "$vt" "$vt" >> "$wt/.env"
+printf '\nVITEST_MAX_FORKS=%s\nVITEST_MAX_THREADS=%s\nVITEST_MIN_FORKS=1\nVITEST_MIN_THREADS=1\n' "$vt" "$vt" >> "$wt/.env"
 
 scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 heavy="$scripts/heavy.sh" bg="$scripts/bg.sh"

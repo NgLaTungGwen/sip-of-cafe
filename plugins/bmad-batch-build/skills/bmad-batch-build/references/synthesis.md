@@ -191,4 +191,9 @@ MERGED: <unit titles>
 REPAIRS: <one line per fix(merge) commit, or none>
 VERIFY: <each check and its pass or fail result>
 NOTES: <anything the user must know, or none>
+SKILL ISSUES: <each time a skill script, its settings or these instructions
+got in the way and you worked around it (for example a test command that
+failed before any test ran until you changed its environment): the command,
+the error line and the workaround, one per `;`. Not faults in the code being
+merged. Or none>
 ```

@@ -617,15 +617,19 @@ def record(slug, root):
     runs = os.path.join(root, ".claude", "worktrees", "_runs")
     run_file = os.path.join(runs, f"{slug}.md")
     mode = system_map = None
+    issues = []
     if os.path.exists(run_file):
         run_text = open(run_file, encoding="utf-8").read()
         m = re.search(r"^.*Mode:.*$", run_text, re.M)
         mode = m.group(0).strip() if m else None
         m = re.search(r"\bMAP (none|ok|stale)\b", run_text)
         system_map = m.group(1) if m else None
+        issues = [s.strip() for s in re.findall(r"^\s*-?\s*SKILL ISSUE: (.+)$", run_text, re.M)]
     row, text = build_row(session, slug, os.path.basename(os.path.normpath(root)), mode)
     # Whether the split had a system map (check-map.py's verdict, from the run file).
     row["system_map"] = system_map
+    # Workarounds the agents needed for the skill's own scripts and settings.
+    row["skill_issues"] = issues
     row["unit_minutes"] = unit_minutes(row, slug, root)
     os.makedirs(runs, exist_ok=True)
     with open(os.path.join(runs, f"{slug}-cost.txt"), "w", encoding="utf-8") as fh:
@@ -635,7 +639,8 @@ def record(slug, root):
     print(f"recorded {slug}: ${row['usd']:.1f}, wall {row['min_wall']}m (user wait {row['min_user_wait']}m, "
           f"rest {row['min_rest']}m), {row['workers']} workers, reviewed {row['units_reviewed']}, "
           f"first-review high+medium {row['first_review_high_medium']}, fix(merge) {row['fix_merge_commits']}, "
-          f"1h-TTL writes {row['mtok_w1h_subagents']} Mtok, turn budget hit: {', '.join(row['turn_budget_hit']) or 'none'}")
+          f"1h-TTL writes {row['mtok_w1h_subagents']} Mtok, turn budget hit: {', '.join(row['turn_budget_hit']) or 'none'}, "
+          f"skill issues: {len(issues)}")
     print(f"report: {os.path.join(runs, slug + '-cost.txt')}; data: {path}")
     return 0
 
@@ -711,6 +716,7 @@ def collect(quiet=False, refresh=False):
             row, text = build_row(path, (old or {}).get("slug") or slug or session[:8], project, (old or {}).get("mode"))
             row["unit_minutes"] = unit_minutes(row, row["slug"], cwd)
             row["system_map"] = (old or {}).get("system_map")
+            row["skill_issues"] = (old or {}).get("skill_issues") or []
         except Exception as exc:  # one unreadable log must not stop the rest
             print(f"collect: skipped {session[:8]}: {exc}")
             continue

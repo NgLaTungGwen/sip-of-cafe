@@ -96,6 +96,9 @@ def main(args):
                 f"{machine(r)}")
         lines += ["", "Checks: '1h writes' should be every run (otherwise the agents' cacheTtl did not apply);",
                   "'budget hit' should be 0 (otherwise raise maxTurns or look at that agent)."]
+        issues = [(r, i) for r in sorted(rows, key=lambda r: r["start"]) for i in r.get("skill_issues") or []]
+        lines += ["", "Skill issues (workarounds the agents reported for the skill's own scripts)"]
+        lines += [f"  {r['start'][:10]} {r['slug'][:28]:28} {r.get('skill_version') or '?':14} {i}" for r, i in issues] or ["  none"]
     text = "\n".join(lines) + "\n"
     if out:
         with open(out, "w", encoding="utf-8") as fh:

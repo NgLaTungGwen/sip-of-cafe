@@ -85,6 +85,10 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
    INTERFACES: <each interface this unit provides or consumes, as built:
    route and payload, type, or method signature, one per `;`. Mark any that
    differ from the intent's agreed shape with "CHANGED". Or "none".>
+   SKILL ISSUES: <each time a skill script, its settings or these
+   instructions got in the way and you worked around it: the command, the
+   error line and the workaround, one per `;`. Not faults in the project's
+   own code. Or "none".>
 
 Intent:
 <the unit's self-contained intent: goal, scope, the files it owns, acceptance

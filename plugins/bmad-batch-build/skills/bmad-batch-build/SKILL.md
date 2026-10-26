@@ -272,12 +272,17 @@ with the workers.
    ```bash
    docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 && echo docker ok || echo docker DOWN
    node -e "require('net').connect(55432,'127.0.0.1').on('connect',()=>{console.log('postgres ok');process.exit(0)}).on('error',()=>{console.log('postgres DOWN');process.exit(1)})"
+   bash "<skill>/scripts/check-test-env.sh" "<root>"
    ```
    Skip the Postgres check when `<root>/.env` has no `DATABASE_URL`, and the
    Docker check too when the project doesn't use Docker. If either is down,
    notify and ask the user to start it, and check again before launching.
    Every worker's DB suite needs Postgres at `127.0.0.1:55432`; a run that
    started with Docker down once stalled for nearly five hours.
+   `vitest BROKEN` means the limits the skill's scripts set stop Vitest from
+   starting at all, so every unit's tests would fail before running. Do not
+   launch: tell the user the error line; it is a fault in the skill, not in
+   the project.
 1. Fetch once with `git -C "<root>" fetch origin main --quiet`. Concurrent
    fetches into one `.git` race on `FETCH_HEAD`, which is why the scripts never
    fetch.
@@ -308,7 +313,10 @@ Work through the waves in order. Within a wave:
 
 - **Parallel wave:** all its `Agent` calls go in one message and return
   together. Record each worker's reply in the run file, its `INTERFACES` line
-  included: synthesis checks those against the agreed interfaces. Then gate
+  included: synthesis checks those against the agreed interfaces. Copy every
+  `SKILL ISSUES` entry other than `none`, from workers and synthesis alike, to
+  its own run-file line `SKILL ISSUE: <unit or synthesis>: <entry>`; step 8
+  records them for fixing the skill. Then gate
   every unit (section 6) against the wave's base.
 - **Lane wave:** send one worker at a time in `<iwt>`, with the lane prompt.
   When a worker returns, record its reply and gate its unit straight away
@@ -440,6 +448,7 @@ Then end with a short summary:
 - anything the user should look at first
 - the `recorded` line from the call above: cost, time, and whether the 1-hour
   cache took effect and any agent ran out of turns
+- every `SKILL ISSUE` line, so the user can have the skill fixed
 
 Don't remove the worktrees. Offer to clean them up after the PR merges.
 
