@@ -28,7 +28,9 @@ git switch -q "$branch" && git rebase -q origin/main || {
 
 roots=()
 if [ -f "$store/install/installs.json" ]; then
-  while IFS= read -r r; do roots+=("$r"); done < <("$py" -c "import json,sys; [print(t['root']) for t in json.load(open(sys.argv[1]))['targets']]" "$store/install/installs.json")
+  # Python on Windows ends lines with \r\n, and a root ending in \r is a path
+  # that doesn't exist, so the carriage returns go before bash reads the lines.
+  while IFS= read -r r; do roots+=("$r"); done < <("$py" -c "import json,sys; [print(t['root']) for t in json.load(open(sys.argv[1]))['targets']]" "$store/install/installs.json" | tr -d '\r')
 fi
 bash "$skill/scripts/self-test.sh" "${roots[@]}" || { echo "ship: self-test failed; nothing pushed"; exit 1; }
 

@@ -158,6 +158,15 @@ class LogEvent(unittest.TestCase):
         self.assertEqual(log_event.error_line(f.name), "RangeError: options.minThreads conflict")
 
 
+class CheckTestEnv(unittest.TestCase):
+    def test_a_missing_root_fails_instead_of_passing_as_none(self):
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "check-test-env.sh"), "D:/no/such/root\r"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("BROKEN", r.stdout)
+
+
 class HeavyShell(unittest.TestCase):
     def run_heavy(self, cmd):
         env = dict(os.environ, BMAD_RUNS_DIR=tempfile.mkdtemp(), BMAD_HEAVY_DIR=tempfile.mkdtemp())

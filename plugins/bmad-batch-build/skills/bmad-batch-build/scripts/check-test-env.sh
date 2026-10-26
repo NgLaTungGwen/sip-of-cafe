@@ -11,6 +11,9 @@
 set -u
 root=${1:?usage: check-test-env.sh <root>}
 vt="$root/node_modules/vitest/vitest.mjs"
+# A root that isn't there is a caller's mistake, not a project without Vitest:
+# reporting "none" for it once let a self-test pass without testing anything.
+[ -d "$root" ] || { echo "vitest BROKEN: no such project root: $root"; exit 1; }
 [ -f "$vt" ] || { echo "vitest none"; exit 0; }
 ver=$(cd "$root" && node -p "require('./node_modules/vitest/package.json').version" 2>/dev/null)
 
