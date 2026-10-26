@@ -22,6 +22,24 @@ done
 
 v=$(mktemp -d)
 cd "$wt" || exit 2
+. "$(dirname "${BASH_SOURCE[0]}")/lib-packages.sh"
+
+# No package.json at the root (packages in app/ and the like): run, in every
+# package folder, each of build, typecheck, lint and test that it defines.
+if [ ! -f package.json ]; then
+  for d in $(package_dirs "$wt"); do
+    pm=$(pm_of "$d"); tag=$(echo "$d" | tr '/' '-')
+    for s in build typecheck lint test; do
+      has_script "$d" "$s" || continue
+      (cd "$d" && $(run_cmd "$pm" "$s") > "$v/$tag-$s.log" 2>&1; echo $? > "$v/$tag-$s.rc") &
+    done
+  done
+  wait
+  echo "logs: $v"
+  grep . "$v"/*.rc 2>/dev/null | sed 's#.*/##' || echo "no checks: no package folder defines build, typecheck, lint or test"
+  exit 0
+fi
+
 (npm run build > "$v/build.log" 2>&1 && npm run typecheck > "$v/typecheck.log" 2>&1; echo $? > "$v/build-typecheck.rc") &
 (npm test > "$v/test.log" 2>&1; echo $? > "$v/test.rc") &
 if [ "$apps" = 1 ]; then

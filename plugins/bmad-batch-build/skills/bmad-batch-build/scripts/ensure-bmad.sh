@@ -17,12 +17,21 @@ skill="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # The run dispatches bmad-batch-worker and bmad-batch-synthesis, and the workers
 # hand coding to haiku-implementer; bmad-batch-enhancer drafts skill fixes after
-# the run. They have to be project agents so
-# prepare-worktree.sh can copy them into every worktree. A copy the project
-# already has is left alone; one that differs from the shipped version is
-# reported, so an older copy can be updated by hand.
-mkdir -p "$root/.claude/agents"
-for agent in bmad-batch-worker bmad-batch-synthesis haiku-implementer bmad-batch-enhancer; do
+# the run. A plugin install ships them itself (the plugin's agents/ folder,
+# named bmad-batch-build:<agent>), so nothing is copied. A copied install needs
+# them as project agents; a copy the project already has is left alone, and one
+# that differs from the shipped version is reported. Claude Code only sees a
+# newly created .claude/agents folder after a restart, and only in the session's
+# own folder or its parents, which SKILL.md checks before the run starts.
+if [[ -f "$skill/../../agents/bmad-batch-worker.md" && -f "$skill/../../.claude-plugin/plugin.json" ]]; then
+  echo "agents: provided by the plugin (bmad-batch-build:<agent>)"
+  agents=()
+else
+  [[ -d "$root/.claude/agents" ]] || echo "agents: created $root/.claude/agents; a session already running must restart to see it"
+  mkdir -p "$root/.claude/agents"
+  agents=(bmad-batch-worker bmad-batch-synthesis haiku-implementer bmad-batch-enhancer)
+fi
+for agent in "${agents[@]}"; do
   if [[ ! -f "$root/.claude/agents/$agent.md" ]]; then
     cp "$skill/agents/$agent.md" "$root/.claude/agents/"
     echo "agents: installed $agent into $root/.claude/agents"

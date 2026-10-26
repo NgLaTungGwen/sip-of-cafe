@@ -102,7 +102,7 @@ start() {
   rm -f "$ticket"
 }
 
-waited=0 used=0 avail=0 queue=0
+waited=0 used=0 avail=0 queue=0 t_queue=$SECONDS t_said=$((SECONDS - 60))
 while :; do
   if lock; then
     queue=$(ahead)
@@ -115,14 +115,19 @@ while :; do
     fi
     unlock
   fi
+  # Real elapsed time: a loop also spends time on the lock and the survey, and
+  # counting only the sleeps once let waiters sit for hours past max_wait.
+  waited=$((SECONDS - t_queue))
   if [ "$waited" -ge "$max_wait" ]; then
     echo "heavy.sh: waited ${waited}s; starting anyway" >&2
     start
     break
   fi
-  [ $((waited % 60)) -eq 0 ] && echo "heavy.sh: waiting (${queue} ahead in the queue, running weight $used of $slots, ${avail} MB free)" >&2
+  if [ $((SECONDS - t_said)) -ge 60 ]; then
+    echo "heavy.sh: waiting (${queue} ahead in the queue, running weight $used of $slots, ${avail} MB free)" >&2
+    t_said=$SECONDS
+  fi
   sleep 5
-  waited=$((waited + 5))
 done
 
 # A quarter of the CPUs per suite, at least 2 (3 on a 12-CPU machine).
@@ -132,13 +137,23 @@ export VITEST_MIN_FORKS="${VITEST_MIN_FORKS:-1}" VITEST_MIN_THREADS="${VITEST_MI
 
 # Every command goes into the run journal's event log (log-event.py), unless
 # bg.sh runs this one and logs it itself.
+# Each command has a time limit (BMAD_HEAVY_TIMEOUT, default 45 min): seven
+# npm ci runs that hung on 2026-10-26 held their slots for over an hour and
+# stopped every build on the machine.
+limit="${BMAD_HEAVY_TIMEOUT:-2700}"
+run() {
+  timeout -k 30 "$limit" bash -c "$cmd"
+  local rc=$?
+  [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && echo "heavy.sh: stopped after ${limit}s (BMAD_HEAVY_TIMEOUT): $cmd" >&2
+  return "$rc"
+}
 if [ -n "${BMAD_EVENT_LOGGED:-}" ]; then
-  bash -c "$cmd"
+  run
   exit $?
 fi
 out=$(mktemp)
 t0=$SECONDS
-bash -c "$cmd" 2>&1 | tee "$out"
+run 2>&1 | tee "$out"
 rc=${PIPESTATUS[0]}
 py=$(command -v python || command -v python3)
 [ -n "$py" ] && "$py" "$(dirname "${BASH_SOURCE[0]}")/log-event.py" heavy "$PWD" "$rc" "$((SECONDS - t0))" "$cmd" "$out"

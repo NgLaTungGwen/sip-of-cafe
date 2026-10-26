@@ -91,6 +91,15 @@ if [ -n "$installed" ]; then
     bash "$heavy" "cd apps && bun install --frozen-lockfile > /dev/null" || { need=1; deps="$deps bun-failed"; }
     deps="$deps bun"
   fi
+  # Packages without a root lockfile (lib-packages.sh): each folder whose
+  # lockfile changed and that was installed.
+  . "$(dirname "${BASH_SOURCE[0]}")/lib-packages.sh"
+  for d in $(package_dirs .); do
+    [ -d "$d/node_modules" ] || continue
+    git diff --quiet "$installed" -- "$d/package-lock.json" "$d/bun.lock" "$d/bun.lockb" "$d/pnpm-lock.yaml" "$d/yarn.lock" && continue
+    bash "$heavy" "cd '$d' && $(install_cmd "$(pm_of "$d")") > /dev/null" || { need=1; deps="$deps $d-failed"; }
+    deps="$deps $d"
+  done
   echo "DEPS ${deps:+reinstalled:}${deps:-unchanged}"
 fi
 

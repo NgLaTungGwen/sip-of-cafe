@@ -2,6 +2,10 @@
 # Create an isolated worktree that can run BMAD skills.
 #
 # usage: prepare-worktree.sh <main-root> <name> <branch> [--apps] [--no-install] [--base <rev>]
+#                            [--agents <prefix>]
+#
+# --agents is the agent name prefix: "bmad-batch-build:" when the agents come
+# from the plugin, empty for project or user copies (see SKILL.md).
 #
 # --no-install stops after checkout, copies, .env and pin file. Workers use it
 # and then start scripts/install-deps.sh in the background through bg.sh, so
@@ -18,12 +22,13 @@ set -euo pipefail
 
 root=$1 name=$2 branch=$3
 shift 3
-apps=0 install=1 base=origin/main
+apps=0 install=1 base=origin/main agents=""
 while [ $# -gt 0 ]; do
   case $1 in
     --apps) apps=1 ;;
     --no-install) install=0 ;;
     --base) base=$2; shift ;;
+    --agents) agents=$2; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -41,7 +46,10 @@ git -C "$root" worktree add -b "$branch" "$wt" "$base" >&2
 
 cp -r "$root/_bmad" "$wt/_bmad"
 mkdir -p "$wt/.claude"
-cp -r "$root/.claude/skills" "$wt/.claude/skills"
+# A plugin install may leave the project without .claude/skills of its own.
+if [ -d "$root/.claude/skills" ]; then
+  cp -r "$root/.claude/skills" "$wt/.claude/skills"
+fi
 if [ -d "$root/.claude/agents" ]; then
   cp -r "$root/.claude/agents" "$wt/.claude/agents"
 fi
@@ -77,6 +85,12 @@ heavy="$scripts/heavy.sh" bg="$scripts/bg.sh"
 # Naming api/ in a repo without one sent implementers to a missing directory.
 checks="$wt"
 [ -d "$wt/api" ] && checks="$wt/api"
+# No root package.json (packages in app/ and the like): the first package folder.
+if [ ! -d "$wt/api" ] && [ ! -f "$wt/package.json" ]; then
+  . "$(dirname "${BASH_SOURCE[0]}")/lib-packages.sh"
+  first=$(package_dirs "$wt" | head -1)
+  [ -n "$first" ] && checks="$wt/$first"
+fi
 
 # Pin bmad-build-auto to this worktree. The file sits in the worktree's private
 # copy of _bmad, so the main checkout never sees it.
@@ -93,7 +107,7 @@ persistent_facts = [
 ]
 
 implementation_handoff = """
-Launch a subagent with no prior conversation context, using the \`haiku-implementer\` agent (\`subagent_type: haiku-implementer\`), with this prompt:
+Launch a subagent with no prior conversation context, using the \`${agents}haiku-implementer\` agent (\`subagent_type: ${agents}haiku-implementer\`), with this prompt:
 
 > The project root is $wt. Every file you read or edit, and every command you run, must be inside that directory. Use absolute paths and \`cd $wt && ...\` for shell commands. Nothing outside $wt may change: not the main checkout $root, and not any other worktree.
 >

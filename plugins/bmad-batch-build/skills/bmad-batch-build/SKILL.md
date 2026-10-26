@@ -62,6 +62,29 @@ the shipped one is kept and reported; pass that line on to the user. If the
 script fails, stop and show the user its output. The general-purpose agent is
 no substitute: it has no 1-hour cache and no workflow rules.
 
+**Check the agents before reading the input.** Look at the agent types the
+Agent tool offers you and set `<agents>`, the prefix of every agent name in
+this run:
+
+- `bmad-batch-build:bmad-batch-worker` is listed (the plugin install):
+  `<agents>` is `bmad-batch-build:`.
+- `bmad-batch-worker` is listed (a project or user copy): `<agents>` is empty.
+- Neither: stop now, before reading or splitting anything, and tell the user
+  why. Claude Code finds project agents only in this session's folder and its
+  parents, and picks up a newly created `.claude/agents` folder only after a
+  restart. If `<root>` is not this session's folder or one of its parents,
+  ask the user to open a new session with `<root>` as the workspace folder.
+  Otherwise, ask them to restart this session. Then run the skill again.
+
+Every agent name below is written with this prefix: `<agents>bmad-batch-worker`,
+`<agents>bmad-batch-synthesis`, `<agents>haiku-implementer` and
+`<agents>bmad-batch-enhancer`.
+
+**Branch names follow the repository.** `<run branch>` is the name for a
+branch of type `<type>` (feat, fix, ...) about `<slug>`, in the convention the
+repository's AGENTS.md or CLAUDE.md states (in hive-factory,
+`jayson/<type>-<slug>`). Without a stated convention it is `<type>/<slug>`.
+
 **Tell the user when the run needs them.** Before every question to the user
 (the split approval, a gate failure, a stuck synthesis), send a
 `PushNotification` with one line saying what is needed, then ask. Load the tool
@@ -159,7 +182,7 @@ For every unit, write:
   - **L:** more than 10 files, a new module, or a migration plus API plus UI.
 - `depends_on`: the units whose code it needs to build or test, each with the
   reason (for example "imports the chart kit types"), or none
-- a branch, `jayson/<type>-<slug>-<n>`, used when the unit runs in a parallel
+- a branch, `<run branch>-<n>`, used when the unit runs in a parallel
   wave; a unit in a lane wave works on the run's branch
 - `--apps`, if the unit touches `apps/`
 - the files or areas it owns
@@ -256,7 +279,7 @@ the two stop cases in sections 6 and 7.
 
 ## 4. Launch
 
-The run's integration branch is `<ibranch>` = `jayson/<type>-<slug>`. Its
+The run's integration branch is `<ibranch>` = `<run branch>`. Its
 worktree `<iwt>` is the first worktree that holds it:
 
 - When wave 1 is a lane, `<iwt>` is `<root>/.claude/worktrees/<slug>`, which
@@ -462,8 +485,13 @@ Don't remove the worktrees. Offer to clean them up after the PR merges.
 
 ### Enhance the skill
 
+This step is for the skill's maintainer: run it only when
+`~/.claude/bmad-batch-runs/install/installs.json` exists on this machine
+(it lists the projects a shipped fix is installed into). Anyone else skips
+it; their journal still records the run.
+
 Right after the summary, unless the journal line says no failures or issues
-were recorded, dispatch `bmad-batch-enhancer` in the background with the
+were recorded, dispatch `<agents>bmad-batch-enhancer` in the background with the
 prompt in `<skill>/references/enhancer.md`. It drafts at most one tested fix
 to the skill on a branch of its source clone and publishes nothing. When it
 replies, send a `PushNotification` ("skill fix drafted: <one line>") and tell
@@ -496,7 +524,7 @@ bash "<skill>/scripts/remove-worktree.sh" "<root>" "<name>" "<branch>"
 ```
 
 When wave 1 ran in parallel, the first unit's worktree is on the run's branch, so pass
-`jayson/<type>-<slug>` for it, then delete that unit's own branch with
+`<run branch>` for it, then delete that unit's own branch with
 `git -C "<root>" branch -d <its branch>`.
 
 The script unlinks the npm junctions first, because a plain

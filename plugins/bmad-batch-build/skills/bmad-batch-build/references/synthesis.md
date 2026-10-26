@@ -3,7 +3,8 @@
 A single agent merges the ready units into one integration branch, gets that
 branch green and, at the end of the run, opens the PR. In waves mode it also
 runs between waves, merging and verifying without a PR. Launch it with `Agent`
-(`subagent_type: bmad-batch-synthesis`, `run_in_background: false`, no `model`).
+(`subagent_type: <agents>bmad-batch-synthesis`, `run_in_background: false`, no
+`model`).
 That agent runs on Opus with a 1-hour prompt cache, so its context survives the
 long verify runs. Its prompt is everything below the line, with the
 placeholders filled in.
@@ -150,13 +151,14 @@ The next wave branches off `<ibranch>` as you leave it, so commit everything.
 
 Once every check is green and Final is `yes`:
 
-1. Load the `create-pr` skill (Skill tool) and follow it from
-   `<iwt>`. Its precondition checks must pass. Push with
-   `git push -u origin HEAD`.
+1. If a `create-pr` skill is available, load it (Skill tool) and follow it
+   from `<iwt>`; its precondition checks must pass. Otherwise open the PR
+   with the host's CLI from `<iwt>`: `az repos pr create` for an Azure DevOps
+   remote, `gh pr create` for GitHub. Push first with `git push -u origin HEAD`.
 2. Under "What changed", give one bullet per unit, aggregated by behaviour.
 3. If any units were left out, add a `## Not included` section that lists them
    with their blocking condition.
-4. Keep the description under 4000 characters, as `create-pr` requires.
+4. Keep the description under 4000 characters.
 5. Add a `Work items:` line that lists the stories and the merged units'
    tasks as `#id`, so a reviewer can click through.
 6. End the PR description with:

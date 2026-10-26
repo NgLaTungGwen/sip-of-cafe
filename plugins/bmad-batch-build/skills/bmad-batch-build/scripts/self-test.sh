@@ -23,14 +23,16 @@ for f in "$skill"/scripts/*.py "$skill"/tests/*.py; do
 done
 find "$skill" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
 
-out=$(SELF_TEST_BASH="$BASH" "$py" -W ignore "$skill/tests/test_scripts.py" 2>&1)
-if [ $? -eq 0 ]; then
-  echo "unit tests: $(echo "$out" | grep -m1 '^Ran ')"
-else
-  echo "$out" | grep -A8 -E '^(FAIL|ERROR):'
-  echo "FAIL unit tests"
-  fail=1
-fi
+for t in "$skill"/tests/test_*.py; do
+  out=$(SELF_TEST_BASH="$BASH" "$py" -W ignore "$t" 2>&1)
+  if [ $? -eq 0 ]; then
+    echo "$(basename "$t"): $(echo "$out" | grep -m1 '^Ran ')"
+  else
+    echo "$out" | grep -A8 -E '^(FAIL|ERROR):'
+    echo "FAIL $(basename "$t")"
+    fail=1
+  fi
+done
 find "$skill" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
 
 for root in "$@"; do

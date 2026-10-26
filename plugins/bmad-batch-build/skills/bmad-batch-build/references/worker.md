@@ -29,18 +29,20 @@ The same file takes two waits off the worker's critical path:
 ## Dispatch prompt
 
 Send every worker in **one message**, with one `Agent` call per unit
-(`subagent_type: bmad-batch-worker`, `run_in_background: false`, no `model`).
-That agent (`.claude/agents/bmad-batch-worker.md`) runs on Opus with a 1-hour
+(`subagent_type: <agents>bmad-batch-worker`, `run_in_background: false`, no
+`model`; `<agents>` is the prefix SKILL.md set).
+That agent (`agents/bmad-batch-worker.md`) runs on Opus with a 1-hour
 prompt cache, so its context survives the waits on its coder, its reviewers
 and the test suite. The worker plans, verifies and triages the review; bmad-build-auto runs
 its review subagents at the worker's model, and they keep the default 5-minute
 cache. Opus, not Sonnet: Sonnet workers skipped the review in 31 of 47 units
 (2026-10-21/22), while Opus workers completed the workflow in 62 of 67. The
-code itself is written by the `haiku-implementer` agent that the worktree's
+code itself is written by the `<agents>haiku-implementer` agent that the worktree's
 `implementation_handoff` names. Fill in the placeholders:
 
 - `<root>`: the absolute `<root>` from SKILL.md
 - `<skill>`: the absolute `<skill>` from SKILL.md
+- `<agents>`: the agent name prefix from SKILL.md (`bmad-batch-build:` or empty)
 - `<name>`: `<slug>-<n>`
 - `<wt>`: `<root>/.claude/worktrees/<name>`
 - `<branch>`: the unit's branch
@@ -57,7 +59,7 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
 
 0. Prepare the worktree:
    a. As one foreground Bash call with `timeout: 600000`:
-      bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<name>" "<branch>" --no-install [--base <base>]
+      bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<name>" "<branch>" --no-install --agents "<agents>" [--base <base>]
       If it fails, reply with:
       SPEC: none
       STATUS: blocked
@@ -131,7 +133,7 @@ nothing is merged and only one worktree is installed. The differences from a
 parallel unit:
 
 - `<name>` is `<slug>` and `<branch>` is the run's branch
-  `jayson/<type>-<slug>` for every unit, so `<wt>` is the same for all of them.
+  `<run branch>` for every unit, so `<wt>` is the same for all of them.
   In a run that already has `<iwt>` (a lane wave after a parallel one), `<wt>`
   is `<iwt>` and every unit uses the later-unit prompt below.
 - Dispatch one worker at a time, in the order the split set, and wait for it.
