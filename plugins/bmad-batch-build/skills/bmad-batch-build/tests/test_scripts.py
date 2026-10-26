@@ -27,6 +27,42 @@ journal = load("journal", "journal.py")
 log_event = load("log_event", "log-event.py")
 
 
+SKILL_DIR = os.path.dirname(SCRIPTS)
+
+
+def frontmatter_errors(text):
+    """Problems a strict YAML parser (the `skills` installer) finds in a file's
+    frontmatter. Claude Code reads frontmatter leniently, so a broken one still
+    works locally and only fails on a fresh install."""
+    if not text.startswith("---"):
+        return ["no frontmatter"]
+    head = text.split("---", 2)[1]
+    try:
+        import yaml
+    except ImportError:
+        # Without PyYAML, catch the mistake that happened: a quote inside a
+        # single-quoted value (it must be doubled, '').
+        bad = [k for k, v in (ln.split(":", 1) for ln in head.splitlines() if ":" in ln and not ln.startswith(" "))
+               if v.strip().startswith("'") and "'" in v.strip()[1:-1].replace("''", "")]
+        return [f"unescaped quote in {k}" for k in bad]
+    try:
+        data = yaml.safe_load(head)
+    except yaml.YAMLError as exc:
+        return [str(exc).splitlines()[0]]
+    return [] if isinstance(data, dict) and data.get("name") and data.get("description") else ["no name or description"]
+
+
+class Frontmatter(unittest.TestCase):
+    def test_skill_and_agents_parse_strictly(self):
+        files = [os.path.join(SKILL_DIR, "SKILL.md")] + [
+            os.path.join(SKILL_DIR, "agents", f) for f in os.listdir(os.path.join(SKILL_DIR, "agents"))]
+        for f in files:
+            self.assertEqual(frontmatter_errors(open(f, encoding="utf-8").read()), [], f)
+
+    def test_a_quote_inside_single_quotes_is_caught(self):
+        self.assertTrue(frontmatter_errors("---\nname: x\ndescription: 'the units' sizes'\n---\n"))
+
+
 def unit(i, size="M", deps=()):
     return {"id": i, "title": f"u{i}", "size": size, "depends_on": list(deps)}
 
