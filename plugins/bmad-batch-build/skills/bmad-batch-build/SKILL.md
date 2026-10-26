@@ -55,9 +55,9 @@ Paths in this skill:
 Run `bash "<skill>/scripts/ensure-bmad.sh" "<root>"` before anything else. It
 leaves an existing BMAD install alone and otherwise installs the pinned
 `bmad-method` release into `<root>` (module `bmm`, tool `claude-code`), which
-takes a minute or two. It also copies the run's three agents into
+takes a minute or two. It also copies the run's four agents into
 `<root>/.claude/agents/` when the project doesn't have them: `bmad-batch-worker`,
-`bmad-batch-synthesis` and `haiku-implementer`. A project copy that differs from
+`bmad-batch-synthesis`, `haiku-implementer` and `bmad-batch-enhancer`. A project copy that differs from
 the shipped one is kept and reported; pass that line on to the user. If the
 script fails, stop and show the user its output. The general-purpose agent is
 no substitute: it has no 1-hour cache and no workflow rules.
@@ -431,9 +431,14 @@ python "<skill>/scripts/cost-report.py" --record <slug> --root "<root>"
 It finds this session's log, saves the full report to
 `<root>/.claude/worktrees/_runs/<slug>-cost.txt`, and appends one row to
 `~/.claude/bmad-batch-runs/runs.jsonl`: cost, time, review and repair counts,
-cache and turn-budget checks. Every run is measured this way, so never skip
-it. Record the run the same way when it ends early (cancelled, stopped at the
-gate, or left stuck). If the call fails, say so in the summary and go on.
+cache and turn-budget checks. It also writes the run journal,
+`<root>/.claude/worktrees/_runs/<slug>-journal.md` (scripts/journal.py): every
+failed tool call, every command that failed inside `heavy.sh` or `bg.sh`,
+units blocked or failing the gate, agents that ended without their reply or
+were resumed, classifier denials, synthesis repairs, and the `SKILL ISSUES`
+the agents reported, failures first. Every run is measured this way, so never
+skip it. Record the run the same way when it ends early (cancelled, stopped at
+the gate, or left stuck). If the call fails, say so in the summary and go on.
 
 Then end with a short summary:
 
@@ -448,12 +453,41 @@ Then end with a short summary:
 - anything the user should look at first
 - the `recorded` line from the call above: cost, time, and whether the 1-hour
   cache took effect and any agent ran out of turns
-- every `SKILL ISSUE` line, so the user can have the skill fixed
+- **What happened:** the `journal:` line from the call above, then the
+  journal's problems, failures first: one line each with who, what and how
+  often, at most about ten, and the journal's path for the rest. Include
+  every skill issue. Say plainly when nothing went wrong.
 
 Don't remove the worktrees. Offer to clean them up after the PR merges.
 
+### Enhance the skill
+
+Right after the summary, unless the journal line says no failures or issues
+were recorded, dispatch `bmad-batch-enhancer` in the background with the
+prompt in `<skill>/references/enhancer.md`. It drafts at most one tested fix
+to the skill on a branch of its source clone and publishes nothing. When it
+replies, send a `PushNotification` ("skill fix drafted: <one line>") and tell
+the user in a few lines:
+
+- `ENHANCE: <branch>`: the change, its evidence and the test result, then
+  "Reply **ship it** to publish it and install it in every project", followed
+  by the exact command with absolute paths, so a later session without this
+  skill loaded can run it:
+  `bash "<home>/.claude/bmad-batch-runs/src/sip-of-cafe/plugins/bmad-batch-build/skills/bmad-batch-build/scripts/ship-enhancement.sh" <branch>`.
+  Also name what it queued and anything under `NOT SKILL` worth the user's
+  attention.
+- `ENHANCE: none` or `failed`: one line saying so, plus `NOT SKILL` items.
+
+When the user says "ship it", run that command and report its output. Run
+the source clone's copy, not `<skill>`'s: it is the version being shipped.
+It rebases the branch onto the latest source, re-runs the self-test, pushes,
+and installs into every project in `~/.claude/bmad-batch-runs/install/installs.json`.
+Unshipped drafts are the `enhance/*` branches in
+`~/.claude/bmad-batch-runs/src/sip-of-cafe`; the decisions are in
+`~/.claude/bmad-batch-runs/enhance-log.md`.
+
 `python "<skill>/scripts/runs-summary.py"` compares all recorded runs by skill
-version.
+version; with `--problems` it lists the problems that recur across runs.
 
 To clean up, run this for each worktree:
 

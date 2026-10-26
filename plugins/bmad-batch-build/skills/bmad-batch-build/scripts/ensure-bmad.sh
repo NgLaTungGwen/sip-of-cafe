@@ -16,12 +16,13 @@ version="${BMAD_VERSION:-6.12.0}"
 skill="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # The run dispatches bmad-batch-worker and bmad-batch-synthesis, and the workers
-# hand coding to haiku-implementer. They have to be project agents so
+# hand coding to haiku-implementer; bmad-batch-enhancer drafts skill fixes after
+# the run. They have to be project agents so
 # prepare-worktree.sh can copy them into every worktree. A copy the project
 # already has is left alone; one that differs from the shipped version is
 # reported, so an older copy can be updated by hand.
 mkdir -p "$root/.claude/agents"
-for agent in bmad-batch-worker bmad-batch-synthesis haiku-implementer; do
+for agent in bmad-batch-worker bmad-batch-synthesis haiku-implementer bmad-batch-enhancer; do
   if [[ ! -f "$root/.claude/agents/$agent.md" ]]; then
     cp "$skill/agents/$agent.md" "$root/.claude/agents/"
     echo "agents: installed $agent into $root/.claude/agents"

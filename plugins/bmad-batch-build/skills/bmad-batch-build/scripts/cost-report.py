@@ -17,6 +17,10 @@ current row: runs whose --record call was missed, crashed runs, and runs from
 before recording existed. Reports go to ~/.claude/bmad-batch-runs/reports/.
 --record runs it too, so each finished run sweeps up any that were missed.
 
+Both also build the run journal (journal.py): what failed and what the agents
+reported, written to <store>/journals/<session>.md (and, for --record, to
+_runs/<slug>-journal.md) and kept on the row under "journal".
+
 The main session is counted only from the skill invocation to the last
 synthesis Agent result, so unrelated work in the same session is excluded.
 """
@@ -27,6 +31,9 @@ import json
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import journal  # noqa: E402  (the run journal, built alongside every row)
 
 # $/MTok: input, output, cache read. Cache writes: 1.25x input (5m), 2x (1h).
 PRICES = {"opus": (4, 20, 0.20), "sonnet": (2, 10, 0.20), "haiku": (0.10, 0.50, 0.01), "fable": (10, 50, 1.0)}
@@ -78,6 +85,8 @@ def role(meta, first_line):
         return "haiku"
     if agent == "Explore":
         return "explore"
+    if agent == "bmad-batch-enhancer":
+        return "enhancer"
     if agent in ("bmad-batch-synthesis", "bmad-pb-synthesis") or "ynthesis" in meta.get("description", ""):
         return "synthesis"
     if agent in ("bmad-batch-worker", "bmad-pb-worker") or "Build Auto worker" in first_line:
@@ -583,6 +592,23 @@ def build_row(session, slug, project, mode):
     return row, buf.getvalue()
 
 
+def add_journal(row, session, slug, root, run_copy=False):
+    """Builds the run journal (journal.py): keeps its items on the row, writes
+    <store>/journals/<session>.md, and with run_copy also
+    <root>/.claude/worktrees/_runs/<slug>-journal.md. Returns its headline."""
+    j = journal.build(session, slug, root, store_dir())
+    row["journal"] = {"counts": j["counts"], "items": j["items"][:60], "outcome": j["outcome"]}
+    text = journal.markdown(j, row)
+    paths = [os.path.join(store_dir(), "journals", f"{row['session']}.md")]
+    if run_copy and root:
+        paths.append(os.path.join(root, ".claude", "worktrees", "_runs", f"{slug}-journal.md"))
+    for path in paths:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    return journal.headline(j), paths[-1]
+
+
 def unit_minutes(row, slug, root):
     """Each unit's size and worker minutes, from the run's plan file, so
     plan-waves.py can calibrate S/M/L from real runs. A worker is matched to
@@ -632,6 +658,7 @@ def record(slug, root):
     row["skill_issues"] = issues
     row["unit_minutes"] = unit_minutes(row, slug, root)
     os.makedirs(runs, exist_ok=True)
+    head, jpath = add_journal(row, session, slug, root, run_copy=True)
     with open(os.path.join(runs, f"{slug}-cost.txt"), "w", encoding="utf-8") as fh:
         fh.write(text)
     path = save_row(row)
@@ -641,7 +668,8 @@ def record(slug, root):
           f"first-review high+medium {row['first_review_high_medium']}, fix(merge) {row['fix_merge_commits']}, "
           f"1h-TTL writes {row['mtok_w1h_subagents']} Mtok, turn budget hit: {', '.join(row['turn_budget_hit']) or 'none'}, "
           f"skill issues: {len(issues)}")
-    print(f"report: {os.path.join(runs, slug + '-cost.txt')}; data: {path}")
+    print(head)
+    print(f"report: {os.path.join(runs, slug + '-cost.txt')}; journal: {jpath}; data: {path}")
     return 0
 
 
@@ -686,6 +714,21 @@ def archive(path, project):
             shutil.copyfileobj(fi, fo)
 
 
+def prune_events(days=45):
+    """Drops events.jsonl lines older than the logs they can be matched to;
+    the journals already built keep what they found."""
+    path = os.path.join(store_dir(), "events.jsonl")
+    if not os.path.exists(path):
+        return
+    cut = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+    lines = open(path, encoding="utf-8", errors="ignore").readlines()
+    # "end" is the first field, so the line itself sorts by time.
+    keep = [s for s in lines if s[:40] >= f'{{"end": "{cut[:19]}']
+    if len(keep) < len(lines):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.writelines(keep)
+
+
 def collect(quiet=False, refresh=False):
     """Records every session on this machine that ran the skill and has no
     current row: missed --record calls, crashed runs and older runs alike, and
@@ -696,6 +739,7 @@ def collect(quiet=False, refresh=False):
     (a resumed run) is recorded again.
     """
     rows = {r["session"]: r for r in load_rows()}
+    prune_events()
     reports = os.path.join(store_dir(), "reports")
     os.makedirs(reports, exist_ok=True)
     now = dt.datetime.now().timestamp()
@@ -717,6 +761,7 @@ def collect(quiet=False, refresh=False):
             row["unit_minutes"] = unit_minutes(row, row["slug"], cwd)
             row["system_map"] = (old or {}).get("system_map")
             row["skill_issues"] = (old or {}).get("skill_issues") or []
+            add_journal(row, path, row["slug"], cwd)
         except Exception as exc:  # one unreadable log must not stop the rest
             print(f"collect: skipped {session[:8]}: {exc}")
             continue

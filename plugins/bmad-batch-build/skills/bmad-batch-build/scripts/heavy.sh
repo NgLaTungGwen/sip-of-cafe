@@ -129,4 +129,18 @@ done
 vt=$(( $(nproc 2>/dev/null || echo 8) / 4 )); [ "$vt" -lt 2 ] && vt=2
 export VITEST_MAX_FORKS="${VITEST_MAX_FORKS:-$vt}" VITEST_MAX_THREADS="${VITEST_MAX_THREADS:-$vt}"
 export VITEST_MIN_FORKS="${VITEST_MIN_FORKS:-1}" VITEST_MIN_THREADS="${VITEST_MIN_THREADS:-1}"
-bash -c "$cmd"
+
+# Every command goes into the run journal's event log (log-event.py), unless
+# bg.sh runs this one and logs it itself.
+if [ -n "${BMAD_EVENT_LOGGED:-}" ]; then
+  bash -c "$cmd"
+  exit $?
+fi
+out=$(mktemp)
+t0=$SECONDS
+bash -c "$cmd" 2>&1 | tee "$out"
+rc=${PIPESTATUS[0]}
+py=$(command -v python || command -v python3)
+[ -n "$py" ] && "$py" "$(dirname "${BASH_SOURCE[0]}")/log-event.py" heavy "$PWD" "$rc" "$((SECONDS - t0))" "$cmd" "$out"
+rm -f "$out"
+exit "$rc"

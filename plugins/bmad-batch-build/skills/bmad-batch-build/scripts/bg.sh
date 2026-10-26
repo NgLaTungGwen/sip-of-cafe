@@ -31,9 +31,13 @@ case $mode in
     cmd=${4:?command}
     rm -f "$rc"
     echo $$ > "$dir/$name.pid"
-    bash -c "$cmd" > "$log" 2>&1
+    t0=$SECONDS
+    BMAD_EVENT_LOGGED=1 bash -c "$cmd" > "$log" 2>&1
     code=$?
     echo "$code" > "$rc"
+    # One line in the run journal's event log (log-event.py).
+    py=$(command -v python || command -v python3)
+    [ -n "$py" ] && "$py" "$(dirname "${BASH_SOURCE[0]}")/log-event.py" "bg:$name" "$wt" "$code" "$((SECONDS - t0))" "$cmd" "$log"
     rm -f "$dir/$name.pid"
     echo "$name: $([ "$code" -eq 0 ] && echo ok || echo "failed (rc $code)"); log $log"
     exit "$code"

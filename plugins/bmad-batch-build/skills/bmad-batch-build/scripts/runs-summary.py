@@ -1,14 +1,21 @@
 """Summary of every recorded bmad-batch-build run, grouped by skill version.
 
 usage: python runs-summary.py [--since YYYY-MM-DD] [--out <file>]
+       python runs-summary.py --problems [--since YYYY-MM-DD]
 
 Reads ~/.claude/bmad-batch-runs/runs.jsonl (BMAD_RUNS_DIR overrides the
 folder), which `cost-report.py --record` appends to at the end of every run.
 Medians, not means: one stuck run can cost as much as ten normal ones.
+
+--problems lists the run journals' problems (journal.py) that recur across
+runs: each kind of problem, the number of runs it happened in, the skill
+versions it happened under, and an example. The enhancer reads it to tell a
+pattern from a one-off.
 """
 import collections
 import json
 import os
+import re
 import statistics
 import sys
 
@@ -29,6 +36,33 @@ def fmt(v, unit=""):
     return f"{v:.1f}{unit}" if isinstance(v, float) and not v.is_integer() else f"{v:.0f}{unit}"
 
 
+def shape(detail):
+    """A problem's detail with the run-specific parts (ids, numbers, paths,
+    quoted text) taken out, so the same problem in two runs compares equal."""
+    d = re.sub(r"[A-Za-z]:[/\\][^\s`'\"]*|/[\w.-]+(/[\w.$-]+)+", "<path>", detail or "")
+    d = re.sub(r"\b[0-9a-f]{7,40}\b", "<id>", d)
+    d = re.sub(r"\d+", "N", d)
+    return re.sub(r"\s+", " ", d).strip()[:110]
+
+
+def problems(rows):
+    seen = collections.defaultdict(lambda: {"runs": set(), "versions": set(), "count": 0, "example": None})
+    for r in rows:
+        for it in (r.get("journal") or {}).get("items", []):
+            key = (it["bucket"], it["who"].split(" (")[0].split(" u")[0].split(" #")[0], shape(it["detail"]))
+            s = seen[key]
+            s["runs"].add(r["slug"])
+            s["versions"].add(r.get("skill_version") or "?")
+            s["count"] += it.get("count", 1)
+            s["example"] = s["example"] or f"{r['slug']}: {it['detail'][:160]}" + (f" — `{it['cmd'][:80]}`" if it.get("cmd") else "")
+    ranked = sorted(seen.items(), key=lambda kv: (-len(kv[1]["runs"]), -kv[1]["count"]))
+    lines = [f"Recurring problems across {len(rows)} runs (journal items; runs, total count, versions)", ""]
+    for (bucket, who, d), s in ranked[:40]:
+        lines.append(f"{len(s['runs']):3} runs {s['count']:4}x  {bucket:17} {who:12} {d}")
+        lines.append(f"{'':28}e.g. {s['example']}  [{', '.join(sorted(s['versions']))}]")
+    return lines or ["none"]
+
+
 def main(args):
     since = args[args.index("--since") + 1] if "--since" in args else ""
     out = args[args.index("--out") + 1] if "--out" in args else None
@@ -43,6 +77,9 @@ def main(args):
                 continue
             if (row.get("start") or "") >= since:
                 rows.append(row)
+    if "--problems" in args:
+        sys.stdout.write("\n".join(problems(rows)) + "\n")
+        return
     lines = [f"bmad-batch-build runs{' since ' + since if since else ''}: {len(rows)} (data: {path})", ""]
     if not rows:
         lines.append("No runs recorded yet.")
