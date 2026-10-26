@@ -4,225 +4,324 @@ Claude Code skills.
 
 ## bmad-batch-build
 
-Formerly `bmad-parallel-build`, renamed in 0.6.0 because runs now go in
-parallel or in a lane. If you installed the old plugin, uninstall
-`bmad-parallel-build@sip-of-cafe` and install `bmad-batch-build@sip-of-cafe`.
-Old agent copies `bmad-pb-worker` and `bmad-pb-synthesis` in a project's
-`.claude/agents/` can be deleted.
+Turns a meeting transcript or a list of work items into one reviewed pull
+request. It splits the material into units and shows you the plan. Once you
+approve it, the skill runs one `bmad-build-auto` worker per unit in its own git
+worktree, creates the Azure DevOps tickets, and has a synthesis agent merge
+everything into one branch, get it green and open one PR.
 
-Orchestrates a parallel BMAD build from a meeting transcript or pasted work
-items. It splits the material into independent units and, after you approve the
-split, runs one `bmad-build-auto` worker per unit in its own git worktree. It
-creates the Azure DevOps tickets, then a synthesis agent merges the units into
-one branch, gets it green and opens one PR.
+It adapts to your repository. On the first run it works out how your project
+installs, builds and tests, shows you those commands with the plan, and
+remembers them once you confirm.
+
+Formerly `bmad-parallel-build` (renamed in 0.6.0). If you still have the old
+plugin, uninstall `bmad-parallel-build@sip-of-cafe` and install
+`bmad-batch-build@sip-of-cafe`. You can delete old `bmad-pb-*` agent copies in
+`.claude/agents/`.
 
 ### Install
 
-With npx (any agent the Skills CLI supports):
-
-```bash
-npx skills add NgLaTungGwen/sip-of-cafe            # into this project
-npx skills add NgLaTungGwen/sip-of-cafe -g         # for every project
-```
-
-As a Claude Code plugin:
+As a Claude Code plugin (recommended; the agents come with it):
 
 ```bash
 claude plugin marketplace add NgLaTungGwen/sip-of-cafe
 claude plugin install bmad-batch-build@sip-of-cafe
 ```
 
-### Models
+To update:
 
-Each step runs on the model it needs:
+```bash
+claude plugin marketplace update sip-of-cafe
+claude plugin update bmad-batch-build@sip-of-cafe
+```
+
+then restart Claude Code.
+
+With npx (copies the skill folder into the project, or with `-g` into your
+user folder):
+
+```bash
+npx skills add NgLaTungGwen/sip-of-cafe
+npx skills add NgLaTungGwen/sip-of-cafe -g
+```
+
+With an npx install, the first run copies the run's four agents into
+`<repo>/.claude/agents/`. Claude Code picks up a new `.claude/agents` folder
+only after a restart, and only for sessions opened in that repository or a
+folder inside it. If the skill reports that its agents are missing, restart,
+or open the session in the repository, and run it again.
+
+### Use
+
+Open Claude Code in the repository and run:
+
+```
+/bmad-batch-build <paste the transcript or the work items>
+```
+
+(With the plugin install the command is `/bmad-batch-build:bmad-batch-build`.)
+
+The skill checks its agents first and stops early if they are missing. It
+maps the code, splits the work into units, and shows one approval table: the
+units, their sizes and dependencies, the time estimate for each mode, the
+tickets, and the project commands on a first run. After you approve, it runs
+to the end without asking again, unless a unit fails the gate or synthesis
+gets stuck. At the end you get the PR link, the tickets, the verification
+results, and a "What happened" section that lists anything that failed.
+
+### Adapting to your project
+
+The commands the skill runs live in a project profile,
+`<repo>/.claude/bmad-batch-project.json`:
+
+```json
+{
+  "base": "main",
+  "install":  [{"dir": "app", "cmd": "npm ci --no-audit --no-fund --loglevel=error"}],
+  "checks":   [{"name": "app-typecheck", "dir": "app", "cmd": "npm run typecheck"},
+               {"name": "app-test", "dir": "app", "cmd": "npm run test"}],
+  "suite":    {"dir": "app", "cmd": "npm run test"},
+  "targeted": {"dir": "app", "test": "npx vitest run <files> --reporter=dot",
+               "typecheck": "npm run typecheck"},
+  "after_merge": [],
+  "database": null
+}
+```
+
+- **First run:** `scripts/profile.py detect` drafts the profile from your
+  files:
+  - the base branch, from `origin/HEAD`;
+  - one install per folder with a lockfile (npm, bun, pnpm or yarn);
+  - build, typecheck, lint and test checks from the package scripts;
+  - the full test suite, and the targeted test and typecheck commands. The
+    test runner is found in workspace members too.
+  - whether `.env` names a database.
+
+  Python, Go, Rust and .NET projects get basic defaults. The orchestrator then
+  corrects the draft from your AGENTS.md, CLAUDE.md and README: for example, a
+  rule like "use bun, never npm" changes every command. You confirm the result
+  in the approval table.
+- **Later runs:** the confirmed profile is reused. If a lockfile or a package
+  script changes, the profile is marked stale and shown to you again.
+- **How the commands are used:**
+  - **Workers:** install with `install`, and run `targeted` after every change
+    and `suite` once per unit.
+  - **Synthesis:** runs every `checks` entry at once and `after_merge` after
+    merging, for example code generation. Its changes are committed.
+- **Editing:** edit the file by hand whenever you like. Every command is a plain
+  string run from its `dir`, so any stack works.
+
+Without a profile file, the scripts fall back to their original behaviour,
+which was built for a Node monorepo:
+- a root `npm ci`;
+- `packages/contracts`, and `apps/` with bun;
+- a per-worktree Postgres test database on `127.0.0.1:55432`.
+
+A repository with no lockfile at its root still installs and runs checks per
+package folder.
+
+### Lane, parallel or waves, chosen automatically
+
+At the split, every unit gets a size and a `depends_on` list: the units whose
+code it needs to build or test, each with a reason. `scripts/plan-waves.py`
+sorts the units into waves. A wave holds the units whose dependencies are all
+in earlier waves, and each wave runs whichever way is faster for it:
+
+- **lane:** units take turns in one worktree on the run's branch. Nothing is
+  installed twice and nothing is merged.
+- **parallel:** each unit gets its own worktree, branched from the run's
+  branch as the earlier waves left it. Synthesis merges and verifies the wave
+  before the next one starts.
+
+Independent units usually run in parallel, and a chain or a few small units
+run as a lane; anything else becomes waves. For example, a chart kit and new
+contract fields that three other units import make two parallel waves,
+{1, 2} then {3, 4, 5}: about 450 minutes, against 670 as a lane.
+
+The approval table shows each estimate. Unit times calibrate from your recorded
+runs once a size has five measurements; until then they're S 50, M 100,
+L 160 minutes.
+
+Branches follow your repository's convention when its AGENTS.md or CLAUDE.md
+states one, and `<type>/<slug>` otherwise.
+
+### Models and agents
 
 | Step | Model |
 |---|---|
 | Split and orchestration | your session's model |
 | Code mapping during the split | Sonnet (`Explore`) |
 | Worktree setup, install, build | scripts, no model |
-| Worker: spec, verification, review triage | Opus (`bmad-batch-worker` agent) |
+| Worker: spec, verification, review triage | Opus (`bmad-batch-worker`) |
 | Review layers | the worker's model, as bmad-build-auto requires |
-| Code, from the spec | Haiku (`haiku-implementer` agent) |
-| Synthesis: merge, fix, open the PR | Opus (`bmad-batch-synthesis` agent) |
+| Code, from the spec | Haiku (`haiku-implementer`) |
+| Synthesis: merge, fix, open the PR | Opus (`bmad-batch-synthesis`) |
 
-The worker runs on Opus because Sonnet workers skipped the review step in 31 of
-47 measured units, against 5 of 67 on Opus. Opus and Sonnet cost the same per
-cache read, which is most of a worker's tokens.
+- **Why Opus for the worker:** Sonnet workers skipped the review step in 31 of
+  47 measured units, against 5 of 67 on Opus.
+- **Cache:** the worker and synthesis agents keep a 1-hour prompt cache, so
+  their context survives long installs and test suites. This needs Claude Code
+  v2.1.248 or later.
+- **Turn budgets:** each agent has a `maxTurns` budget (worker 300, coder 300,
+  synthesis 400), so a stuck agent stops instead of running up the bill.
+- **Agent names:** with the plugin, the agents are named
+  `bmad-batch-build:<agent>`; with a copied install they are plain
+  `<agent>`. The skill detects which one applies. To customise an agent, edit
+  its copy in `.claude/agents/`.
 
-The worker and synthesis agents set `experimental: { cacheTtl: 1h }`, so their
-context survives the long waits on installs and test suites instead of being
-re-written after five minutes. That needs Claude Code v2.1.248 or later, and it
-does not apply while a subscription draws usage credits. The
-`haiku-implementer` agent sets `autoCompactWindow: 100000`, so the Haiku coder
-compacts at about 67k tokens; that needs v2.1.296 or later and auto-compact on
-(`"autoCompactEnabled": true`, the default).
+### Speed: keeping waits off the critical path
 
-On first run the skill copies the three agents into the project's
-`.claude/agents/`; edit those copies to change them. A copy that differs from
-the shipped one is kept and reported, so after upgrading the plugin, replace
-the copies you haven't customised.
-
-### Lane, parallel or waves, chosen automatically
-
-At the split, every unit gets a size and the units whose code it needs to
-build or test (`depends_on`, with the reason). `scripts/plan-waves.py` sorts
-the units into waves, where a wave holds the units whose dependencies are all
-in earlier waves. Each wave then runs the faster way for itself:
-
-- **lane:** units take turns in one worktree on the run's branch. Nothing is
-  installed twice and nothing is merged.
-- **parallel:** each unit gets its own worktree, branched from the run's
-  integration branch as the earlier waves left it, and synthesis merges the
-  wave and verifies it before the next wave starts.
-
-No dependencies and enough units gives plain parallel; a chain or small units
-give plain lane; anything else is waves. For example, a chart kit and new
-contract fields that three other units import make two parallel waves,
-{1, 2} then {3, 4, 5}: about 450 minutes against 670 for lane. The approval
-table shows each unit's dependencies and the estimates for lane, parallel and
-waves. Unit times calibrate from recorded runs once a size has five
-measurements (first calibration: S 50, M 100, L 160 min).
-
-### Where the time and the cache go
-
-Most of a run is waiting on installs and test suites, and an agent that waits
-past its cache TTL pays to re-write its whole context. So the flow keeps long
-waits off the critical path and out of large contexts:
-
-- A worker checks out its worktree, starts the install in the background and
-  plans while it runs. The Haiku coder, whose context is still tiny, waits for
-  the install before its first command.
-- The worker starts the full DB suite in the background as soon as the coder
-  returns, and runs the review alongside it.
-- There is no separate integration worktree: synthesis builds the run's
-  branch in the first unit's worktree, so one install fewer competes with the
-  workers.
-- `scripts/merge-units.sh` does the merges, the migration-number check, the
-  contracts sync and any reinstall a lockfile needs; `ado_tickets.py
-  --link-pr` links the PR in one call. Synthesis spends its Opus turns on
-  conflicts, interface drift and failures.
-- Workers report the interfaces they actually built, so the next lane unit
-  and synthesis check those instead of re-reading the code.
-- The orchestrator never reads product code (an `Explore` agent maps it),
-  because its context is re-written each time a worker returns.
-- A stuck synthesis writes its state to a file. If the user answers after its
-  1-hour cache has expired, a fresh agent resumes from that file.
-
-`bg.sh run|wait` carries the background commands; their logs sit in the
-worktree's git dir, so the tree stays clean for the gate. Every wait returns
-within 4 minutes, under the default 5-minute cache TTL that the coder and the
-reviewers use, so a wait never expires their cache.
-
-Each check has one owner. The Haiku coder runs the targeted tests (with a
-compact reporter) and the typechecks of what it touched, after every pass. The
-worker doesn't repeat them; it runs only the full suite, once. Only synthesis
-builds.
-
-Each agent file sets a `maxTurns` budget: worker 300, coder 300, synthesis
-400, about twice the longest run that finished. A stuck agent stops there
-instead of running up the bill. Claude Code has no per-agent cost cap, so the
-turn budget is the limit.
+- **Installs:** each worker starts its install in the background and plans
+  while it runs.
+- **Full test suite:** the worker starts it in the background as soon as the
+  code is written, and runs the review alongside it.
+- **One owner per check:**
+  - the Haiku coder runs the targeted tests and typechecks;
+  - the worker runs only the full suite, once;
+  - only synthesis builds.
+- **Bounded waits:** `bg.sh` runs the background commands, and every wait
+  returns within 4 minutes, inside the 5-minute cache window.
+- **No extra install for synthesis:** synthesis builds the run's branch in the
+  first unit's worktree.
+- **Scripts do the mechanical work:**
+  - `merge-units.sh` handles merges, migration-number checks and reinstalls;
+  - `ado_tickets.py` creates and links the tickets.
 
 ### Many runs on one machine
 
-`scripts/heavy.sh` admits every heavy command (installs, builds, full suites,
-typechecks, the synthesis verify) only while the machine has room. It counts
-the commands running across all sessions and checks free RAM, so parallel runs
-queue instead of crashing each other. Vitest is capped at 3 workers per suite.
-CPU and RAM can still run high; that is expected.
-
-The settings are environment variables:
+`scripts/heavy.sh` queues every heavy command across all sessions on the
+machine: installs, builds, full test suites, typechecks and the final verify.
+A command starts only when a slot and enough free RAM are available. Vitest is
+capped at a quarter of the CPUs per suite.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `BMAD_HEAVY_SLOTS` | CPU count | Commands allowed at once |
 | `BMAD_HEAVY_FLOOR_MB` | 2048 | RAM to keep free |
-| `BMAD_HEAVY_MAX_WAIT` | 1500 s | Wait before a command starts anyway |
-| `BMAD_HEAVY_DIR` | `~/.cache/bmad-heavy` | Where running commands are recorded |
+| `BMAD_HEAVY_MAX_WAIT` | 1500 s | Real time a command waits before it starts anyway |
+| `BMAD_HEAVY_TIMEOUT` | 2700 s | A command running longer is stopped, so a hung install can't block the machine |
+| `BMAD_HEAVY_DIR` | `~/.cache/bmad-heavy` | Where the queue is recorded |
 
-Free RAM is read from `/proc/meminfo` (Git Bash, Linux, WSL). Without that file
-only the slot count applies. Waiting commands start in arrival order.
-
-The agents are told to use `heavy.sh`. To make sure a command they type
-without it still queues, enable the optional hook yourself; the skill never
-turns it on. Add this to the project's `.claude/settings.local.json`, with
-the path to your install:
+An optional hook routes heavy commands that agents type without `heavy.sh`
+through the queue. The skill never turns it on. To enable it, add this to
+`.claude/settings.local.json`, using the path to your install:
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
-      {
-        "matcher": "^Bash$",
-        "hooks": [
-          { "type": "command", "command": "python \"<skill dir>/scripts/heavy_hook.py\"" }
-        ]
-      }
+      { "matcher": "^Bash$",
+        "hooks": [{ "type": "command", "command": "python \"<skill dir>/scripts/heavy_hook.py\"" }] }
     ]
   }
 }
 ```
 
-The hook only touches commands of the form
-`cd <dir under .claude/worktrees/> && <install | build | full test | typecheck>`.
-It rewrites such a command to go through `heavy.sh`, and approves that one
-rewritten call. A command chained with anything else, run outside the
-worktrees, or a targeted test run is left alone, and goes through your normal
-permission rules.
+It only rewrites `cd <worktree> && <install | build | full test | typecheck>`.
+Any other command goes through your normal permission rules.
 
-### Gate and measurement
+### What each run records
 
-Before synthesis, `scripts/check-unit.sh` rejects a unit whose spec shows that
-the workflow did not run: no `baseline_revision`, no `<intent-contract>`, or no
-review pass. You then choose whether to re-dispatch it, merge it marked
-unreviewed, or leave it out.
+- **Gate:** `check-unit.sh` rejects a unit whose spec shows the workflow
+  didn't run: no baseline revision, no intent contract, or no review pass.
+  You then choose to re-dispatch it, merge it marked unreviewed, or leave it
+  out.
+- **Preflight:** before anything is created, `check-test-env.sh` runs one
+  trivial test through the queue. A broken test setup stops the run in
+  seconds.
+- **Cost and time:** `cost-report.py --record` writes the run's cost, time,
+  cache use and review coverage. It adds one row per run to
+  `~/.claude/bmad-batch-runs/runs.jsonl`, across all projects and with the
+  machine's CPUs and RAM. It also sweeps up any run that wasn't recorded, and
+  keeps gzipped logs, because Claude Code deletes transcripts after 30 days.
+- **Journal:** `<repo>/.claude/worktrees/_runs/<slug>-journal.md` records what
+  happened, failures first:
+  - units blocked at the gate;
+  - agents that ran out of turns or had to be resumed;
+  - commands that failed, including inside the queue, where an agent might
+    never see the failure;
+  - classifier denials, blocked calls and shell errors;
+  - synthesis repairs;
+  - the problems the agents report about the skill itself.
 
-`scripts/cost-report.py <session .jsonl>` reports a finished run: cost and
-tokens per role, time per role, tool waits, cache rewrites after idle gaps,
-first-review findings per unit, and synthesis repair commits. A gap counts as
-an idle rewrite when it beats the TTL the write used: 5 minutes, or 1 hour for
-the worker and synthesis agents. That figure is an upper bound, because a write
-after a gap also holds new content. The report gives the median cost per run
-and the mean without outliers (over twice the median cost or time), and counts
-parallel tool calls once ("union"). It splits uncached input from output. It
-also explains the "rest" time that is not workers or synthesis, and flags any
-over an hour.
-
-Every run records itself: at the end the orchestrator runs
-`cost-report.py --record <slug>`. That saves the report next to the run file
-and appends one row per run to `~/.claude/bmad-batch-runs/runs.jsonl`, across
-all projects. `scripts/runs-summary.py [--since YYYY-MM-DD]` compares the
-recorded runs by skill version (median cost and time, review coverage,
-findings, repairs, 1-hour cache, turn budgets). `cost-report.py --collect`
-sweeps every session on the machine that ran the skill and records any without
-a row: missed records, crashed runs and runs from before recording existed.
-Each `--record` runs it too. Collected runs keep a gzipped copy of their logs
-under `~/.claude/bmad-batch-runs/sessions/`, because Claude Code deletes
-transcripts after 30 days by default. `--collect --refresh` rebuilds every row
-after a metric change. Rows also measure code discovery per role (turns,
-context per turn, Read, Grep/Glob and small Bash calls), and Explore counts as
-its own role.
-
-When the project has `docs/architecture/system-map.md` (modules, ownership,
-data flow, and a glossary from business terms to paths), the split reads it
-before sending Explore, and `scripts/check-map.py <root> [--strict]` first
-checks that every path it names still exists.
-
-The machine limits are not hardcoded. heavy.sh gives one slot per CPU and
-checks free RAM, Vitest gets a quarter of the CPUs per suite (at least 2), and
-the "machine is busy" test for the mode choice is a third of the CPUs. The
-worker-time estimates (S/M/L) were measured on a 12-CPU, 32 GB machine; every
-recorded run carries its machine's CPUs and RAM, so they can be recalibrated
-per machine.
+  The final summary shows it as "What happened".
+- **Comparisons:** `runs-summary.py` compares runs by skill version, and
+  `runs-summary.py --problems` lists the problems that recur across runs.
+- **System map:** when `docs/architecture/system-map.md` exists, the split
+  reads it, and `check-map.py` first checks that every path it names still
+  exists.
 
 ### Requirements
 
-- BMAD comes with it: on first run the skill installs `bmad-method` 6.12.0
-  into the project (`_bmad/` and the `bmad-*` skills) if it isn't there yet.
-  An existing install is left alone; set `BMAD_VERSION` to pin another release.
-- Git, bash, Python and `uv`.
-- The Azure CLI with the `azure-devops` extension, with `az devops configure`
-  defaults set for the organisation and project.
-- The worktree scripts assume a Node monorepo with a Postgres test database
-  named in `.env` (`DATABASE_URL`).
+- Git, bash (Git Bash on Windows), Python 3 and `uv`.
+- BMAD: the first run installs `bmad-method` 6.12.0 into the project if it
+  isn't there. An existing install is left alone. Set `BMAD_VERSION` to pin
+  another release.
+- Tickets and PR:
+  - Tickets need the Azure CLI with the `azure-devops` extension and
+    `az devops configure` defaults. If ticket creation fails, the run carries
+    on and reports it.
+  - The PR opens on Azure DevOps (`az repos pr`) or GitHub (`gh pr`).
+
+### Troubleshooting
+
+- **"agents are missing" before the split:**
+  - Copied install: restart Claude Code, or open the session in the
+    repository rather than a parent or sibling folder.
+  - Plugin: update it; versions before 0.10.7 didn't ship their agents.
+- **`npx skills add` finds no skills:** you have a version between 0.9.0 and
+  0.10.3, whose SKILL.md header wasn't valid YAML. Update.
+- **Commands wait for a long time:** check `~/.cache/bmad-heavy`.
+  - `run.<pid>` files are commands holding a slot; `wait.*` files are queued
+    commands.
+  - A hung command now stops at `BMAD_HEAVY_TIMEOUT`.
+- **A command in the profile is wrong:** edit
+  `.claude/bmad-batch-project.json`, or delete it to have it detected again on
+  the next run.
+
+### For the maintainer: the improvement loop
+
+This part only runs on a machine with `~/.claude/bmad-batch-runs/install/installs.json`.
+Everyone else skips it.
+
+1. **Draft:** after each run, the `bmad-batch-enhancer` agent reads the journal
+   and the recurring problems. It drafts at most one fix to the skill in its own
+   worktree of the source clone (`~/.claude/bmad-batch-runs/src/sip-of-cafe`).
+   That fix must pass `scripts/self-test.sh`, which runs:
+   - a syntax check of every script;
+   - strict YAML parsing of SKILL.md and the agents;
+   - the unit and layout tests;
+   - a real Vitest run through the queue.
+2. **Ship:** you reply "ship it". `scripts/ship-enhancement.sh <branch>` then:
+   - takes a lock;
+   - squashes the draft onto the latest `main` and sets the next version;
+   - re-runs the self-test;
+   - pushes;
+   - installs the new version with `install-skill.py`.
+3. **Install:** `install-skill.py` installs into every project in
+   `installs.json`. It skips a project where a session ran the skill in the
+   last 15 minutes; `--force` overrides that. Projects marked `"legacy": true`
+   get no profile.
+
+The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
+
+### Recent changes
+
+- **0.11.0:**
+  - project profile: detected, refined from your docs, confirmed once, then
+    used by every script;
+  - installs skip projects with an active run.
+- **0.10.7:**
+  - the plugin ships its agents, and the skill checks them before reading the
+    input;
+  - installs and checks follow the lockfiles;
+  - the queue's wait limit counts real time, and commands have a time limit;
+  - branch names follow the repository;
+  - the PR step works without a `create-pr` skill.
+- **0.10.4–0.10.6:**
+  - the SKILL.md header is valid YAML again, so `npx skills add` works;
+  - drafts work in their own worktrees;
+  - targeted checks no longer assume an `api/` folder.
+- **0.10.0:** run journal and the improvement loop.
+- **0.9.x:** dependency waves; Vitest worker limits fixed; preflight test
+  check.
