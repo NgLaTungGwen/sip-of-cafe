@@ -426,6 +426,11 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.12.9:** every question to the user is easier to read. Details go in
+  the message; the dialog asks one short question per decision, with
+  labelled options, the default first and a preview where it helps (the
+  unit list on the split approval). Gate, preflight and stuck-synthesis
+  questions now name their options.
 - **0.12.8:** the plan says when a batch run isn't worth it. When the units
   form a chain, run at most 2 at once over 3 or more waves, or have no tests
   and run at most 3 at once, `plan-waves.py` prints an Advice line and the

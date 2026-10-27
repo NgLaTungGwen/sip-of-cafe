@@ -142,9 +142,29 @@ With `REMOTE none`, read every `origin/<base>` in this skill as `<base>`, and
 skip every fetch and push: the run ends on a local branch.
 
 **Tell the user when the run needs them.** Before every question to the user
-(the split approval, a gate failure, a stuck synthesis), send a
-`PushNotification` with one line saying what is needed, then ask. Load the tool
-with `ToolSearch` (`select:PushNotification`) if it is deferred.
+(the split approval, a service that is down, a gate failure, a stuck
+synthesis), send a `PushNotification` with one line saying what is needed,
+then ask. Load the tool with `ToolSearch` (`select:PushNotification`) if it is
+deferred.
+
+**How to ask.** Every question goes through `AskUserQuestion`. Its dialog shows
+plain text only and covers the chat while it is open, so a question that
+carries the details becomes one unreadable paragraph:
+
+- **Details go in your message**, as markdown, before the call: tables, spec
+  paths, error lines, run facts, each on its own line.
+- **The question is one short sentence**: what is being decided, with the
+  counts that matter. No ids, regexes, file or class names, and never a
+  second question inside it.
+- **One decision per question.** Separate decisions are separate questions in
+  the same call, up to four. A combined option such as "Approve, new
+  migration" means two questions were merged.
+- **Headers are at most 12 characters, labels 1–5 words**, and each
+  description is one plain sentence saying what happens if the user picks
+  it, including anything it discards. The default comes first, marked
+  `(Recommended)`.
+- **Use `preview`** when the user needs to see something to choose: the unit
+  list on an approve option, the failing check on a retry option.
 
 ## 1. Read the input
 
@@ -369,6 +389,36 @@ Otherwise ask with `AskUserQuestion` whether to approve, adjust or cancel. Itera
 the user approves. After approval, run to the end without asking, except for
 the two stop cases in sections 6 and 7.
 
+### Asking for approval
+
+Follow "How to ask" above:
+
+- **The message holds the plan**: the story line, the table, the Mode line,
+  any Advice, Combined, map and "Project commands" lines, and the run facts
+  (worktree, branch, base commit, and whether anything is pushed, opened as a
+  PR or written to ADO).
+- **The approval question** gives the counts, for example `Approve the split:
+  2 units in one lane, about 230 min?`. Options: Approve, Adjust, Cancel,
+  with **Build directly** first instead when there is Advice. A correction to
+  the project commands comes in through Adjust or the free-text answer.
+- **The Approve option's `preview`** has one line per unit, `<id>  <size>
+  <title>` plus `after <ids>` when it depends on another, then the Mode line.
+- **Each open ambiguity is its own question** in the same call. Approve then
+  approves the split only.
+
+For the run in the example above, the call would be:
+
+```text
+Q1  [Split]      Approve the split: 2 units in one lane, about 230 min?
+    Approve (Recommended) | Adjust | Cancel
+    preview of Approve:
+      1  L  Count ids, metrics handler, nullable totals, migration
+      2  S  Visitor flow endpoints, 24 h cutoff        after 1
+      Mode: lane (≈230 min). Order: 1 → 2.
+Q2  [Migration]  The LiveCounts migration is not merged yet. Edit it or add a new one?
+    Edit in place (Recommended) | Add a new migration
+```
+
 ## 4. Launch
 
 The run's integration branch is `<ibranch>` = `<run branch>`. Its
@@ -394,7 +444,11 @@ with the workers.
    `database.per_worktree`; skip the Docker check when the project doesn't
    use Docker. When a profile lists a database without `per_worktree`, tell
    the user the test suite may need it running. If either is down,
-   notify and ask the user to start it, and check again before launching.
+   notify and ask `Docker is down. Start it, then check again?` (or
+   Postgres, or both in one sentence), with **Check again (Recommended)**,
+   "I started it; run the check again", and **Stop**, "End the run; nothing
+   was created yet". Check again before launching, and ask again while it is
+   still down.
    Every worker's DB suite needs Postgres at `127.0.0.1:55432`; a run that
    started with Docker down once stalled for nearly five hours.
    `vitest BROKEN` means the limits the skill's scripts set stop Vitest from
@@ -453,7 +507,7 @@ branches off a verified base. It merges what there is to merge, verifies
 `<ibranch>` and replies `RESULT: wave-green`. One synthesis covers both cases
 when a parallel wave follows another. Between two lane waves the unit gates
 are enough, as in a plain lane run. If the wave synthesis replies `stuck`,
-stop and ask before starting the next wave.
+ask as section 7 describes before starting the next wave.
 
 After the last wave, run the final synthesis (`<final>` = `yes`), which opens
 the PR.
@@ -472,11 +526,15 @@ Apply the gate in `references/worker.md` to every unit, in one Bash call with
 
 - **Every unit is ready:** continue (the next unit in a lane wave, or the
   wave's synthesis or the next wave).
-- **Some units are not ready:** show which ones and why, with the spec paths.
-  Ask whether to continue without them, re-dispatch them, or stop. When a unit
-  failed only on workflow traces (no baseline, no intent contract, no review
-  pass), its code exists but is unreviewed; also offer to merge it anyway,
-  marked unreviewed in the PR.
+- **Some units are not ready:** show in your message which ones and why, with
+  the spec paths. Then ask one question per unit, up to four (beyond that,
+  one question for the rest), for example `Unit 3 (metrics handler) isn't
+  ready. What now?`, with **Leave it out**, "Continue; its task stays open and
+  out of the PR", **Re-dispatch**, "A fresh worker builds it again", and
+  **Stop**, "End the run here; the branches stay as they are". When a unit failed only
+  on workflow traces (no baseline, no intent contract, no review pass), its
+  code exists but is unreviewed; also offer **Merge unreviewed**, "Keep its
+  code; the PR marks it unreviewed".
   To re-dispatch, clear the unit first, because `prepare-worktree.sh` refuses an
   existing path and branch:
   `bash "<skill>/scripts/remove-worktree.sh" "<root>" "<name>" "<branch>"`, then
@@ -484,12 +542,14 @@ Apply the gate in `references/worker.md` to every unit, in one Bash call with
   branch). Then send a fresh worker with the same, or a corrected, intent.
 - **A lane unit is not ready:** the lane stops there, because later units
   build on it. A unit that later waves depend on stops the run the same way.
-  Ask whether to:
-  - keep it marked unreviewed and continue with the next unit;
-  - re-dispatch it: reset the lane to the unit's base with
-    `git -C <wt> reset --hard <base>`, then send a fresh worker. This discards
-    that unit's commits;
-  - stop and send what is done to synthesis.
+  Ask `Unit <n> (<short title>) isn't ready and later units build on it. What
+  now?`, with:
+  - **Keep, unreviewed**: "Continue with the next unit; the PR marks this one
+    unreviewed".
+  - **Re-dispatch**: "Discard this unit's commits and build it again". Reset
+    the lane to the unit's base with `git -C <wt> reset --hard <base>`, then
+    send a fresh worker.
+  - **Stop**: "Send the units done so far to synthesis".
 
 ## 7. Synthesis
 
@@ -524,8 +584,11 @@ Then:
 
 - **`RESULT: wave-green`:** start the next wave.
 - **`RESULT: pr`:** go to step 8.
-- **`RESULT: stuck`:** show the failure and the decision it needs. Note the
-  time with `date +%s`. When the user answers:
+- **`RESULT: stuck`:** show the failure in your message: what failed, the
+  error lines and what synthesis already tried. Ask the decision synthesis
+  named as one short question, its choices as the options, and add **Stop**,
+  "Keep the branch as it is; no PR". Several decisions are several questions.
+  Note the time with `date +%s`. When the user answers:
   - within 50 minutes, continue the same synthesis agent with `SendMessage`.
     Its 1-hour cache is still warm.
   - later, its cache has expired, and continuing it would re-write its whole
