@@ -28,15 +28,6 @@ claude plugin marketplace add NgLaTungGwen/sip-of-cafe
 claude plugin install bmad-batch-build@sip-of-cafe
 ```
 
-To update:
-
-```bash
-claude plugin marketplace update sip-of-cafe
-claude plugin update bmad-batch-build@sip-of-cafe
-```
-
-then restart Claude Code.
-
 With npx (copies the skill folder into the project, or with `-g` into your
 user folder):
 
@@ -44,6 +35,9 @@ user folder):
 npx skills add NgLaTungGwen/sip-of-cafe
 npx skills add NgLaTungGwen/sip-of-cafe -g
 ```
+
+The repository has two skills, `bmad-batch-build` and `bmad-batch-dashboard`;
+if the installer asks which to add, take both.
 
 Nothing else to set up. The first step of every run, `scripts/setup.sh`,
 resolves the rest on its own:
@@ -64,6 +58,47 @@ the next session start, so the first run after an npx install uses
 general-purpose agents with the same instructions instead of stopping; it
 costs a little more (no 1-hour cache).
 
+### Update
+
+Check your version first: the `VERSION` file in the skill folder
+(`.claude/skills/bmad-batch-build/VERSION` for an npx install) shows the
+installed version; the latest is under "Recent changes" below.
+
+**Plugin install:**
+
+```bash
+claude plugin marketplace update sip-of-cafe
+claude plugin update bmad-batch-build@sip-of-cafe
+```
+
+then restart Claude Code. The agents update with the plugin.
+
+**npx install:** run the command you installed with again; it replaces the
+skill folder.
+
+```bash
+npx skills add NgLaTungGwen/sip-of-cafe        # installed into the project
+npx skills add NgLaTungGwen/sip-of-cafe -g     # installed user-wide
+```
+
+then start a new Claude Code session. If you ran the skill before, also
+delete the agents its first run copied into your repository, once:
+
+```
+.claude/agents/bmad-batch-worker.md
+.claude/agents/bmad-batch-synthesis.md
+.claude/agents/haiku-implementer.md
+.claude/agents/bmad-batch-enhancer.md
+```
+
+A run keeps a project's own copy of an agent when it differs from the shipped
+one (setup prints `AGENTS note: kept the project's ...`), so without this step
+the old agents stay. The next run copies in the new ones and works with
+general-purpose agents until the session after it loads them.
+
+Nothing else changes on update: the next run's setup installs whatever the
+new version needs.
+
 ### Use
 
 Open Claude Code in the repository and run:
@@ -73,6 +108,31 @@ Open Claude Code in the repository and run:
 ```
 
 (With the plugin install the command is `/bmad-batch-build:bmad-batch-build`.)
+
+### Dashboard
+
+To see every run's metrics as charts, run:
+
+```
+/bmad-batch-dashboard
+```
+
+(With the plugin install: `/bmad-batch-build:bmad-batch-dashboard`.) It
+records any finished run not yet recorded, then opens one page in your
+browser, `~/.claude/bmad-batch-runs/dashboard.html`, with d3 charts: cost per
+run by role, wall time, problems from the run journals, cost and time by skill
+version, how long installs, tests and typechecks took, unit times by size and
+context per turn, plus a table of runs. Filter by date range, project,
+machine and skill version.
+
+- **Quick view:** `/bmad-batch-dashboard quick` skips the refresh and opens
+  the data as last recorded.
+- **Other machines:** someone runs
+  `python <skill>/scripts/metrics.py export` and sends you the file (it holds
+  numbers only, no paths or project names); then
+  `/bmad-batch-dashboard import <file>` adds their runs.
+
+The dashboard needs at least one finished batch build on the machine.
 
 The skill checks its agents first and stops early if they are missing. It
 maps the code, splits the work into units, and shows one approval table: the
