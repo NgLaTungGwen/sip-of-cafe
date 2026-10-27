@@ -657,6 +657,12 @@ def record(slug, root):
     # Workarounds the agents needed for the skill's own scripts and settings.
     row["skill_issues"] = issues
     row["unit_minutes"] = unit_minutes(row, slug, root)
+    # The version that actually ran: this script's own skill copy, at the end
+    # of the run. version_for() only guesses from dates, for collected runs.
+    vfile = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
+    if os.path.exists(vfile):
+        row["skill_version"] = open(vfile).read().split()[0]
+        row["version_exact"] = True
     os.makedirs(runs, exist_ok=True)
     head, jpath = add_journal(row, session, slug, root, run_copy=True)
     with open(os.path.join(runs, f"{slug}-cost.txt"), "w", encoding="utf-8") as fh:
@@ -761,6 +767,8 @@ def collect(quiet=False, refresh=False):
             row["unit_minutes"] = unit_minutes(row, row["slug"], cwd)
             row["system_map"] = (old or {}).get("system_map")
             row["skill_issues"] = (old or {}).get("skill_issues") or []
+            if (old or {}).get("version_exact"):
+                row["skill_version"], row["version_exact"] = old["skill_version"], True
             add_journal(row, path, row["slug"], cwd)
         except Exception as exc:  # one unreadable log must not stop the rest
             print(f"collect: skipped {session[:8]}: {exc}")

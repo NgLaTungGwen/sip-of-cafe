@@ -108,6 +108,10 @@ The commands the skill runs live in a project profile,
     and `suite` once per unit.
   - **Synthesis:** runs every `checks` entry at once and `after_merge` after
     merging, for example code generation. Its changes are committed.
+- **No tests:** a project whose rules forbid running tests (no `suite`, no
+  `targeted.test`) gets instructions to match. Workers skip the full suite, the
+  coder runs only typechecks, and test-based workflow steps are met by tracing
+  each requirement to the code.
 - **Editing:** edit the file by hand whenever you like. Every command is a plain
   string run from its `dir`, so any stack works.
 
@@ -141,6 +145,12 @@ contract fields that three other units import make two parallel waves,
 The approval table shows each estimate. Unit times calibrate from your recorded
 runs once a size has five measurements; until then they're S 50, M 100,
 L 160 minutes.
+
+No parallel wave has more than 4 workers: 3 when one other run is active on
+the machine, and 2 when more are. A larger group of independent units becomes
+several waves in a row. Each worker brings a coder and up to four reviewers,
+and Claude Code allows 20 subagents at once per session. Larger waves got
+launches refused and stalled the machine's build queue.
 
 Branches follow your repository's convention when its AGENTS.md or CLAUDE.md
 states one, and `<type>/<slug>` otherwise.
@@ -179,8 +189,13 @@ states one, and `<type>/<slug>` otherwise.
   - the Haiku coder runs the targeted tests and typechecks;
   - the worker runs only the full suite, once;
   - only synthesis builds.
-- **Bounded waits:** `bg.sh` runs the background commands, and every wait
-  returns within 4 minutes, inside the 5-minute cache window.
+- **Bounded waits:** Claude Code stops any single command after 10 minutes. So
+  everything that can take longer, such as a suite, a build or the final
+  verify, runs through `bg.sh run` in the background. Agents wait with one
+  `bg.sh wait` per call, which returns within 4 minutes, never with loops,
+  `timeout` or `sleep`.
+- **Review fixes:** each fix round goes to a fresh coder in the foreground,
+  so a worker never hands back while fixes are still landing.
 - **No extra install for synthesis:** synthesis builds the run's branch in the
   first unit's worktree.
 - **Scripts do the mechanical work:**
@@ -201,6 +216,10 @@ capped at a quarter of the CPUs per suite.
 | `BMAD_HEAVY_MAX_WAIT` | 1500 s | Real time a command waits before it starts anyway |
 | `BMAD_HEAVY_TIMEOUT` | 2700 s | A command running longer is stopped, so a hung install can't block the machine |
 | `BMAD_HEAVY_DIR` | `~/.cache/bmad-heavy` | Where the queue is recorded |
+
+Each command reserves memory by kind unless `--mem` is given: about 1 GB for a
+typecheck or lint, 1.5 GB for an install, and 2.5 GB for anything else.
+Waiting commands check the queue every 10–14 seconds.
 
 An optional hook routes heavy commands that agents type without `heavy.sh`
 through the queue. The skill never turns it on. To enable it, add this to
@@ -307,6 +326,20 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.12.0:**
+  - parallel waves are capped at 4 workers, and fewer when other runs are
+    active;
+  - review fixes go to a fresh foreground coder;
+  - long commands always run in the background through `bg.sh`;
+  - projects without tests are handled;
+  - workarounds for BMAD's missing `baseline_revision`, a gitignored
+    `_bmad-output/` and the `:!_bmad-output` pathspec;
+  - `verify.sh --no-test`;
+  - queue memory estimates per kind of command;
+  - exact skill versions are recorded per run;
+  - a Windows-style project path (`D:\Projects\...`) no longer breaks the
+    workers' pinned settings.
+- **0.11.1:** workers may build when the intent or AGENTS.md requires it.
 - **0.11.0:**
   - project profile: detected, refined from your docs, confirmed once, then
     used by every script;

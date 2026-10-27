@@ -1,6 +1,6 @@
 """Schedule a run's units by their dependencies, and estimate each mode.
 
-usage: python plan-waves.py <plan.json> [--busy]
+usage: python plan-waves.py <plan.json> [--busy] [--max-parallel N]
 
 plan.json is written by the orchestrator at the split, next to the run file
 (_runs/<slug>-plan.json):
@@ -30,6 +30,15 @@ faster (20 min, 40 when --busy), a tie going to lane. A wave of 5 or more is
 parallel. With no dependencies this is exactly the old lane/parallel choice;
 with a single chain it is lane.
 
+No parallel wave has more than --max-parallel workers (default 4; 3 when one
+other run is active on the machine, 2 when two or more are). A larger wave is
+split into several in a row. Each worker brings a coder and up to four
+reviewers, and Claude Code allows 20 subagents at once per session, so 5
+workers already got launches refused; and on 2026-10-26 runs of 12, 9 and 5
+parallel workers at the same time stalled the machine-wide build queue for
+hours. Other active runs are sessions that ran the skill and wrote their log
+in the last 15 minutes.
+
 Unit minutes come from recorded runs (~/.claude/bmad-batch-runs/runs.jsonl,
 each row's unit_minutes) once a size has 5 measurements, and otherwise from
 the first calibration: S 50, M 100, L 160.
@@ -47,6 +56,7 @@ WARM = 10        # saved per lane unit after the first
 MERGE = 50       # a parallel wave's merge and verify
 RUN = 30         # preparation and the final verify, once per run
 MIN_SAMPLES = 5
+MAX_PARALLEL = 4     # workers in one parallel wave (Claude Code's 20-subagent limit)
 
 
 def calibration():
@@ -91,18 +101,68 @@ def waves_of(units):
     return waves
 
 
-def plan(units, busy=False, minutes=None):
+def other_active_runs(minutes=15):
+    """Sessions on this machine that ran the skill and wrote their log in the
+    last <minutes> minutes, not counting the newest one (this run's own)."""
+    import glob
+    import time
+    marks = ("<command-name>/bmad-batch-build", '"skill":"bmad-batch-build', '"skill": "bmad-batch-build')
+    active = []
+    for f in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
+        m = os.path.getmtime(f)
+        if time.time() - m > minutes * 60:
+            continue
+        with open(f, encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if any(k in line for k in marks) and invokes(line):
+                    active.append(m)
+                    break
+    return max(len(active) - 1, 0)
+
+
+def invokes(line):
+    try:
+        x = json.loads(line)
+    except ValueError:
+        return False
+    m = x.get("message")
+    c = m.get("content") if isinstance(m, dict) else None
+    if x.get("type") == "user":
+        texts = [c] if isinstance(c, str) else [b.get("text", "") for b in c or [] if isinstance(b, dict)]
+        return any("<command-name>/bmad-batch-build" in s for s in texts)
+    return x.get("type") == "assistant" and isinstance(c, list) and any(
+        b.get("type") == "tool_use" and b.get("name") == "Skill"
+        and str((b.get("input") or {}).get("skill", "")).startswith("bmad-batch-build") for b in c)
+
+
+def cap_for(other_runs):
+    return MAX_PARALLEL if other_runs == 0 else (3 if other_runs == 1 else 2)
+
+
+def split_waves(waves, max_par):
+    """A dependency level with more units than max_par becomes several waves."""
+    out = []
+    for wave in waves:
+        if len(wave) <= max_par:
+            out.append(wave)
+        else:
+            out += [wave[i:i + max_par] for i in range(0, len(wave), max_par)]
+    return out
+
+
+def plan(units, busy=False, minutes=None, max_par=MAX_PARALLEL):
     minutes = minutes or DEFAULT
     t = {u["id"]: minutes[u["size"]] for u in units}
     margin = 40 if busy else 20
-    waves = waves_of(units)
+    levels = waves_of(units)
+    waves = split_waves(levels, max_par)
     schedule, total, first = [], RUN, True
     for wave in waves:
         k = len(wave)
         times = [t[u["id"]] for u in wave]
         lane = sum(times) - WARM * (k - (1 if first else 0))
         par = max(times) + MERGE
-        if k >= 5 or (k >= 2 and par + margin < lane):
+        if (k >= 5 and k <= max_par) or (k >= 2 and par + margin < lane):
             how, wt = "parallel", par
         else:
             how, wt = "lane", lane
@@ -111,7 +171,7 @@ def plan(units, busy=False, minutes=None):
         first = False
     order = [u for w in waves for u in w]
     lane_total = sum(t[u["id"]] for u in order) - WARM * (len(order) - 1) + RUN
-    independent = len(waves) == 1
+    independent = len(levels) == 1 and len(waves) == 1
     parallel_total = max(t.values()) + MERGE + RUN if independent else None
     kinds = {w["run"] for w in schedule}
     if kinds == {"lane"}:
@@ -120,8 +180,9 @@ def plan(units, busy=False, minutes=None):
         mode, chosen = "parallel", parallel_total
     else:
         mode, chosen = "waves", total
+    capped = max_par if len(levels) == 1 and len(waves) > 1 else None
     return {"waves": schedule, "mode": mode, "estimate": chosen,
-            "lane": lane_total, "parallel": parallel_total, "waves_total": total}
+            "lane": lane_total, "parallel": parallel_total, "waves_total": total, "capped": capped}
 
 
 def mode_line(units, result):
@@ -130,7 +191,9 @@ def mode_line(units, result):
     shape = " → ".join(
         ("{" + ",".join(map(str, w["units"])) + "}" if w["run"] == "parallel" else ",".join(map(str, w["units"])))
         for w in result["waves"])
-    par = f"parallel ≈{result['parallel']} min" if result["parallel"] else "parallel not possible"
+    par = (f"parallel ≈{result['parallel']} min" if result["parallel"]
+           else f"all in parallel exceeds the cap of {result['capped']} workers" if result.get("capped")
+           else "parallel not possible")
     line = (f"Mode: {result['mode']} (≈{result['estimate']} min; lane ≈{result['lane']} min, {par}, "
             f"waves ≈{result['waves_total']} min). Order: {shape}.")
     if deps:
@@ -146,7 +209,10 @@ def main(args):
     data = json.load(open(path, encoding="utf-8"))
     units = data["units"]
     minutes, source = calibration()
-    result = plan(units, busy="--busy" in args, minutes=minutes)
+    others = other_active_runs()
+    max_par = int(args[args.index("--max-parallel") + 1]) if "--max-parallel" in args else cap_for(others)
+    result = plan(units, busy="--busy" in args or others > 0, minutes=minutes, max_par=max_par)
+    print(f"parallel cap: {max_par} workers per wave ({others} other active run(s))")
     for i, w in enumerate(result["waves"], 1):
         print(f"wave {i}: units {', '.join(map(str, w['units']))} — {w['run']}, ≈{w['minutes']} min")
     print("unit minutes: " + ", ".join(f"{s} {minutes[s]} ({source[s]})" for s in DEFAULT))

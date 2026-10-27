@@ -19,7 +19,11 @@ Keep turns few and context small:
   re-reads your whole context.
 - After the first full verify, re-run only what failed: the failing test files,
   or the one check that failed. Run the full verify once more at the end.
-- Long checks run in the foreground with `timeout: 600000`. If one is moved
-  to the background, wait for it with a bounded poll, for example
-  `timeout 240 bash -c 'until grep -q "<done marker>" <log>; do sleep 15; done'`,
-  then read the log. Never write an unbounded `until ... sleep` loop.
+- No Bash call may run past 10 minutes; Claude Code moves a longer one
+  to the background. Start anything that can take longer with
+  `bash <skill>/scripts/bg.sh run <worktree> <name> "<command>"` as a Bash call
+  with `run_in_background: true`, then wait with one
+  `bash <skill>/scripts/bg.sh wait <worktree> <name>` per Bash call (it
+  returns within 4 minutes), repeated while it prints still running. Never
+  wrap a wait in a loop, `timeout` or `sleep`, and never start a command with
+  `sleep N`: the harness blocks it.

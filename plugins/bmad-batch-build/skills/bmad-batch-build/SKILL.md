@@ -245,6 +245,13 @@ unit depends on another) and waves, and picks the mode:
 - **lane:** every wave runs as a lane: one unit, small units, or a chain.
 - **waves:** anything else.
 
+No parallel wave has more than 4 workers, 3 when one other run is active on
+the machine and 2 when more are; a larger group of independent units becomes
+several waves in a row. Each worker brings a coder and up to four reviewers,
+and Claude Code allows 20 subagents at once per session; on 2026-10-26 runs of
+12, 9 and 5 parallel workers at the same time got launches refused and
+stalled the build queue for hours. The script prints the cap it used.
+
 Unit times come from measured runs once a size has five measurements, and
 until then from the first calibration: S 50 min, M 100 min, L 160 min. The
 script writes the schedule back into the plan file and prints the **Mode**

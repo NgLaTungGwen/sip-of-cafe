@@ -111,24 +111,28 @@ Commit each repair as its own `fix(merge): ...` commit.
 (`.claude/bmad-batch-project.json`) it runs the profile's checks instead and
 ignores `--apps` and `--infra`. `heavy.sh` holds it until the machine has
 room, shared with every other session, so a busy machine slows the verify
-instead of crashing it. Use one foreground Bash call with `timeout: 600000`,
-adding `--apps` if `apps/` changed and `--infra` if `infra/` changed:
+instead of crashing it. It often takes longer than the 10 minutes one Bash
+call may run, so start it in the background, adding `--apps` if `apps/`
+changed, `--infra` if `infra/` changed, and `--no-test` when the run changed
+nothing the test suite covers (only docs, pipeline YAML, or scripts outside
+the workspaces):
 
 ```bash
-bash "<skill>/scripts/heavy.sh" --weight 3 "bash '<skill>/scripts/verify.sh' '<iwt>' [--apps] [--infra]"
+bash "<skill>/scripts/bg.sh" run "<iwt>" verify "bash '<skill>/scripts/heavy.sh' --weight 3 \"bash '<skill>/scripts/verify.sh' '<iwt>' [--apps] [--infra] [--no-test]\""
 ```
 
-It prints the log folder and one `<check>.rc:<exit code>` line per check. The
-logs sit outside the worktree, so the tree stays clean. Read only the failing
-part of each log whose check didn't return 0. If the call runs out of time, run
-the slow check again on its own.
+as a Bash call with `run_in_background: true`, then
+`bash "<skill>/scripts/bg.sh" wait "<iwt>" verify` once per Bash call while it
+prints still running. The log ends with the log folder and one
+`<check>.rc:<exit code>` line per check. Those logs sit outside the worktree,
+so the tree stays clean. Read only the failing part of each log whose check
+didn't return 0.
 
 While fixing, re-run only what failed: the failing test files
 (`cd api && npx vitest run <files>`, `cd apps && bun test <files>`), or the one
-check that failed. Run the full block above once more after the last fix,
-before the PR. If a check is moved to the background, wait for it with a
-bounded poll (`timeout 240 bash -c 'until grep -q "<done marker>" <log>; do sleep 15; done'`),
-never an unbounded `until ... sleep` loop.
+check that failed. Run the full verify above once more after the last fix,
+before the PR. Anything that may take over 10 minutes goes through `bg.sh`
+the same way; never wrap a wait in a loop, `timeout` or `sleep`.
 
 Tests alone are not enough. In this repo vitest can pass while typecheck fails.
 
@@ -198,6 +202,6 @@ NOTES: <anything the user must know, or none>
 SKILL ISSUES: <each time a skill script, its settings or these instructions
 got in the way and you worked around it (for example a test command that
 failed before any test ran until you changed its environment): the command,
-the error line and the workaround, one per `;`. Not faults in the code being
+the error line and the workaround, separated by ` | `. Not faults in the code being
 merged. Or none>
 ```

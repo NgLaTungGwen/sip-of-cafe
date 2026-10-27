@@ -83,6 +83,16 @@ class PlanWaves(unittest.TestCase):
     def test_two_small_units_stay_in_one_lane(self):
         self.assertEqual(waves.plan([unit(1, "S"), unit(2, "S")])["mode"], "lane")
 
+    def test_a_large_independent_group_is_capped_into_several_waves(self):
+        r = waves.plan([unit(i) for i in range(1, 13)], max_par=4)
+        self.assertEqual([w["units"] for w in r["waves"]], [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]])
+        self.assertEqual(r["mode"], "waves")
+        self.assertEqual(r["capped"], 4)
+        self.assertIn("exceeds the cap of 4", waves.mode_line([unit(i) for i in range(1, 13)], r))
+
+    def test_the_cap_tightens_with_other_active_runs(self):
+        self.assertEqual([waves.cap_for(n) for n in (0, 1, 2, 5)], [4, 3, 2, 2])
+
     def test_a_cycle_is_rejected(self):
         with self.assertRaises(SystemExit):
             waves.plan([unit(1, deps=[2]), unit(2, deps=[1])])
@@ -142,7 +152,7 @@ class Journal(unittest.TestCase):
                    "2026-10-26T10:30:00Z"),
             {"type": "assistant", "timestamp": "2026-10-26T10:40:00Z", "message": {"id": "m99", "content": [
                 {"type": "text", "text": "SPEC: /x/spec.md\nSTATUS: done\nBLOCKED: none\nHEAD: abc\n"
-                                         "INTERFACES: none\nSKILL ISSUES: heavy.sh broke vitest; bg.sh wait too short"}]}},
+                                         "INTERFACES: none\nSKILL ISSUES: heavy.sh broke vitest | bg.sh wait too short; it returned early"}]}},
         ])
         json.dump({"agentType": "bmad-batch-worker", "toolUseId": "t1"}, open(sub + ".meta.json", "w"))
         self.store = os.path.join(self.dir, "store")

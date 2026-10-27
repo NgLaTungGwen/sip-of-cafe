@@ -29,15 +29,18 @@ You own the targeted verification: the worker does not repeat it, and runs
 only the full suite, once, after you return. So run it after your first pass
 and again after every review fix you are sent, and report each result:
 
-- Run only the test files you added or changed (`npx vitest run <files>
-  --reporter=dot` in `api/`, `bun test <files>` in `apps/`), and the typecheck of each workspace
-  you touched. Run typechecks through the `heavy.sh` queue your prompt names;
-  it waits until the machine has memory for them.
-- Never run `npm test` for the whole repo or `npm run build`. If a command is
-  moved to the background, wait for it with a bounded poll
-  (`timeout 240 bash -c 'until grep -q "<done marker>" <log>; do sleep 15; done'`),
-  never an unbounded `until ... sleep` loop. Never start a command with
-  `sleep N` (`sleep 60; cat <log>`): the harness blocks it, so use the poll.
+- Run only the test files you added or changed, and the typecheck of each
+  workspace you touched, with the commands your prompt names (it says so when
+  the project runs no tests). Run typechecks through the `heavy.sh` queue your
+  prompt names; it waits until the machine has memory for them.
+- Never run the whole test suite or the build. No Bash call may run past 10
+  minutes. For anything longer, use the `bg.sh` your prompt names:
+  `bash <bg.sh> run <worktree> <name> "<command>"` with
+  `run_in_background: true`, then one `bash <bg.sh> wait <worktree> <name>`
+  per Bash call while it prints still running. Never wrap a wait in a loop,
+  `timeout` or `sleep`, and never start a command with `sleep N`: the harness
+  blocks it.
+- Write logs and scratch files only inside the worktree.
 
 When you finish, report what you changed, how you verified it, and anything left
 incomplete or risky.

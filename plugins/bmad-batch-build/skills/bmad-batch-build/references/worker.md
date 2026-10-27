@@ -79,7 +79,8 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
    the implementation handoff, review. Subagents you launch must run in the
    foreground, as that workflow requires. A spec written after the code, or a
    skipped review, fails the gate and the unit is not merged.
-3. When the workflow halts, reply with exactly these lines and nothing else:
+3. When the workflow halts, and only once every implementation subagent you
+   launched has returned, reply with exactly these lines and nothing else:
    SPEC: <absolute path of the spec or result file the workflow wrote>
    STATUS: <the status in its frontmatter>
    BLOCKED: <blocking condition, or none>
@@ -89,7 +90,7 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
    differ from the intent's agreed shape with "CHANGED". Or "none".>
    SKILL ISSUES: <each time a skill script, its settings or these
    instructions got in the way and you worked around it: the command, the
-   error line and the workaround, one per `;`. Not faults in the project's
+   error line and the workaround, separated by ` | `. Not faults in the project's
    own code. Or "none".>
 
 Intent:

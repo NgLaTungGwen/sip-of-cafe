@@ -171,9 +171,43 @@ class Profile(Layouts):
         branch = subprocess.run(["git", "-C", wt, "log", "-1", "--format=%D"], capture_output=True, text=True).stdout
         self.assertIn("develop", branch)
 
+    def test_a_project_without_a_suite_gets_no_suite_instructions(self):
+        import tomllib
+        remote = os.path.join(self.tmp, "remote.git")
+        git("init", "-q", "--bare", "-b", "main", remote)
+        git("clone", "-q", remote, self.repo)
+        os.makedirs(os.path.join(self.repo, "_bmad", "custom"))
+        write(os.path.join(self.repo, "package.json"), "{}")
+        write(os.path.join(self.repo, ".gitignore"), "_bmad/\n.claude/\n")
+        git("add", "-A", cwd=self.repo)
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init", cwd=self.repo)
+        git("push", "-q", "origin", "main", cwd=self.repo)
+        write(os.path.join(self.repo, ".claude", "bmad-batch-project.json"), json.dumps(
+            {"base": "main", "install": [], "checks": [], "suite": None,
+             "targeted": {"dir": ".", "test": None, "typecheck": "npm run typecheck"}}))
+        r, _ = self.run_script("prepare-worktree.sh", self.repo, "u-1", "feat/u-1", "--no-install")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        path = os.path.join(self.repo, ".claude", "worktrees", "u-1", "_bmad", "custom", "bmad-build-auto.toml")
+        doc = tomllib.load(open(path, "rb"))["workflow"]
+        facts = " ".join(doc["persistent_facts"])
+        self.assertIn("no full test suite to run", facts)
+        self.assertNotIn("npm test", facts)
+        self.assertIn("runs no tests", doc["implementation_handoff"])
+        self.assertIn("launch a new `haiku-implementer`", facts)
+
+    def test_verify_no_test_skips_the_suite(self):
+        write(os.path.join(self.repo, "package.json"), '{"name": "x"}')
+        write(os.path.join(self.repo, "package-lock.json"), "{}")
+        r, calls = self.run_script("verify.sh", self.repo, "--no-test")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("npm test", [c.split(" @ ")[0] for c in calls])
+        self.assertIn("npm run build", [c.split(" @ ")[0] for c in calls])
+
     def test_prepare_worktree_without_a_profile_keeps_the_original_commands(self):
         wt, toml, env = self.prepared(with_profile=False)
         self.assertIn("/u-1 && npm test'", toml)
+        import tomllib
+        tomllib.loads(toml)  # still valid TOML
         self.assertIn("127.0.0.1:55432", env)
 
 

@@ -294,7 +294,9 @@ def build(session, slug=None, root=None, store=None):
                 add("synthesis", who, f"VERIFY: {v[:240]}")
         issues = field(reply, "SKILL ISSUES")
         if issues and issues.lower().strip(". ") != "none":
-            for part in issues.split(";"):
+            # Issues are separated by " | " (older replies used ";", which
+            # agents also write inside an issue, so those stay whole).
+            for part in issues.split(" | "):
                 if part.strip():
                     add("skill_issue", who, part.strip()[:300])
         if len(turns) >= TURN_BUDGET.get(r, 10 ** 9):

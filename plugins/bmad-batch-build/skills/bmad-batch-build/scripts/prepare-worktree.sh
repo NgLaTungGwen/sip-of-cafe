@@ -21,6 +21,9 @@
 set -euo pipefail
 
 root=$1 name=$2 branch=$3
+# Forward slashes: the root ends up inside TOML strings below, where a
+# backslash (D:\Projects\...) starts an escape sequence and breaks the file.
+root=${root//\\//}
 shift 3
 . "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
 apps=0 install=1 base="origin/$(profile_get "$root" base || echo main)" agents=""
@@ -101,7 +104,9 @@ if [ ! -d "$wt/api" ] && [ ! -f "$wt/package.json" ]; then
   [ -n "$first" ] && checks="$wt/$first"
 fi
 # The project profile's commands, when it has them.
-if s=$(profile_get "$root" suite); then
+if profile_get "$root" base > /dev/null && ! profile_get "$root" suite > /dev/null; then
+  suite_cmd=""
+elif s=$(profile_get "$root" suite); then
   d=$(printf '%s\n' "$s" | awk -F'\t' '$1=="dir"{print $2}'); c=$(printf '%s\n' "$s" | awk -F'\t' '$1=="cmd"{print $2}')
   [ -n "$c" ] && suite_dir="$wt/$d" suite_cmd="$c"
 fi
@@ -110,6 +115,19 @@ if s=$(profile_get "$root" targeted); then
   checks="$wt/${d:-.}"
   t_test=$(printf '%s\n' "$s" | awk -F'\t' '$1=="test"{print $2}')
   t_tc=$(printf '%s\n' "$s" | awk -F'\t' '$1=="typecheck"{print $2}')
+fi
+# The suite part of the testing fact, or what to do when there is no suite.
+if [ -n "$suite_cmd" ]; then
+  suite_fact="The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full suite exactly once; the full suite is the only check you run. Run that full suite off the critical path: as soon as the implementation subagent returns, start \`bash $bg run $wt suite \\\"bash $heavy 'cd $suite_dir && $suite_cmd'\\\"\` as a Bash call with run_in_background: true, and launch the review straight away. Before review triage, run \`bash $bg wait $wt suite\` (again while it prints still running) and triage a failure like any other review finding. After a suite failure, send the fix to a new implementation subagent, which re-runs only the failing files."
+else
+  suite_fact="This project has no full test suite to run (its project profile lists none, for example because AGENTS.md forbids running tests): skip the full-suite step. A workflow step that asks for a passing test per row, such as the Matrix Test Audit, is met by tracing each row to the code that satisfies it, and the spec says so."
+fi
+# Without a suite and without a targeted test command the project runs no tests.
+if [ -z "$suite_cmd" ] && [ -z "$t_test" ]; then
+  t_clause="This project runs no tests (see AGENTS.md); run"
+else
+  t_run=${t_test:-"the project test command, limited to those files"}
+  t_clause="Run the test files you added or changed, with a compact reporter (\`cd $checks && $t_run\`), and"
 fi
 [ -n "$t_test" ] || t_test="the project's test command, limited to those files"
 [ -n "$t_tc" ] || t_tc="the project's typecheck or build check"
@@ -122,9 +140,11 @@ cat > "$wt/_bmad/custom/bmad-build-auto.toml" <<EOF
 persistent_facts = [
   "The project root for this run is $wt. Every file read, edit, test and git command targets that directory. Never touch anything outside $wt: not the main checkout $root, and not any other worktree.",
   "Run shell commands as \`cd $wt && ...\`, or use \`git -C $wt\`.",
-  "Source files change only through the implementation subagent, review fixes included: send them to it again. The parent edits only the spec and files under _bmad-output/.",
+  "Source files change only through the implementation subagent, review fixes included. For every fix round, launch a new \`${agents}haiku-implementer\` with the Agent tool in the foreground, giving it the spec path and the fixes. Never resume an earlier one with SendMessage: that runs in the background, and you would end your turn before the fixes land. Never end your turn or hand back while a fix round is running. The parent edits only the spec and files under _bmad-output/.",
+  "No single Bash call may run longer than 10 minutes; Claude Code moves a longer one to the background. Start anything that can take longer (the full suite, a build, an install) with \`bash $bg run $wt <name> \"<command>\"\` as a Bash call with run_in_background: true, and wait for it with one \`bash $bg wait $wt <name>\` per Bash call, repeated while it prints still running. Never wrap a wait in a loop, \`timeout\` or \`sleep\`. Logs and scratch files stay inside $wt.",
+  "Workflow gaps: if the spec template has no baseline_revision, set it to the output of \`git -C $wt rev-parse HEAD\` before the first change. If _bmad-output/ is gitignored, commit the spec with \`git add -f\`. Exclude _bmad-output from git pathspecs with ':(exclude)_bmad-output'; the short form ':!_bmad-output' fails with 'Unimplemented pathspec magic'.",
   "Dependencies install in the background while you plan; planning needs only the checkout. Before any command that needs node_modules (tests, typecheck, build, lint), run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, halt with its output as the blocking condition.",
-  "Testing has one owner per check. The implementation subagent runs the targeted test files and the typecheck of each workspace it touched, after its first pass and after every review fix, and reports the results. You do not re-run them: if it reports one it could not get green, send that back to it. The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full DB suite exactly once; the full suite is the only check you run. Run that full suite off the critical path: as soon as the implementation subagent returns, start \`bash $bg run $wt suite \"bash $heavy 'cd $suite_dir && $suite_cmd'\"\` as a Bash call with run_in_background: true, and launch the review straight away. Before review triage, run \`bash $bg wait $wt suite\` (again while it prints still running) and triage a failure like any other review finding. After a suite failure, send the fix to the implementation subagent, which re-runs only the failing files. Synthesis builds, so skip the build unless the intent, the spec's Verification or AGENTS.md requires one; then run it once, after the implementation subagent returns, through the queue: \`bash $heavy 'cd $wt && <the project build command>'\`.",
+  "Testing has one owner per check. The implementation subagent runs the targeted test files and the typecheck of each workspace it touched, after its first pass and after every review fix, and reports the results. You do not re-run them: if it reports one it could not get green, send that back to it. $suite_fact Synthesis builds, so skip the build unless the intent, the spec's Verification or AGENTS.md requires one; then run it once, after the implementation subagent returns, through the queue: \`bash $heavy 'cd $wt && <the project build command>'\`.",
   "file:AGENTS.md",
 ]
 
@@ -137,7 +157,7 @@ Launch a subagent with no prior conversation context, using the \`${agents}haiku
 >
 > Read {spec_file} fully and implement it. The spec is the sole source of truth. Load every file listed in its frontmatter \`context:\` before you start.
 >
-> You own the targeted checks; the parent does not repeat them. Run the test files you added or changed, with a compact reporter (\`cd $checks && $t_test\`), and the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $checks && $t_tc'\`). Run them again after every review fix you are sent. Report each result.
+> You own the targeted checks; the parent does not repeat them. $t_clause the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $checks && $t_tc'\`). Run them again after every review fix you are sent. Report each result.
 >
 > When you're done, report what you changed, how you verified it, and anything left incomplete or risky.
 """

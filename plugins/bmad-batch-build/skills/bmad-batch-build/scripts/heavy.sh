@@ -34,7 +34,17 @@ while [ $# -gt 1 ]; do
   esac
 done
 cmd=${1:?usage: heavy.sh [--weight N] [--mem MB] <command string>}
-mem=${mem:-$((2500 * weight))}
+# Memory to reserve, by kind of command, unless --mem says: a typecheck or lint
+# needs far less than a test suite, and reserving 2.5 GB for each held
+# typechecks behind installs for over 20 minutes on 2026-10-26.
+if [ -z "$mem" ]; then
+  case $cmd in
+    *typecheck*|*"tsc "*|*"tsc -"*|*" lint"*|*eslint*) mem=1000 ;;
+    *"npm ci"*|*"npm install"*|*"bun install"*|*"pnpm install"*|*"yarn install"*) mem=1500 ;;
+    *) mem=2500 ;;
+  esac
+  mem=$((mem * weight))
+fi
 
 dir="${BMAD_HEAVY_DIR:-$HOME/.cache/bmad-heavy}"
 slots="${BMAD_HEAVY_SLOTS:-$(nproc 2>/dev/null || echo 8)}"
@@ -127,7 +137,9 @@ while :; do
     echo "heavy.sh: waiting (${queue} ahead in the queue, running weight $used of $slots, ${avail} MB free)" >&2
     t_said=$SECONDS
   fi
-  sleep 5
+  # Ten to fourteen seconds, so dozens of waiters don't fight over the lock
+  # (on 2026-10-26, 28 waiters ended in "fork: Resource temporarily unavailable").
+  sleep $((10 + RANDOM % 5))
 done
 
 # A quarter of the CPUs per suite, at least 2 (3 on a 12-CPU machine).
