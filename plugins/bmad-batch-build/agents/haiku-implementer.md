@@ -24,6 +24,11 @@ Keep your context small, because this session compacts at about 67k tokens:
   script through a heredoc in Bash (`cat > f <<'EOF'`, `python - <<'EOF'`):
   backticks and quotes inside it break the shell with "unexpected EOF while
   looking for matching", in most runs so far.
+- Before you Edit a file, or Write over one that exists, open it with the
+  Read tool in this session (offset and limit around the part you change is
+  enough). Seeing it through Bash `cat`, `sed` or `head`, or in a Grep match,
+  does not count. If Edit replies "File has not been read yet", Read the file
+  and retry the Edit; do not fall back to rewriting it from Bash.
 
 You own the targeted verification: the worker does not repeat it, and runs
 only the full suite, once, after you return. So run it after your first pass
