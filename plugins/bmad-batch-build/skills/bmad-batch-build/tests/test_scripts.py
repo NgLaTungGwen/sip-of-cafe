@@ -95,6 +95,29 @@ class PlanWaves(unittest.TestCase):
     def test_the_cap_tightens_with_other_active_runs(self):
         self.assertEqual([waves.cap_for(n) for n in (0, 1, 2, 5)], [4, 3, 2, 2])
 
+    def test_advice_for_a_chain(self):
+        units = [unit(1), unit(2, deps=[1]), unit(3, deps=[2])]
+        self.assertIn("chain", waves.advise(units, waves.plan(units))[0])
+
+    def test_advice_for_a_narrow_run(self):
+        units = [unit(1, "L"), unit(2, "L"), unit(3, "L", deps=[1, 2]), unit(4, "L", deps=[1, 2]),
+                 unit(5, "L", deps=[3, 4]), unit(6, "L", deps=[3, 4])]
+        r = waves.plan(units)
+        self.assertEqual(r["mode"], "waves")
+        self.assertIn("narrow", waves.advise(units, r)[0])
+
+    def test_advice_without_tests(self):
+        # like the 2026-10-27 POC: a foundation, shared logic, then screens, 3 at most at once
+        units = [unit(1, "L"), unit(2, deps=[1]), unit(3, deps=[1]),
+                 unit(4, deps=[2]), unit(5, deps=[2]), unit(6, deps=[2])]
+        r = waves.plan(units)
+        self.assertEqual(waves.advise(units, r), [])
+        self.assertIn("no tests", waves.advise(units, r, no_tests=True)[0])
+
+    def test_no_advice_for_wide_independent_work(self):
+        units = [unit(i) for i in range(1, 5)]
+        self.assertEqual(waves.advise(units, waves.plan(units), no_tests=True), [])
+
     def test_a_cycle_is_rejected(self):
         with self.assertRaises(SystemExit):
             waves.plan([unit(1, deps=[2]), unit(2, deps=[1])])

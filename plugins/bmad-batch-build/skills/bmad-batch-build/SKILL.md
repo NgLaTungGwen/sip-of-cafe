@@ -254,11 +254,13 @@ The worker sees only its intent.
 Decide it yourself from the units; don't ask. Write the plan file
 `<root>/.claude/worktrees/_runs/<slug>-plan.json`, in the format documented in
 `<skill>/scripts/plan-waves.py`, with each unit's id, title, size,
-`depends_on` and reason. Then run it, adding `--busy` when the machine is busy:
+`depends_on` and reason. Then run it, adding `--busy` when the machine is busy
+and `--no-tests` when the profile has no `suite` or the repository's
+instructions ban tests:
 
 ```bash
 n=$(ls ~/.cache/bmad-heavy/run.* 2>/dev/null | wc -l); [ "$n" -ge $(( $(nproc) / 3 )) ] && b=--busy || b=
-python "<skill>/scripts/plan-waves.py" "<root>/.claude/worktrees/_runs/<slug>-plan.json" $b
+python "<skill>/scripts/plan-waves.py" "<root>/.claude/worktrees/_runs/<slug>-plan.json" $b [--no-tests]
 ```
 
 It sorts the units into waves: a wave holds the units whose dependencies are
@@ -288,6 +290,16 @@ measured time to its size, so the estimates calibrate themselves.
 A worked example: units 1 (chart kit) and 2 (contract fields) are
 independent, and units 3, 4 and 5 import both. That makes two parallel waves,
 {1, 2} then {3, 4, 5}: about 450 min, against 670 min for lane.
+
+**Is a batch run worth it?** Every unit pays a fixed cost (worktree, install,
+spec, plan, coder, reviewers, gate), and every parallel wave pays a merge and a
+verify. That only pays off when units really run side by side. When the work
+is a chain, runs at most 2 units at once over 3 or more waves, or has no tests
+to verify and runs at most 3 at once, one session that keeps the whole design
+in view builds it faster. `plan-waves.py` then prints an **Advice** line with
+the reasons. Units that share hotspot files (navigation, store, registries,
+generated route trees) and so all hang off one foundation unit are the usual
+sign.
 
 ### Tickets
 
@@ -339,7 +351,21 @@ for each such unit: name the tasks and give the reason (a shared file, or an
 interface that can't be fixed in advance). The user can then ask for a
 different cut.
 
-Ask with `AskUserQuestion` whether to approve, adjust or cancel. Iterate until
+When `plan-waves.py` printed an **Advice** line, put it above the table and
+offer **Build directly (Recommended)** as the first option, ahead of approve,
+adjust and cancel. Building directly means:
+
+- run no workers and no synthesis;
+- `git fetch origin`, then create one worktree on `<run branch>` from
+  `origin/<base>` (never from the local `<base>`, which may be stale);
+- build the units in this session, in dependency order, with `bmad-build`,
+  passing the units' intents as one work list;
+- open one PR as `<skill>/references/synthesis.md` section 4 describes, link
+  the tickets when `TICKETS ado`, and report as in section 8.
+
+Approving it still approves the new tickets.
+
+Otherwise ask with `AskUserQuestion` whether to approve, adjust or cancel. Iterate until
 the user approves. After approval, run to the end without asking, except for
 the two stop cases in sections 6 and 7.
 

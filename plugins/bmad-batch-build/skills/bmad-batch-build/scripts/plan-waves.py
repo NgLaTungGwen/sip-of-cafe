@@ -1,6 +1,6 @@
 """Schedule a run's units by their dependencies, and estimate each mode.
 
-usage: python plan-waves.py <plan.json> [--busy] [--max-parallel N]
+usage: python plan-waves.py <plan.json> [--busy] [--max-parallel N] [--no-tests]
 
 plan.json is written by the orchestrator at the split, next to the run file
 (_runs/<slug>-plan.json):
@@ -43,8 +43,24 @@ Unit minutes come from recorded runs (~/.claude/bmad-batch-runs/runs.jsonl,
 each row's unit_minutes) once a size has 5 measurements, and otherwise from
 the first calibration: S 50, M 100, L 160.
 
-Prints the waves, every estimate, the chosen mode and the Mode line for the
-approval table. Writes the schedule back into plan.json ("waves", "mode").
+A batch run pays a fixed cost per unit (worktree, install, spec, plan, coder,
+reviewers, gate) and per parallel wave (merge and verify), which only pays off
+when units really run side by side. So the script also says when one session
+building the work directly is the better choice, and why:
+
+    chain    nothing runs in parallel (every wave is a lane) and there is more
+             than one unit
+    narrow   at most 2 units at once over 3 or more waves
+    no tests --no-tests (the profile has no test suite, or the repo bans
+             tests) and at most 3 units at once: the review-and-verify loop
+             has little to check
+
+On 2026-10-27 a 7-unit POC in 3 waves of up to 3, in a repo that bans tests,
+was estimated at 618 min; one session built it directly in far less.
+
+Prints the waves, every estimate, the chosen mode, the Mode line for the
+approval table and, when one applies, an Advice line. Writes the schedule back
+into plan.json ("waves", "mode", "advice").
 """
 import json
 import os
@@ -185,6 +201,19 @@ def plan(units, busy=False, minutes=None, max_par=MAX_PARALLEL):
             "lane": lane_total, "parallel": parallel_total, "waves_total": total, "capped": capped}
 
 
+def advise(units, result, no_tests=False):
+    """Why one session building the work directly beats a batch run; [] when it doesn't."""
+    widest = max(len(w["units"]) if w["run"] == "parallel" else 1 for w in result["waves"])
+    reasons = []
+    if len(units) > 1 and result["mode"] == "lane":
+        reasons.append("chain: nothing runs in parallel, so every unit pays the batch overhead for no gain")
+    elif widest <= 2 and len(result["waves"]) >= 3:
+        reasons.append(f"narrow: at most {widest} units at once over {len(result['waves'])} waves in a row")
+    if no_tests and widest <= 3:
+        reasons.append("no tests: the review-and-verify loop has little to check")
+    return reasons
+
+
 def mode_line(units, result):
     deps = [f"{u['id']}←{','.join(map(str, u['depends_on']))} ({u.get('reason') or 'no reason given'})"
             for u in units if u.get("depends_on")]
@@ -217,8 +246,11 @@ def main(args):
         print(f"wave {i}: units {', '.join(map(str, w['units']))} — {w['run']}, ≈{w['minutes']} min")
     print("unit minutes: " + ", ".join(f"{s} {minutes[s]} ({source[s]})" for s in DEFAULT))
     print(mode_line(units, result))
+    advice = advise(units, result, no_tests="--no-tests" in args)
+    if advice:
+        print("Advice: build directly in one session; " + "; ".join(advice) + ".")
     data.update({"waves": result["waves"], "mode": result["mode"], "estimate": result["estimate"],
-                 "unit_minutes_used": minutes})
+                 "unit_minutes_used": minutes, "advice": advice})
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
     return 0

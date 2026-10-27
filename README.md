@@ -426,6 +426,11 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.12.8:** the plan says when a batch run isn't worth it. When the units
+  form a chain, run at most 2 at once over 3 or more waves, or have no tests
+  and run at most 3 at once, `plan-waves.py` prints an Advice line and the
+  approval offers **Build directly** first: one session, one worktree from a
+  fresh `origin/<base>`, one PR.
 - **0.12.6:** `uv` is installed when missing; a new small project works on
   the first run: a `package.json`
   without a lockfile is detected (targeted tests run as `npm test -- <files>`),
