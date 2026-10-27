@@ -50,35 +50,57 @@ Paths in this skill:
   reported when it loaded this skill (under `.claude/skills/` for a copied
   install, under `~/.claude/plugins/` for a plugin install).
 
-## 0. Make sure BMAD and the agents are installed
+## 0. Set up
 
-Run `bash "<skill>/scripts/ensure-bmad.sh" "<root>"` before anything else. It
-leaves an existing BMAD install alone and otherwise installs the pinned
-`bmad-method` release into `<root>` (module `bmm`, tool `claude-code`), which
-takes a minute or two. It also copies the run's four agents into
-`<root>/.claude/agents/` when the project doesn't have them: `bmad-batch-worker`,
-`bmad-batch-synthesis`, `haiku-implementer` and `bmad-batch-enhancer`. A project copy that differs from
-the shipped one is kept and reported; pass that line on to the user. If the
-script fails, stop and show the user its output. The general-purpose agent is
-no substitute: it has no 1-hour cache and no workflow rules.
+**The commands in this skill are bash.** Run them with the Bash tool. When
+this session has no Bash tool, only PowerShell (Claude Code on Windows can be
+set up that way), run each one as `bash -c '<command>'` through PowerShell:
+inside PowerShell's single quotes `$(...)`, `&&`, pipes and double quotes
+reach bash unchanged; write a single quote inside the command as `''`. Never
+translate a command into PowerShell. Tell every worker and synthesis the
+same in its prompt: `No Bash tool: run every shell command as bash -c '<command>'
+through PowerShell.`
 
-**Check the agents before reading the input.** Look at the agent types the
+Run `bash "<skill>/scripts/setup.sh" "<root>"` before anything else, as one
+Bash call with a 10-minute timeout. It resolves what the run needs and fixes
+what it can on its own, so a first run in a new project starts without help:
+it installs BMAD when the project has none (a minute or two), copies the run's
+agents into `<root>/.claude/agents/`, keeps `.claude/worktrees/` out of git
+status, and finds the Python, the default branch, and where tickets and the PR
+can go. Keep its lines:
+
+- `PYTHON <cmd>`: type `<cmd>` wherever this skill says `python`.
+- `BASE <branch>`: `<base>` when the project has no profile.
+- `TICKETS ado` or `TICKETS off (...)`: with `off`, skip every ticket step
+  (creating and linking); the approval table says "Tickets: off (<reason>)".
+- `PR az`, `PR gh` or `PR none (...)`: pass it to synthesis as `<pr>`.
+- `AGENTS note: ...`: a project copy of an agent differs from the shipped one
+  and was kept; pass that line on to the user.
+- A line with `BLOCKED` (and `SETUP blocked`): stop and show the user those
+  lines; each says what to install. Nothing else stops a run.
+
+**Choose the agents before reading the input.** Look at the agent types the
 Agent tool offers you and set `<agents>`, the prefix of every agent name in
 this run:
 
 - `bmad-batch-build:bmad-batch-worker` is listed (the plugin install):
   `<agents>` is `bmad-batch-build:`.
 - `bmad-batch-worker` is listed (a project or user copy): `<agents>` is empty.
-- Neither: stop now, before reading or splitting anything, and tell the user
-  why. Claude Code finds project agents only in this session's folder and its
-  parents, and picks up a newly created `.claude/agents` folder only after a
-  restart. If `<root>` is not this session's folder or one of its parents,
-  ask the user to open a new session with `<root>` as the workspace folder.
-  Otherwise, ask them to restart this session. Then run the skill again.
+- Neither (the first run after a copied install, before a restart loads
+  `<root>/.claude/agents/`, or a session opened outside `<root>`): don't stop.
+  Run in **fallback mode**: launch each of the run's agents as
+  `subagent_type: general-purpose` with the `model` its file names (`opus`
+  for bmad-batch-worker, bmad-batch-synthesis and bmad-batch-enhancer), and
+  begin its prompt with `First read <skill>/agents/<agent>.md and follow it as
+  your standing instructions.` Add to every worker and synthesis prompt:
+  `Fallback mode: pass --agents general-purpose to prepare-worktree.sh.` In
+  the approval message say, in one line, that this run uses general-purpose
+  agents because the run's agents load at the next session start, and that it
+  costs somewhat more (no 1-hour cache).
 
 Every agent name below is written with this prefix: `<agents>bmad-batch-worker`,
 `<agents>bmad-batch-synthesis`, `<agents>haiku-implementer` and
-`<agents>bmad-batch-enhancer`.
+`<agents>bmad-batch-enhancer`; in fallback mode each is launched as above.
 
 **Branch names follow the repository.** `<run branch>` is the name for a
 branch of type `<type>` (feat, fix, ...) about `<slug>`, in the convention the
@@ -112,7 +134,7 @@ commands in the project profile, `<root>/.claude/bmad-batch-project.json`
 - `PROFILE unconfirmed`: show it in the approval table and confirm after
   approval.
 
-`<base>` is the profile's `base` branch, `main` without a profile.
+`<base>` is the profile's `base` branch; without a profile, setup's `BASE`.
 
 **Tell the user when the run needs them.** Before every question to the user
 (the split approval, a gate failure, a stuck synthesis), send a
@@ -264,6 +286,9 @@ independent, and units 3, 4 and 5 import both. That makes two parallel waves,
 
 ### Tickets
 
+Only with `TICKETS ado` from setup; with `TICKETS off` the run has no tickets
+and the table's ticket column says `off`.
+
 The house pattern on the board is a User Story, such as "Story 7.7 - ...", with
 one Task per piece of work. The PR links to the story and its tasks. Map the
 run onto that pattern, and **reuse what already exists**:
@@ -349,7 +374,7 @@ with the workers.
    fetches into one `.git` race on `FETCH_HEAD`, which is why the scripts never
    fetch.
 2. In **one message**, send all of the following:
-   - **The tickets:** write `<root>/.claude/worktrees/_runs/<slug>-tickets.json`
+   - **The tickets** (skip with `TICKETS off`): write `<root>/.claude/worktrees/_runs/<slug>-tickets.json`
      in the format documented in `<skill>/scripts/ado_tickets.py`. Then make one
      Bash call with `run_in_background: true` and a long timeout:
      `python "<skill>/scripts/ado_tickets.py" "<root>/.claude/worktrees/_runs/<slug>-tickets.json"`.

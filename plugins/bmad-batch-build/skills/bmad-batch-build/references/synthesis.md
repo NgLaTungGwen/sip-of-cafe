@@ -51,7 +51,10 @@ Units left out (they did not build), from every wave so far: <list with
 blocking condition, or "none">
 
 ADO tickets: plan file `<tickets json>`; stories <#ids>; per unit
-<unit n: #task id>. If ticket creation failed: "none: <error>".
+<unit n: #task id>. If ticket creation failed: "none: <error>". With tickets
+off (setup said so): "off".
+
+PR tool: `<pr>` (from the run's setup: az, gh or none).
 
 Read `<iwt>/AGENTS.md` first.
 
@@ -159,8 +162,12 @@ Once every check is green and Final is `yes`:
 
 1. If a `create-pr` skill is available, load it (Skill tool) and follow it
    from `<iwt>`; its precondition checks must pass. Otherwise open the PR
-   with the host's CLI from `<iwt>`: `az repos pr create` for an Azure DevOps
-   remote, `gh pr create` for GitHub. Push first with `git push -u origin HEAD`.
+   with the PR tool from `<iwt>`: `az repos pr create` for `az`, `gh pr create`
+   for `gh`. Push first with `git push -u origin HEAD`. With `none`, push the
+   branch when the repository has an origin remote (skip the push when it has
+   none), don't try a CLI, and reply `PR: none (<branch> pushed; open the PR
+   in the browser)` or `PR: none (local branch <branch>)`, with the
+   description you would have used written to `<state>` for the user.
 2. Under "What changed", give one bullet per unit, aggregated by behaviour.
 3. If any units were left out, add a `## Not included` section that lists them
    with their blocking condition.
@@ -174,7 +181,8 @@ Once every check is green and Final is `yes`:
 
 ## 5. Link the tickets
 
-Skip this section if ticket creation failed. Otherwise make one call, with the
+Skip this section if ticket creation failed, tickets are off, or no PR was
+opened. Otherwise make one call, with the
 numbers of the merged units:
 
 ```bash

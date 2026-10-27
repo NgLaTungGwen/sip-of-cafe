@@ -233,7 +233,7 @@ class HeavyShell(unittest.TestCase):
 
 
 class PrepareWorktree(unittest.TestCase):
-    def pinned(self, with_api):
+    def pinned(self, with_api, extra=()):
         bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
         root = tempfile.mkdtemp().replace("\\", "/")
         os.makedirs(os.path.join(root, "_bmad", "custom"))
@@ -247,7 +247,7 @@ class PrepareWorktree(unittest.TestCase):
         subprocess.run(git + ["add", "package.json"] + (["api"] if with_api else []), check=True)
         subprocess.run(git + ["commit", "-q", "-m", "init"], check=True)
         r = subprocess.run([bash, os.path.join(SCRIPTS, "prepare-worktree.sh"), root, "u1", "b1",
-                            "--no-install", "--base", "HEAD"], capture_output=True, text=True)
+                            "--no-install", "--base", "HEAD", *extra], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         wt = r.stdout.strip().splitlines()[-1]
         with open(os.path.join(wt, "_bmad", "custom", "bmad-build-auto.toml"), encoding="utf-8") as f:
@@ -261,6 +261,28 @@ class PrepareWorktree(unittest.TestCase):
     def test_handoff_uses_api_dir_when_the_repo_has_one(self):
         wt, toml = self.pinned(with_api=True)
         self.assertIn("cd " + wt + "/api && npx vitest run", toml)
+
+    def test_fallback_agents_launch_the_coder_as_general_purpose(self):
+        # A copied install's first run: the session has not loaded the run's
+        # agents, so the coder runs as general-purpose on Haiku with the
+        # agent's instructions read from the skill ("batch-build did not launch").
+        _, toml = self.pinned(with_api=False, extra=("--agents", "general-purpose"))
+        self.assertNotIn("general-purposehaiku-implementer", toml)
+        self.assertIn("subagent_type: general-purpose", toml)
+        self.assertIn("model: haiku", toml)
+        self.assertIn("agents/haiku-implementer.md and follow it as your standing instructions", toml)
+        _, toml = self.pinned(with_api=False)
+        self.assertIn("subagent_type: haiku-implementer`)", toml)  # unchanged without fallback
+        # A Windows session with only PowerShell runs the bash commands through bash -c.
+        self.assertIn("run each one as bash -c '<command>' through PowerShell", toml)
+        self.tomllib_ok(toml)
+
+    def tomllib_ok(self, toml):
+        try:
+            import tomllib
+        except ImportError:
+            return
+        tomllib.loads(toml)
 
     def test_build_is_not_banned_when_the_project_requires_it(self):
         # An unconditional "Never run npm run build" made workers skip a build
@@ -338,6 +360,62 @@ class Metrics(unittest.TestCase):
         self.assertEqual(len(events), 2)
         own = [r for r in runs if r["installation_id"] != "other"][0]
         self.assertEqual(own["project"], "ClientSecretProject")  # own rows keep their names
+
+
+class Setup(unittest.TestCase):
+    """setup.sh resolves a project without asking: ignore rule, base branch,
+    tickets and PR mode from the remote, agents copied (BMAD already present
+    here, so nothing is downloaded)."""
+
+    def test_setup_on_a_github_project(self):
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        root = tempfile.mkdtemp().replace("\\", "/")
+        os.makedirs(os.path.join(root, "_bmad", "scripts"))
+        open(os.path.join(root, "_bmad", "scripts", "render_skill.py"), "w").close()
+        os.makedirs(os.path.join(root, ".claude", "skills", "bmad-build-auto"))
+        open(os.path.join(root, ".claude", "skills", "bmad-build-auto", "SKILL.md"), "w").close()
+        subprocess.run(["git", "init", "-q", "-b", "trunk", root], check=True)
+        subprocess.run(["git", "-C", root, "remote", "add", "origin", "https://github.com/acme/app.git"], check=True)
+        subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "init"], check=True)
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "setup.sh"), root], capture_output=True, text=True)
+        out = r.stdout
+        self.assertEqual(r.returncode, 0, out + r.stderr)
+        self.assertIn("SETUP ok", out)
+        self.assertRegex(out, r"PYTHON python")
+        # The plugin ships the agents itself; a copied install gets them in the project.
+        plugin = os.path.exists(os.path.join(SKILL_DIR, "..", "..", ".claude-plugin", "plugin.json"))
+        self.assertIn("AGENTS plugin" if plugin else "AGENTS copied", out)
+        self.assertEqual(os.path.exists(os.path.join(root, ".claude", "agents", "bmad-batch-worker.md")), not plugin)
+        self.assertIn("IGNORE added", out)
+        self.assertIn("BASE trunk", out)
+        self.assertIn("REMOTE github", out)
+        self.assertIn("TICKETS off", out)
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "setup.sh"), root], capture_output=True, text=True)
+        self.assertIn("IGNORE ok", r.stdout)  # the rule is added once
+        self.assertIn("AGENTS plugin" if plugin else "AGENTS project", r.stdout)
+        shutil.rmtree(root, ignore_errors=True)
+
+    def test_ado_remote_parsing(self):
+        tickets = load("ado_tickets", "ado_tickets.py")
+        root = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", root], check=True)
+        cases = {
+            "https://org1@dev.azure.com/org1/My%20Project/_git/repo": ("https://dev.azure.com/org1", "My Project"),
+            "git@ssh.dev.azure.com:v3/org2/Proj/repo": ("https://dev.azure.com/org2", "Proj"),
+            "https://org3.visualstudio.com/DefaultCollection/P3/_git/r": ("https://org3.visualstudio.com", "P3"),
+            "https://github.com/acme/app.git": (None, None),
+        }
+        old = os.getcwd()
+        try:
+            os.chdir(root)
+            for url, want in cases.items():
+                subprocess.run(["git", "remote", "remove", "origin"], capture_output=True)
+                subprocess.run(["git", "remote", "add", "origin", url], check=True)
+                self.assertEqual(tickets.ado_remote(), want, url)
+        finally:
+            os.chdir(old)
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class RunSkillName(unittest.TestCase):

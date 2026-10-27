@@ -45,11 +45,21 @@ npx skills add NgLaTungGwen/sip-of-cafe
 npx skills add NgLaTungGwen/sip-of-cafe -g
 ```
 
-With an npx install, the first run copies the run's four agents into
-`<repo>/.claude/agents/`. Claude Code picks up a new `.claude/agents` folder
-only after a restart, and only for sessions opened in that repository or a
-folder inside it. If the skill reports that its agents are missing, restart,
-or open the session in the repository, and run it again.
+Nothing else to set up. The first step of every run, `scripts/setup.sh`,
+resolves the rest on its own:
+- it installs BMAD when the project has none, and copies the run's agents
+  into `<repo>/.claude/agents/`;
+- it keeps `.claude/worktrees/` out of git status;
+- it finds Python (`python3` or `python`) and the default branch;
+- it decides where tickets and the PR go: Azure DevOps tickets only with an
+  ADO remote and a signed-in `az`, and the PR through `az`, `gh` or, without
+  either, a pushed branch.
+
+It stops only for what it can't install itself: Python, or Node.js when BMAD
+still has to be installed. Claude Code loads a new `.claude/agents` folder at
+the next session start, so the first run after an npx install uses
+general-purpose agents with the same instructions instead of stopping; it
+costs a little more (no 1-hour cache).
 
 ### Use
 
@@ -306,10 +316,15 @@ Any other command goes through your normal permission rules.
 
 ### Troubleshooting
 
-- **"agents are missing" before the split:**
-  - Copied install: restart Claude Code, or open the session in the
-    repository rather than a parent or sibling folder.
-  - Plugin: update it; versions before 0.10.7 didn't ship their agents.
+- **"batch-build did not launch" or "agents are missing":** versions before
+  0.12.5 stopped when the session hadn't loaded the run's agents (every
+  first run after an npx install). Update; the run now goes ahead with
+  general-purpose agents and the next session loads the real ones. Plugin
+  versions before 0.10.7 didn't ship their agents at all.
+- **A `SETUP blocked` line:** install what it names (Python 3.9+, or Node.js
+  20+ for the BMAD install) and run the skill again.
+- **No tickets:** they need an Azure DevOps remote and `az login`; setup says
+  `TICKETS off (...)` with the reason, and the run carries on without them.
 - **`npx skills add` finds no skills:** you have a version between 0.9.0 and
   0.10.3, whose SKILL.md header wasn't valid YAML. Update.
 - **Commands wait for a long time:** check `~/.cache/bmad-heavy`.
@@ -348,6 +363,13 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.12.5:**
+  - `setup.sh` sets up a new project on its own; the run no longer stops
+    when its agents aren't loaded yet (fallback to general-purpose agents);
+  - commands are bash everywhere; a Windows session with only PowerShell
+    runs them as `bash -c '...'`;
+  - tickets and the PR follow the remote: Azure DevOps (organization and
+    project read from the remote), GitHub, or a pushed branch.
 - **0.12.3:** the `bmad-batch-dashboard` skill. Viewing it no longer counts
   as a run when the installer checks for active runs, and runs started as a
   plugin skill (`/bmad-batch-build:bmad-batch-build`) are now recorded.

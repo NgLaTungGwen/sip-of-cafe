@@ -18,7 +18,8 @@ never edited or re-parented. Only entries with "id": null are created. Each new
 Task becomes a child of the story its "story" key names. Everything created is
 assigned to the signed-in az account and tagged bmad-parallel-build (the skill's
 former name, kept so board queries on the tag keep working). The
-organization and project come from the `az devops configure` defaults.
+organization and project come from the origin remote (or, when it is not
+Azure DevOps, from the `az devops configure` defaults).
 
 Tasks are created in parallel because each az call takes 30-60 s here. The plan
 file is rewritten even when something fails, so the IDs that were created are
@@ -32,17 +33,42 @@ close-on-complete. Prints the IDs ADO then reports as linked, and whether
 close-on-complete is on, in one call instead of three slow ones.
 """
 import json
+import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 AZ = shutil.which("az") or shutil.which("az.cmd") or "az"
 TAG = "bmad-parallel-build"  # former skill name, kept for board queries
 
 
+def ado_remote():
+    """(organization URL, project) from the origin remote of the current
+    directory, so a machine without `az devops configure` defaults still
+    works; (None, None) when origin is not Azure DevOps."""
+    url = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+    for pattern, org in ((r"https://(?:[^@/]+@)?dev\.azure\.com/([^/]+)/([^/]+)/_git/", "https://dev.azure.com/{}"),
+                         (r"(?:git@)?ssh\.dev\.azure\.com:v3/([^/]+)/([^/]+)/", "https://dev.azure.com/{}"),
+                         (r"https://(?:[^@/]+@)?([^./]+)\.visualstudio\.com/(?:DefaultCollection/)?([^/]+)/_git/",
+                          "https://{}.visualstudio.com")):
+        m = re.match(pattern, url)
+        if m:
+            return org.format(m.group(1)), urllib.parse.unquote(m.group(2))
+    return None, None
+
+
+ORG, PROJECT = ado_remote()
+
+
 def az(*args: str) -> str:
-    result = subprocess.run([AZ, *args, "--only-show-errors"], capture_output=True, text=True)
+    extra = []
+    if ORG and args[:1] in (("boards",), ("repos",)):
+        extra = ["--org", ORG]
+        if args[:3] == ("boards", "work-item", "create"):
+            extra += ["--project", PROJECT]
+    result = subprocess.run([AZ, *args, *extra, "--only-show-errors"], capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"az {' '.join(args[:3])} failed: {result.stderr.strip()}")
     return result.stdout.strip()

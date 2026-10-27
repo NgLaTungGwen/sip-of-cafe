@@ -42,7 +42,8 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 
 - `<root>`: the absolute `<root>` from SKILL.md
 - `<skill>`: the absolute `<skill>` from SKILL.md
-- `<agents>`: the agent name prefix from SKILL.md (`bmad-batch-build:` or empty)
+- `<agents>`: the agent name prefix from SKILL.md (`bmad-batch-build:` or empty),
+  or `general-purpose` in fallback mode
 - `<name>`: `<slug>-<n>`
 - `<wt>`: `<root>/.claude/worktrees/<name>`
 - `<branch>`: the unit's branch

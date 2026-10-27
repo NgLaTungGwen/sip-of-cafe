@@ -5,7 +5,8 @@
 #                            [--agents <prefix>]
 #
 # --agents is the agent name prefix: "bmad-batch-build:" when the agents come
-# from the plugin, empty for project or user copies (see SKILL.md).
+# from the plugin, empty for project or user copies (see SKILL.md), or
+# "general-purpose" in fallback mode, when the session has not loaded them.
 #
 # --no-install stops after checkout, copies, .env and pin file. Workers use it
 # and then start scripts/install-deps.sh in the background through bg.sh, so
@@ -90,6 +91,19 @@ printf '\nVITEST_MAX_FORKS=%s\nVITEST_MAX_THREADS=%s\nVITEST_MIN_FORKS=1\nVITEST
 scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 heavy="$scripts/heavy.sh" bg="$scripts/bg.sh"
 
+# How the coder is launched: by its agent name, or, with --agents
+# general-purpose (a session that has not loaded the run's agents yet, such as
+# the first run after a copied install), as a general-purpose agent on Haiku
+# that reads the agent's instructions from the skill.
+impl_type="${agents}haiku-implementer" impl_extra="" impl_fix=""
+if [ "$agents" = general-purpose ]; then
+  impl_md="$(cd "$scripts/.." && pwd)/agents/haiku-implementer.md"
+  impl_md=$(cygpath -m "$impl_md" 2>/dev/null || printf '%s' "$impl_md")
+  impl_type="general-purpose"
+  impl_extra=", \`model: haiku\`; begin the prompt with: First read $impl_md and follow it as your standing instructions."
+  impl_fix=" agent (\`model: haiku\`, its prompt starting with: First read $impl_md and follow it as your standing instructions.)"
+fi
+
 # The implementer's targeted checks run where the project keeps them: api/ in a
 # monorepo like hive-factory, the root in a single-package repo like HealthPro.
 # Naming api/ in a repo without one sent implementers to a missing directory.
@@ -139,8 +153,8 @@ cat > "$wt/_bmad/custom/bmad-build-auto.toml" <<EOF
 
 persistent_facts = [
   "The project root for this run is $wt. Every file read, edit, test and git command targets that directory. Never touch anything outside $wt: not the main checkout $root, and not any other worktree.",
-  "Run shell commands as \`cd $wt && ...\`, or use \`git -C $wt\`.",
-  "Source files change only through the implementation subagent, review fixes included. For every fix round, launch a new \`${agents}haiku-implementer\` with the Agent tool in the foreground, giving it the spec path and the fixes. Never resume an earlier one with SendMessage: that runs in the background, and you would end your turn before the fixes land. Never end your turn or hand back while a fix round is running. The parent edits only the spec and files under _bmad-output/.",
+  "Run shell commands as \`cd $wt && ...\`, or use \`git -C $wt\`. Every command here is bash: with no Bash tool (PowerShell only, on Windows), run each one as bash -c '<command>' through PowerShell, writing a single quote inside it as two, and never translate it into PowerShell.",
+  "Source files change only through the implementation subagent, review fixes included. For every fix round, launch a new \`${impl_type}\`${impl_fix} with the Agent tool in the foreground, giving it the spec path and the fixes. Never resume an earlier one with SendMessage: that runs in the background, and you would end your turn before the fixes land. Never end your turn or hand back while a fix round is running. The parent edits only the spec and files under _bmad-output/.",
   "No single Bash call may run longer than 10 minutes; Claude Code moves a longer one to the background. Start anything that can take longer (the full suite, a build, an install) with \`bash $bg run $wt <name> \"<command>\"\` as a Bash call with run_in_background: true, and wait for it with one \`bash $bg wait $wt <name>\` per Bash call, repeated while it prints still running. Never wrap a wait in a loop, \`timeout\` or \`sleep\`. Logs and scratch files stay inside $wt.",
   "Workflow gaps: if the spec template has no baseline_revision, set it to the output of \`git -C $wt rev-parse HEAD\` before the first change. If _bmad-output/ is gitignored, commit the spec with \`git add -f\`. Exclude _bmad-output from git pathspecs with ':(exclude)_bmad-output'; the short form ':!_bmad-output' fails with 'Unimplemented pathspec magic'.",
   "Dependencies install in the background while you plan; planning needs only the checkout. Before any command that needs node_modules (tests, typecheck, build, lint), run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, halt with its output as the blocking condition.",
@@ -149,9 +163,9 @@ persistent_facts = [
 ]
 
 implementation_handoff = """
-Launch a subagent with no prior conversation context, using the \`${agents}haiku-implementer\` agent (\`subagent_type: ${agents}haiku-implementer\`), with this prompt:
+Launch a subagent with no prior conversation context, using the \`${impl_type}\` agent (\`subagent_type: ${impl_type}\`${impl_extra}), with this prompt:
 
-> The project root is $wt. Every file you read or edit, and every command you run, must be inside that directory. Use absolute paths and \`cd $wt && ...\` for shell commands. Nothing outside $wt may change: not the main checkout $root, and not any other worktree.
+> The project root is $wt. Every file you read or edit, and every command you run, must be inside that directory. Use absolute paths and \`cd $wt && ...\` for shell commands; with no Bash tool, only PowerShell, run each as bash -c '<command>'. Nothing outside $wt may change: not the main checkout $root, and not any other worktree.
 >
 > Dependencies may still be installing. Before you run any command, run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, stop and report its output.
 >
