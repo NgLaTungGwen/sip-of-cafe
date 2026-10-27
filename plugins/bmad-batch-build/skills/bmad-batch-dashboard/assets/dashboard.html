@@ -70,7 +70,7 @@ button { cursor: pointer; }
 .filters { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 20px 0 16px; align-items: center; }
 .filters label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text-secondary); }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
-.tile, .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.tile, .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 16px; padding: 14px 16px; }
 .tile .label { color: var(--text-secondary); font-size: 13px; }
 .tile .value { font-size: 24px; font-weight: 600; margin-top: 2px; }
 .tile .note { color: var(--text-muted); font-size: 12px; }
@@ -84,7 +84,7 @@ button { cursor: pointer; }
 .chart { width: 100%; min-height: 40px; transition: opacity 0.2s; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-secondary); margin: 4px 0 6px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
-.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
 .legend i.dot { border-radius: 50%; }
 .empty { color: var(--text-muted); padding: 24px 0; }
 svg text { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -93,20 +93,30 @@ svg text.cat { fill: var(--text-secondary); font-size: 12px; font-variant-numeri
 svg .gridline { stroke: var(--grid); stroke-width: 1; }
 svg .baseline { stroke: var(--axis); stroke-width: 1; }
 svg .hit { fill: transparent; cursor: default; outline: none; }
-svg .hit:hover + .hl, svg .hit:focus + .hl { opacity: 1; }
-svg .hl { fill: none; stroke: var(--text-secondary); stroke-width: 1; opacity: 0; pointer-events: none; }
+svg .seg { outline: none; transition: opacity 0.15s; }
+svg .col.seg-focus .seg:not(.on) { opacity: 0.35; }
 svg .median { stroke: var(--text-primary); stroke-width: 2; stroke-linecap: round; }
 #tip {
-  position: fixed; z-index: 10; pointer-events: none; max-width: 320px;
+  position: fixed; z-index: 10; pointer-events: none; min-width: 200px; max-width: 340px;
   background: var(--surface-1); color: var(--text-primary);
-  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); font-size: 12px;
+  border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16), 0 1px 3px rgba(0, 0, 0, 0.08);
+  font-size: 12px; opacity: 0; transform: translateY(4px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
 }
-#tip .tip-title { color: var(--text-secondary); margin-bottom: 4px; }
-#tip .tip-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
-#tip .tip-row strong { font-variant-numeric: tabular-nums; }
-#tip .tip-row span { color: var(--text-secondary); }
-#tip .tip-key { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+#tip.on { opacity: 1; transform: none; }
+#tip .tip-title { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#tip .tip-sub { color: var(--text-muted); margin: 1px 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#tip .tip-rows { display: grid; grid-template-columns: 10px 1fr auto auto; column-gap: 8px; row-gap: 3px; align-items: center; }
+#tip .tip-key { width: 10px; height: 10px; border-radius: 3px; }
+#tip .tip-label { color: var(--text-secondary); white-space: nowrap; }
+#tip .tip-value { font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#tip .tip-share { color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; min-width: 30px; }
+#tip .tip-total { border-top: 1px solid var(--grid); margin-top: 3px; padding-top: 5px; }
+#tip .tip-total.tip-label, #tip .tip-total.tip-value { color: var(--text-primary); }
+svg .col { transition: opacity 0.15s; }
+svg.dim .col { opacity: 0.35; }
+svg.dim .col.active { opacity: 1; }
 .table-wrap { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
@@ -313,33 +323,57 @@ th.num { text-align: right; }
     if (top + r.height > window.innerHeight - 8) top = y - r.height - pad;
     tip.style.left = Math.max(8, left) + "px"; tip.style.top = Math.max(8, top) + "px";
   }
-  function fillTip(title, rows) {
+  // Content is {title, sub, rows: [{label, value, color, share}], total: {label, value}}.
+  function cell(cls, text) { var e = document.createElement("span"); e.className = cls; if (text != null) e.textContent = text; return e; }
+  function fillTip(c) {
     tip.replaceChildren();
-    var t = document.createElement("div"); t.className = "tip-title"; t.textContent = title; tip.append(t);
-    rows.forEach(function (r) {
-      var row = document.createElement("div"); row.className = "tip-row";
-      if (r.color) { var k = document.createElement("span"); k.className = "tip-key"; k.style.background = r.color; row.append(k); }
-      var v = document.createElement("strong"); v.textContent = r.value;
-      var l = document.createElement("span"); l.textContent = r.label;
-      row.append(v, l); tip.append(row);
-    });
+    tip.append(cell("tip-title", c.title));
+    var title = tip.lastChild; title.style.display = "block";
+    if (c.sub) { var s = cell("tip-sub", c.sub); s.style.display = "block"; tip.append(s); }
+    var grid = document.createElement("div"); grid.className = "tip-rows";
+    function addRow(r, extra) {
+      var k = cell("tip-key" + extra);
+      if (r.color) k.style.background = r.color; else k.style.visibility = "hidden";
+      grid.append(k, cell("tip-label" + extra, r.label), cell("tip-value" + extra, r.value),
+        cell("tip-share" + extra, r.share == null ? "" : Math.round(r.share * 100) + "%"));
+    }
+    (c.rows || []).forEach(function (r) { addRow(r, ""); });
+    if (c.total) addRow(c.total, " tip-total");
+    tip.append(grid);
     tip.hidden = false;
+    tip.classList.add("on");
   }
-  function attachTip(sel, content) {
+  function hideTip() { tip.classList.remove("on"); tip.hidden = true; }
+  function attachTip(sel, content, enter, leave) {
     sel.attr("tabindex", 0)
-      .on("pointerenter pointermove", function (ev, d) { var c = content(d); fillTip(c[0], c[1]); placeTip(ev.clientX, ev.clientY); })
-      .on("pointerleave blur", function () { tip.hidden = true; })
+      .on("pointerenter pointermove", function (ev, d) {
+        fillTip(content(d)); placeTip(ev.clientX, ev.clientY);
+        if (enter && ev.type === "pointerenter") enter.call(this, d);
+      })
+      .on("pointerleave blur", function (ev, d) { hideTip(); if (leave) leave.call(this, d); })
       .on("focus", function (ev, d) {
-        var c = content(d), b = this.getBoundingClientRect();
-        fillTip(c[0], c[1]); placeTip(b.left + b.width / 2, b.top);
+        var b = this.getBoundingClientRect();
+        fillTip(content(d)); placeTip(b.left + b.width / 2, b.top);
+        if (enter) enter.call(this, d);
       });
+  }
+  // Shares of a stacked total, largest first, for a tooltip.
+  function shareRows(values, keys, label, color, fmt) {
+    var total = d3.sum(keys, function (k) { return values[k] || 0; });
+    var rows = keys.filter(function (k) { return values[k] > 0; })
+      .sort(function (a, b) { return values[b] - values[a]; })
+      .map(function (k) { return {label: label(k), value: fmt(values[k]), color: color(k), share: total ? values[k] / total : null}; });
+    return {rows: rows, total: {label: "Total", value: fmt(total)}};
   }
 
   // ---- shared drawing ----
-  function topRounded(x, y, w, h, r) {
-    r = Math.max(0, Math.min(r, h, w / 2));
-    return "M" + x + "," + (y + h) + "V" + (y + r) + "Q" + x + "," + y + " " + (x + r) + "," + y +
-      "H" + (x + w - r) + "Q" + (x + w) + "," + y + " " + (x + w) + "," + (y + r) + "V" + (y + h) + "Z";
+  // A column segment: rt rounds the top corners, rb the bottom ones.
+  function segment(x, y, w, h, rt, rb) {
+    rt = Math.max(0, Math.min(rt, h / 2, w / 2)); rb = Math.max(0, Math.min(rb, h / 2, w / 2));
+    return "M" + x + "," + (y + h - rb) + "V" + (y + rt) + "Q" + x + "," + y + " " + (x + rt) + "," + y +
+      "H" + (x + w - rt) + "Q" + (x + w) + "," + y + " " + (x + w) + "," + (y + rt) +
+      "V" + (y + h - rb) + "Q" + (x + w) + "," + (y + h) + " " + (x + w - rb) + "," + (y + h) +
+      "H" + (x + rb) + "Q" + x + "," + (y + h) + " " + x + "," + (y + h - rb) + "Z";
   }
   function rightRounded(x, y, w, h, r) {
     r = Math.max(0, Math.min(r, w, h / 2));
@@ -384,29 +418,43 @@ th.num { text-align: right; }
     svg.append("g").selectAll("text").data(items.filter(function (_, i) { return i % step === 0; })).join("text")
       .attr("x", function (it) { return x(items.indexOf(it)) + x.bandwidth() / 2; }).attr("y", H - m.b + 16)
       .attr("text-anchor", "middle").text(function (it) { return it.xLabel; });
-    items.forEach(function (it, i) {
+    // The whole-column hit area sits under the segments: it shows the full
+    // breakdown, and a segment on top shows only its own share.
+    var hit = svg.append("g").selectAll("rect").data(items).join("rect").attr("class", "hit")
+      .attr("x", function (_, i) { return x(i) - x.step() * x.paddingInner() / 2; }).attr("y", m.t)
+      .attr("width", x.step()).attr("height", H - m.b - m.t);
+    // Rounded data end (6px), 2px rounding on the corners beside each 2px gap,
+    // square where the column meets the baseline.
+    var cols = items.map(function (it, i) {
       var cx = x(i) + (x.bandwidth() - bw) / 2, cum = 0;
       var present = keys.filter(function (k) { return (it.values[k] || 0) > 0; });
-      var g = svg.append("g");
+      var g = svg.append("g").attr("class", "col");
       present.forEach(function (k, j) {
         var v = it.values[k], y0 = y(cum), y1 = y(cum + v), h = y0 - y1 - (j > 0 ? 2 : 0);
         cum += v;
         if (h <= 0.5) return;
         var last = j === present.length - 1;
-        g.append("path").attr("d", last ? topRounded(cx, y1, bw, h, 4) : "M" + cx + "," + y1 + "h" + bw + "v" + h + "h" + (-bw) + "Z")
-          .style("fill", color(k));
+        g.append("path").datum({it: it, key: k}).attr("class", "seg")
+          .attr("d", segment(cx, y1, bw, h, last ? 6 : 2, j > 0 ? 2 : 0)).style("fill", color(k));
       });
+      return g;
     });
-    var hits = svg.append("g").selectAll("g").data(items).join("g");
-    var hit = hits.append("rect").attr("class", "hit")
-      .attr("x", function (_, i) { return x(i) - x.step() * x.paddingInner() / 2; }).attr("y", m.t)
-      .attr("width", x.step()).attr("height", H - m.b - m.t);
-    hits.append("rect").attr("class", "hl")
-      .attr("x", function (_, i) { return x(i) + (x.bandwidth() - bw) / 2 - 3; })
-      .attr("y", function (it) { return y(keys.reduce(function (s, k) { return s + (it.values[k] || 0); }, 0)) - 3; })
-      .attr("width", bw + 6).attr("height", function (it) { return y(0) - y(keys.reduce(function (s, k) { return s + (it.values[k] || 0); }, 0)) + 3; })
-      .attr("rx", 5);
-    attachTip(hit, tipFor);
+    attachTip(hit, tipFor, function (it) {
+      svg.classed("dim", true); cols[items.indexOf(it)].classed("active", true);
+    }, function (it) {
+      svg.classed("dim", false); cols[items.indexOf(it)].classed("active", false);
+    });
+    if (keys.length < 2) return;
+    attachTip(svg.selectAll("path.seg"), function (d) {
+      var c = tipFor(d.it), mine = (c.rows || []).filter(function (r) { return r.color === color(d.key); });
+      return mine.length ? {title: c.title, sub: c.sub, rows: mine, total: c.total} : c;
+    }, function (d) {
+      svg.classed("dim", true); d3.select(this).classed("on", true);
+      cols[items.indexOf(d.it)].classed("active", true).classed("seg-focus", true);
+    }, function (d) {
+      svg.classed("dim", false); d3.select(this).classed("on", false);
+      cols[items.indexOf(d.it)].classed("active", false).classed("seg-focus", false);
+    });
   }
 
   function hbars(el, items, fmt) {
@@ -419,12 +467,15 @@ th.num { text-align: right; }
     var g = svg.selectAll("g").data(items).join("g").attr("transform", function (_, i) { return "translate(0," + (m.t + i * row) + ")"; });
     g.append("text").attr("class", "cat").attr("x", m.l - 8).attr("y", row / 2).attr("dy", "0.32em").attr("text-anchor", "end")
       .text(function (d) { return d.label; });
-    g.append("path").style("fill", "var(--s1)").attr("d", function (d) { return rightRounded(m.l, (row - 18) / 2, Math.max(1, x(d.value) - m.l), 18, 4); });
+    g.attr("class", "col");
+    g.append("path").style("fill", "var(--s1)").attr("d", function (d) { return rightRounded(m.l, (row - 18) / 2, Math.max(1, x(d.value) - m.l), 18, 6); });
     g.append("text").attr("class", "value").attr("x", function (d) { return x(d.value) + 6; }).attr("y", row / 2).attr("dy", "0.32em")
       .text(function (d) { return fmt(d.value); });
     svg.append("line").attr("class", "baseline").attr("x1", m.l).attr("x2", m.l).attr("y1", m.t).attr("y2", H - m.b);
     var hit = g.append("rect").attr("class", "hit").attr("x", 0).attr("y", 0).attr("width", W).attr("height", row);
-    attachTip(hit, function (d) { return [d.label, d.tip]; });
+    attachTip(hit, function (d) { return d.tip; },
+      function () { svg.classed("dim", true); d3.select(this.parentNode).classed("active", true); },
+      function () { svg.classed("dim", false); d3.select(this.parentNode).classed("active", false); });
   }
 
   // Dots per category with the median as a bar; deterministic jitter.
@@ -467,7 +518,7 @@ th.num { text-align: right; }
         .text(intFmt(ps.length) + " · median " + minFmt(md) + (opts.failures ? " · " + Math.round(100 * fails / ps.length) + "% failed" : ""));
       var hit = g.selectAll("circle.hit").data(ps).join("circle").attr("class", "hit")
         .attr("cx", function (p) { return p.cx; }).attr("cy", function (p) { return p.cy; }).attr("r", 12);
-      attachTip(hit, function (p) { return [p.title, p.tip]; });
+      attachTip(hit, function (p) { return p.tip; });
     });
   }
 
@@ -490,11 +541,14 @@ th.num { text-align: right; }
       return {runs: g[1], week: new Date(g[0]), values: valuesOf(g[1]), xLabel: dayFmt(new Date(g[0]))};
     });
   }
-  function binTitle(it) {
-    if (it.week) return "Week of " + dayFmt(it.week) + " · " + it.runs.length + " runs";
+  // Title and meta line of a column's tooltip.
+  function binHead(it) {
+    if (it.week) return {title: "Week of " + dayFmt(it.week), sub: intFmt(it.runs.length) + " runs"};
     var r = it.runs[0];
-    return dayFmt(r.date) + " · " + (r.project || "") + " · " + r.label + " · " + (r.skill_version || "?");
+    return {title: r.label, sub: [d3.timeFormat("%b %d, %H:%M")(r.date), r.project, r.skill_version, r.mode]
+      .filter(Boolean).join(" · ")};
   }
+  function withHead(it, body) { var h = binHead(it); return Object.assign(h, body); }
 
   function render() {
     var f = filtered(), R = f.R, E = f.E;
@@ -521,11 +575,7 @@ th.num { text-align: right; }
     var usedRoles = ROLES.filter(function (k) { return costBins.some(function (b) { return b.values[k] > 0; }); });
     legend("cost-legend", usedRoles.map(function (k) { return {label: ROLE_LABEL[k], color: roleColor(k)}; }));
     columns(document.getElementById("cost"), costBins, ROLES, roleColor, function (v) { return "$" + d3.format("~s")(v); }, function (it) {
-      var rows = [{value: usdFmt(d3.sum(ROLES, function (k) { return it.values[k]; })), label: "total"}];
-      ROLES.slice().reverse().forEach(function (k) {
-        if (it.values[k] > 0) rows.push({value: usdFmt(it.values[k]), label: ROLE_LABEL[k], color: roleColor(k)});
-      });
-      return [binTitle(it), rows];
+      return withHead(it, shareRows(it.values, ROLES, function (k) { return ROLE_LABEL[k]; }, roleColor, usdFmt));
     });
 
     // Wall time
@@ -533,17 +583,17 @@ th.num { text-align: right; }
     var wallBins = bins(R, function (rs) { return {wall: (med(rs.map(function (r) { return r.min_wall; })) || 0) / 60}; });
     columns(document.getElementById("wall"), wallBins, ["wall"], function () { return "var(--s1)"; },
       function (v) { return d3.format("~g")(v) + "h"; }, function (it) {
-        if (it.week) return [binTitle(it), [{value: minFmt(it.values.wall * 60), label: "median wall time"}]];
+        if (it.week) return withHead(it, {rows: [], total: {label: "Median wall time", value: minFmt(it.values.wall * 60)}});
         var r = it.runs[0];
-        return [binTitle(it), [
-          {value: minFmt(r.min_wall), label: "wall time"},
-          {value: minFmt(r.min_slowest_worker), label: "slowest worker"},
-          {value: minFmt(r.min_synthesis), label: "synthesis"},
-          {value: minFmt(r.min_user_wait), label: "waiting for you"},
-          {value: minFmt(r.min_rest), label: "everything else"},
-          {value: r.mode || "–", label: "mode"},
-          {value: r.workers != null ? String(r.workers) : "–", label: "workers"}
-        ]];
+        return withHead(it, {rows: [
+          {label: "Slowest worker", value: minFmt(r.min_slowest_worker)},
+          {label: "Synthesis", value: minFmt(r.min_synthesis)},
+          {label: "Waiting for you", value: minFmt(r.min_user_wait)},
+          {label: "Everything else", value: minFmt(r.min_rest)},
+          {label: "Workers", value: r.workers != null ? String(r.workers) : "–"},
+          {label: "Cost", value: usdFmt(r.usd || 0)},
+          {label: "PR opened", value: r.pr_opened ? "yes" : "no"}
+        ], total: {label: "Wall time", value: minFmt(r.min_wall)}});
       });
 
     // Problems
@@ -554,12 +604,9 @@ th.num { text-align: right; }
     var keys = PROBLEMS.map(function (p) { return p.key; });
     var usedProb = PROBLEMS.filter(function (p) { return probBins.some(function (b) { return b.values[p.key] > 0; }); });
     legend("prob-legend", usedProb.map(function (p) { return {label: p.label, color: probColor(p.key)}; }));
+    var probLabel = {}; PROBLEMS.forEach(function (p) { probLabel[p.key] = p.label; });
     columns(document.getElementById("prob"), probBins, keys, probColor, d3.format("~s"), function (it) {
-      var rows = [{value: intFmt(d3.sum(keys, function (k) { return it.values[k]; })), label: "total"}];
-      PROBLEMS.slice().reverse().forEach(function (p) {
-        if (it.values[p.key] > 0) rows.push({value: intFmt(it.values[p.key]), label: p.label, color: probColor(p.key)});
-      });
-      return [binTitle(it), rows];
+      return withHead(it, shareRows(it.values, keys, function (k) { return probLabel[k]; }, probColor, intFmt));
     });
 
     // By version
@@ -568,12 +615,17 @@ th.num { text-align: right; }
     function verItems(metric) {
       return byVersion.map(function (g) {
         var rs = g[1];
-        return {label: g[0], value: med(rs.map(function (r) { return r[metric]; })) || 0, tip: [
-          {value: intFmt(rs.length), label: "runs"},
-          {value: usdFmt(med(rs.map(function (r) { return r.usd; })) || 0), label: "median cost"},
-          {value: minFmt(med(rs.map(function (r) { return r.min_wall; }))), label: "median wall time"},
-          {value: d3.format(",.0f")(med(rs.map(function (r) { return r.problems; })) || 0), label: "median problems"}
-        ]};
+        var opened = rs.filter(function (r) { return r.pr_opened; }).length;
+        return {label: g[0], value: med(rs.map(function (r) { return r[metric]; })) || 0, tip: {
+          title: "Skill " + g[0], sub: intFmt(rs.length) + " run" + (rs.length === 1 ? "" : "s") + " · " +
+            d3.extent(rs, function (r) { return r.date; }).map(dayFmt).filter(function (v, i, a) { return a.indexOf(v) === i; }).join(" – "),
+          rows: [
+            {label: "Median cost", value: usdFmt(med(rs.map(function (r) { return r.usd; })) || 0)},
+            {label: "Median wall time", value: minFmt(med(rs.map(function (r) { return r.min_wall; })))},
+            {label: "Median problems", value: d3.format(",.0f")(med(rs.map(function (r) { return r.problems; })) || 0)},
+            {label: "PR opened", value: opened + " of " + rs.length}
+          ],
+          total: {label: "Total spend", value: usdFmt(d3.sum(rs, function (r) { return r.usd || 0; }))}}};
       });
     }
     hbars(document.getElementById("ver-cost"), verItems("usd"), usdFmt);
@@ -584,10 +636,11 @@ th.num { text-align: right; }
     strip(document.getElementById("heavy"), KINDS, E.map(function (e) {
       var failed = e.rc != null && e.rc !== 0;
       return {group: KINDS.indexOf(e.kind) >= 0 ? e.kind : "other", value: Math.max(0.05, e.sec / 60), failed: failed,
-        title: d3.timeFormat("%b %d %H:%M")(e.date) + " · " + (e.tool || ""),
-        tip: [{value: minFmt(e.sec / 60), label: e.kind || "other"},
-              {value: e.rc == null ? "–" : String(e.rc), label: e.rc === 124 || e.rc === 137 ? "exit code (stopped at the time limit)" : "exit code"},
-              {value: instLabel(e.installation_id), label: ""}]};
+        tip: {title: (e.kind || "other") + (failed ? " · failed" : " · succeeded"),
+          sub: [d3.timeFormat("%b %d, %H:%M")(e.date), e.tool, instLabel(e.installation_id)].filter(Boolean).join(" · "),
+          rows: [{label: "Exit code", value: e.rc == null ? "–" : String(e.rc) + (e.rc === 124 || e.rc === 137 ? " (time limit)" : ""),
+                  color: failed ? "var(--critical)" : "var(--s1)"}],
+          total: {label: "Duration", value: minFmt(e.sec / 60)}}};
     }), {log: true, failures: true, height: 300});
 
     // Units by size
@@ -596,7 +649,9 @@ th.num { text-align: right; }
       (r.units || []).forEach(function (u) {
         if (u.min == null) return;
         unitPts.push({group: SIZES.indexOf(u.size) >= 0 ? u.size : "?", value: u.min,
-          title: dayFmt(r.date) + " · " + r.label, tip: [{value: minFmt(u.min), label: "size " + (u.size || "?")}]});
+          tip: {title: "Size " + (u.size || "?") + " unit", sub: [dayFmt(r.date), r.label, r.project].filter(Boolean).join(" · "),
+            rows: [{label: "Run mode", value: r.mode || "–"}, {label: "Skill version", value: r.skill_version || "–"}],
+            total: {label: "Worker time", value: minFmt(u.min)}}});
       });
     });
     strip(document.getElementById("units"), SIZES.concat(["?"]), unitPts, {height: 260});
@@ -605,8 +660,12 @@ th.num { text-align: right; }
     var ctx = ROLES.map(function (k) {
       var v = R.map(function (r) { return ((r.by_role || {})[k] || {}).ktok_ctx_per_turn; });
       var turns = d3.sum(R, function (r) { return ((r.by_role || {})[k] || {}).turns || 0; });
-      return {label: ROLE_LABEL[k], value: med(v), tip: [{value: d3.format(",.0f")(med(v) || 0) + "k", label: "median tokens per turn"},
-        {value: intFmt(turns), label: "turns in this selection"}]};
+      var spend = d3.sum(R, function (r) { return r.usdRole[k]; });
+      return {label: ROLE_LABEL[k], value: med(v), tip: {title: ROLE_LABEL[k], sub: "Across " + intFmt(R.length) + " runs",
+        rows: [{label: "Turns", value: intFmt(turns), color: roleColor(k)},
+               {label: "Spend", value: usdFmt(spend)},
+               {label: "Spend per turn", value: turns ? usdFmt(spend / turns) : "–"}],
+        total: {label: "Median context per turn", value: d3.format(",.0f")(med(v) || 0) + "k tokens"}}};
     }).filter(function (d) { return d.value != null; });
     hbars(document.getElementById("ctx"), ctx, function (v) { return d3.format(",.0f")(v) + "k"; });
 
