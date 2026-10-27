@@ -266,6 +266,17 @@ Any other command goes through your normal permission rules.
   The final summary shows it as "What happened".
 - **Comparisons:** `runs-summary.py` compares runs by skill version, and
   `runs-summary.py --problems` lists the problems that recur across runs.
+- **Sharing metrics:** nothing leaves your machine on its own. To share
+  your runs with the skill's maintainer, run
+  `python <skill>/scripts/metrics.py export`. It writes one JSON file of
+  numbers: cost, time, tokens, workers, review and failure counts, skill
+  version, CPUs and RAM, and how long each heavy command took. It holds no
+  host name, paths, commands, branch names or PR links, and project names are
+  hashed. `--include-text` adds the agents' reports about the skill, with
+  paths, branches and project names replaced. Read the file, then send it.
+  The maintainer runs `metrics.py import <file>...`, which merges every
+  machine into `~/.claude/bmad-batch-runs/metrics/`; the fields are listed in
+  `references/metrics.md`.
 - **System map:** when `docs/architecture/system-map.md` exists, the split
   reads it, and `check-map.py` first checks that every path it names still
   exists.
@@ -326,6 +337,9 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.12.2:** `metrics.py export` and `import`: an anonymised metrics file
+  to share, and one dataset of every machine's runs for a dashboard.
+- **0.12.1:** the Haiku coder reads a file before editing it.
 - **0.12.0:**
   - parallel waves are capped at 4 workers, and fewer when other runs are
     active;

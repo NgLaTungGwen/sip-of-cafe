@@ -268,5 +268,75 @@ class PrepareWorktree(unittest.TestCase):
         self.assertIn("unless the intent, the spec's Verification or AGENTS.md requires one", toml)
 
 
+class Metrics(unittest.TestCase):
+    """metrics.py export leaves nothing identifying in a bundle, and import dedupes."""
+
+    ROW = {"session": "s1", "start": "2026-10-27T01:00:00Z", "usd": 12.5, "min_wall": 90, "workers": 3,
+           "project": "ClientSecretProject", "slug": "client-feature-x",
+           "mode": "Mode: waves (≈460 min). Order: 1,6 → {2,3}.",
+           "hardware": {"host": "XT-0032-SECRET-HOST", "os": "Windows", "cpus": 12, "ram_gb": 32},
+           "worker_spans": [{"wt": "client-feature-x-1", "unit": 1, "min": 20}],
+           "unit_minutes": [{"id": 1, "size": "M", "min": 20}],
+           "skill_issues": ["prepare failed in D:\\Clients\\Secret\\repo\\api",
+                            "merged acme/feat-client-x into clientsecretproject main"],
+           "journal": {"counts": {"tool_error": 2},
+                       "outcome": {"pr": "https://dev.azure.com/acme/Clients/_git/x/pullrequest/7",
+                                   "merged": "Client billing export (b1a00db4); Client audit log (2f1969fb)"},
+                       "items": [{"bucket": "tool_error", "who": "worker u1", "count": 1,
+                                  "detail": "cat /home/someone/secret/file.ts failed"}]}}
+    EVENT = {"end": "2026-10-27T02:00:00+00:00", "tool": "bg:suite", "rc": 1, "sec": 300,
+             "cwd": "D:/Clients/Secret/repo", "cmd": "cd D:/Clients/Secret/repo && npm test",
+             "error": "npm error in D:/Clients/Secret/repo"}
+
+    def setUp(self):
+        self.store = tempfile.mkdtemp()
+        self.old = os.environ.get("BMAD_RUNS_DIR")
+        os.environ["BMAD_RUNS_DIR"] = self.store
+        for name, row in (("runs.jsonl", self.ROW), ("events.jsonl", self.EVENT)):
+            with open(os.path.join(self.store, name), "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+        self.m = load("metrics", "metrics.py")
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("BMAD_RUNS_DIR", None)
+        else:
+            os.environ["BMAD_RUNS_DIR"] = self.old
+        shutil.rmtree(self.store, ignore_errors=True)
+
+    def test_export_drops_identifying_data(self):
+        for text in (False, True):
+            b = self.m.bundle(text=text)
+            dump = json.dumps(b)
+            for secret in ("SECRET-HOST", "ClientSecretProject", "client-feature-x", "Clients", "/home/someone",
+                           "npm test", "acme", "billing", "b1a00db4"):
+                self.assertNotIn(secret.lower(), dump.lower(), f"{secret} leaked (include_text={text})")
+            self.assertEqual(b["schema"], self.m.SCHEMA)
+            run = b["runs"][0]
+            self.assertEqual((run["usd"], run["mode"], run["hardware"]["cpus"]), (12.5, "waves", 12))
+            self.assertTrue(run["pr_opened"])
+            self.assertEqual(b["events"][0]["kind"], "test")
+            self.assertEqual(run["installation_id"], b["installation_id"])
+        self.assertIn("<path>", b["runs"][0]["skill_issues"][0])
+        self.assertEqual(self.m.installation_id(), b["installation_id"])  # stable across calls
+
+    def test_import_merges_and_dedupes(self):
+        other = self.m.bundle()
+        other["installation_id"] = "other"
+        for r in other["runs"] + other["events"]:
+            r["installation_id"] = "other"
+        path = os.path.join(self.store, "other.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(other, fh)
+        for _ in range(2):
+            self.m.import_bundles([path])
+        runs = self.m.read_jsonl(os.path.join(self.store, "metrics", "runs.jsonl"))
+        events = self.m.read_jsonl(os.path.join(self.store, "metrics", "events.jsonl"))
+        self.assertEqual(len(runs), 2)  # one per installation, not doubled
+        self.assertEqual(len(events), 2)
+        own = [r for r in runs if r["installation_id"] != "other"][0]
+        self.assertEqual(own["project"], "ClientSecretProject")  # own rows keep their names
+
+
 if __name__ == "__main__":
     unittest.main()
