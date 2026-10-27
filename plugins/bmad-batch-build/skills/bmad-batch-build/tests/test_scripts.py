@@ -28,6 +28,7 @@ log_event = load("log_event", "log-event.py")
 
 
 SKILL_DIR = os.path.dirname(SCRIPTS)
+DASHBOARD_DIR = os.path.join(os.path.dirname(SKILL_DIR), "bmad-batch-dashboard")
 
 
 def frontmatter_errors(text):
@@ -55,7 +56,8 @@ def frontmatter_errors(text):
 class Frontmatter(unittest.TestCase):
     def test_skill_and_agents_parse_strictly(self):
         files = [os.path.join(SKILL_DIR, "SKILL.md")] + [
-            os.path.join(SKILL_DIR, "agents", f) for f in os.listdir(os.path.join(SKILL_DIR, "agents"))]
+            os.path.join(SKILL_DIR, "agents", f) for f in os.listdir(os.path.join(SKILL_DIR, "agents"))] + [
+            os.path.join(DASHBOARD_DIR, "SKILL.md")]
         for f in files:
             self.assertEqual(frontmatter_errors(open(f, encoding="utf-8").read()), [], f)
 
@@ -336,6 +338,60 @@ class Metrics(unittest.TestCase):
         self.assertEqual(len(events), 2)
         own = [r for r in runs if r["installation_id"] != "other"][0]
         self.assertEqual(own["project"], "ClientSecretProject")  # own rows keep their names
+
+
+class RunSkillName(unittest.TestCase):
+    """Only the batch build itself counts as a run: its plugin form does, the
+    dashboard (a sibling skill in the same plugin) does not."""
+
+    def test_names(self):
+        for mod in (load("cost_report", "cost-report.py"), load("install_skill", "install-skill.py")):
+            self.assertTrue(mod.is_run_skill("bmad-batch-build"))
+            self.assertTrue(mod.is_run_skill("bmad-batch-build:bmad-batch-build"))
+            self.assertFalse(mod.is_run_skill("bmad-batch-build:bmad-batch-dashboard"))
+            self.assertFalse(mod.is_run_skill("bmad-batch-dashboard"))
+            line = json.dumps({"type": "user", "message": {"content": "<command-name>/bmad-batch-build:bmad-batch-dashboard</command-name>"}})
+            self.assertFalse(mod.invokes(line))
+            line = json.dumps({"type": "user", "message": {"content": "<command-name>/bmad-batch-build</command-name>"}})
+            self.assertTrue(mod.invokes(line))
+
+
+class Dashboard(unittest.TestCase):
+    """dashboard.py embeds the dataset safely and the page script parses."""
+
+    def test_build(self):
+        store = tempfile.mkdtemp()
+        old = os.environ.get("BMAD_RUNS_DIR")
+        os.environ["BMAD_RUNS_DIR"] = store
+        try:
+            os.makedirs(os.path.join(store, "metrics"))
+            row = {"installation_id": "i1", "session": "s1", "start": "2026-10-27T01:00:00Z", "usd": 3.5,
+                   "slug": "evil</script><!--x", "usd_by_role": {"main": 1.5, "worker": 2}, "min_wall": 30}
+            with open(os.path.join(store, "metrics", "runs.jsonl"), "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+            spec = importlib.util.spec_from_file_location("dashboard", os.path.join(DASHBOARD_DIR, "scripts", "dashboard.py"))
+            dash = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(dash)
+            out = os.path.join(store, "d.html")
+            dash.build(out)
+            html = open(out, encoding="utf-8").read()
+            self.assertEqual(html.count("</script>"), 3)  # d3, the data, the page script
+            self.assertNotIn("<!--x", html)
+            data = html.split('<script id="dash-data" type="application/json">', 1)[1].split("</script>", 1)[0]
+            self.assertEqual(json.loads(data)["runs"][0]["slug"], row["slug"])
+            node = shutil.which("node")
+            if node:
+                page = os.path.join(store, "page.js")
+                with open(page, "w", encoding="utf-8") as fh:
+                    fh.write(html.rsplit("<script>", 1)[1].split("</script>", 1)[0])
+                r = subprocess.run([node, "--check", page], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+        finally:
+            if old is None:
+                os.environ.pop("BMAD_RUNS_DIR", None)
+            else:
+                os.environ["BMAD_RUNS_DIR"] = old
+            shutil.rmtree(store, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Batch Build Metrics</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface-1: #fcfcfb;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+  --critical: #d03b3b;
+  --good-text: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface-1: #1a1a19;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --good-text: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface-1: #1a1a19;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  --good-text: #0ca30c;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 1240px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; justify-content: space-between; }
+h1 { font-size: 22px; font-weight: 600; margin: 0; }
+.sub { color: var(--text-secondary); margin: 4px 0 0; }
+.muted { color: var(--text-muted); }
+button, select {
+  font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+}
+button { cursor: pointer; }
+.filters { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 20px 0 16px; align-items: center; }
+.filters label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text-secondary); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.tile, .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.tile .label { color: var(--text-secondary); font-size: 13px; }
+.tile .value { font-size: 24px; font-weight: 600; margin-top: 2px; }
+.tile .note { color: var(--text-muted); font-size: 12px; }
+.tile.hero { grid-column: span 2; }
+.tile.hero .value { font-size: 48px; line-height: 1.1; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.card.wide { grid-column: 1 / -1; }
+@media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } .tile.hero { grid-column: span 1; } }
+.card h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.card .sub { font-size: 13px; margin-bottom: 8px; }
+.chart { width: 100%; min-height: 40px; transition: opacity 0.2s; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-secondary); margin: 4px 0 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.legend i.dot { border-radius: 50%; }
+.empty { color: var(--text-muted); padding: 24px 0; }
+svg text { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+svg text.value { fill: var(--text-secondary); }
+svg text.cat { fill: var(--text-secondary); font-size: 12px; font-variant-numeric: normal; }
+svg .gridline { stroke: var(--grid); stroke-width: 1; }
+svg .baseline { stroke: var(--axis); stroke-width: 1; }
+svg .hit { fill: transparent; cursor: default; outline: none; }
+svg .hit:hover + .hl, svg .hit:focus + .hl { opacity: 1; }
+svg .hl { fill: none; stroke: var(--text-secondary); stroke-width: 1; opacity: 0; pointer-events: none; }
+svg .median { stroke: var(--text-primary); stroke-width: 2; stroke-linecap: round; }
+#tip {
+  position: fixed; z-index: 10; pointer-events: none; max-width: 320px;
+  background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); font-size: 12px;
+}
+#tip .tip-title { color: var(--text-secondary); margin-bottom: 4px; }
+#tip .tip-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+#tip .tip-row strong { font-variant-numeric: tabular-nums; }
+#tip .tip-row span { color: var(--text-secondary); }
+#tip .tip-key { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--text-secondary); font-weight: 600; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+th.num { text-align: right; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Batch build metrics</h1>
+      <p class="sub" id="meta"></p>
+    </div>
+    <button id="theme" type="button" aria-label="Switch color theme">Theme: system</button>
+  </header>
+
+  <div class="filters" role="group" aria-label="Filters">
+    <label>Date range
+      <select id="f-days">
+        <option value="0">All time</option>
+        <option value="7">Last 7 days</option>
+        <option value="30">Last 30 days</option>
+        <option value="90">Last 90 days</option>
+      </select>
+    </label>
+    <label>Project <select id="f-project"></select></label>
+    <label>Machine <select id="f-inst"></select></label>
+    <label>Skill version <select id="f-version"></select></label>
+  </div>
+
+  <section class="tiles" id="tiles" aria-label="Headline numbers"></section>
+
+  <section class="grid">
+    <div class="card wide">
+      <h2 id="cost-title">Cost per run</h2>
+      <p class="sub">USD by role, oldest to newest.</p>
+      <div class="legend" id="cost-legend"></div>
+      <div class="chart" id="cost"></div>
+    </div>
+    <div class="card">
+      <h2 id="wall-title">Wall time per run</h2>
+      <p class="sub">Start to finish. Hover for the slowest worker, synthesis and time waiting for you; the parts overlap.</p>
+      <div class="chart" id="wall"></div>
+    </div>
+    <div class="card">
+      <h2 id="prob-title">Problems per run</h2>
+      <p class="sub">From the run journal: failures, blocks, resumes and skill issues.</p>
+      <div class="legend" id="prob-legend"></div>
+      <div class="chart" id="prob"></div>
+    </div>
+    <div class="card">
+      <h2>Median cost by skill version</h2>
+      <p class="sub">USD per run. "before-X" is a run older than X whose exact version was not recorded.</p>
+      <div class="chart" id="ver-cost"></div>
+    </div>
+    <div class="card">
+      <h2>Median wall time by skill version</h2>
+      <p class="sub">Minutes per run.</p>
+      <div class="chart" id="ver-wall"></div>
+    </div>
+    <div class="card wide">
+      <h2>Heavy commands</h2>
+      <p class="sub">Each dot is one install, test, typecheck or build run through the queue (log scale); the bar is the median. Project and version filters do not apply: commands carry no project.</p>
+      <div class="legend" id="heavy-legend"></div>
+      <div class="chart" id="heavy"></div>
+    </div>
+    <div class="card">
+      <h2>Unit time by size</h2>
+      <p class="sub">Worker minutes per unit, by the size the split gave it; the bar is the median.</p>
+      <div class="chart" id="units"></div>
+    </div>
+    <div class="card">
+      <h2>Context per turn by role</h2>
+      <p class="sub">Median thousand tokens read per turn: what each turn costs before any output.</p>
+      <div class="chart" id="ctx"></div>
+    </div>
+    <div class="card wide">
+      <h2>Runs</h2>
+      <p class="sub">Newest first.</p>
+      <div class="table-wrap"><table id="runs-table"></table></div>
+    </div>
+  </section>
+</main>
+<div id="tip" role="tooltip" hidden></div>
+<script id="dash-data" type="application/json">/*__DATA__*/</script>
+<script>
+(function () {
+  "use strict";
+  if (typeof d3 === "undefined") {
+    document.getElementById("meta").textContent = "d3 did not load (offline?). Open this file with a network connection.";
+    return;
+  }
+  var DATA = JSON.parse(document.getElementById("dash-data").textContent);
+
+  // Colors follow the entity, never its rank: each role and problem group owns a slot.
+  var ROLES = ["main", "worker", "haiku", "reviewer", "synthesis", "explore", "enhancer", "other"];
+  var ROLE_LABEL = {main: "Orchestrator", worker: "Workers", haiku: "Haiku coders", reviewer: "Reviewers",
+    synthesis: "Synthesis", explore: "Explore", enhancer: "Enhancer", other: "Other agents"};
+  var PROBLEMS = [
+    {key: "tool", label: "Failed tool calls", kinds: ["tool_error"]},
+    {key: "cmd", label: "Failed commands", kinds: ["command_failed", "wrapper_failed"]},
+    {key: "resume", label: "Resumed or re-dispatched", kinds: ["resume"]},
+    {key: "skill", label: "Skill issues", kinds: ["skill_issue"]},
+    {key: "shell", label: "Shell syntax errors", kinds: ["shell_syntax"]},
+    {key: "blocked", label: "Blocked or denied", kinds: ["harness_block", "permission_denied", "classifier_denial"]},
+    {key: "synth", label: "Synthesis repairs", kinds: ["synthesis"]},
+    {key: "gate", label: "Gate, missing reply, budget, other", kinds: []}
+  ];
+  var NOT_PROBLEMS = {run_note: true};
+  var SIZES = ["S", "M", "L", "XL"];
+  var KINDS = ["install", "typecheck", "lint", "test", "build", "verify", "other"];
+  function slot(i) { return "var(--s" + (i + 1) + ")"; }
+  function roleColor(k) { return slot(ROLES.indexOf(k)); }
+  function probColor(k) { return slot(PROBLEMS.findIndex(function (p) { return p.key === k; })); }
+  function problemGroup(kind) {
+    for (var i = 0; i < PROBLEMS.length; i++) if (PROBLEMS[i].kinds.indexOf(kind) >= 0) return PROBLEMS[i].key;
+    return "gate";
+  }
+
+  var usdFmt = function (v) { return v >= 1000 ? "$" + d3.format(".3~s")(v) : "$" + d3.format(",.1f")(v); };
+  var minFmt = function (m) {
+    if (m == null || isNaN(m)) return "–";
+    if (m < 1) return Math.round(m * 60) + "s";
+    if (m < 60) return Math.round(m) + "m";
+    return d3.format("~f")(+(m / 60).toFixed(1)) + "h";
+  };
+  var intFmt = d3.format(",d");
+  var dayFmt = d3.timeFormat("%b %d");
+  var med = function (a) { a = a.filter(function (v) { return v != null && !isNaN(v); }); return a.length ? d3.median(a) : null; };
+
+  var runs = (DATA.runs || []).map(function (r) {
+    var usd = {}; ROLES.forEach(function (k) { usd[k] = 0; });
+    Object.entries(r.usd_by_role || {}).forEach(function (e) { usd[ROLES.indexOf(e[0]) >= 0 ? e[0] : "other"] += e[1] || 0; });
+    var prob = {}; PROBLEMS.forEach(function (p) { prob[p.key] = 0; });
+    var problems = 0;
+    Object.entries(r.journal_counts || {}).forEach(function (e) {
+      if (NOT_PROBLEMS[e[0]]) return;
+      prob[problemGroup(e[0])] += e[1] || 0; problems += e[1] || 0;
+    });
+    return Object.assign({}, r, {date: new Date(r.start), usdRole: usd, prob: prob, problems: problems,
+      label: r.slug || r.project || String(r.session || "").slice(0, 8)});
+  }).filter(function (r) { return !isNaN(r.date); }).sort(function (a, b) { return a.date - b.date; });
+  var events = (DATA.events || []).map(function (e) { return Object.assign({}, e, {date: new Date(e.end)}); })
+    .filter(function (e) { return !isNaN(e.date) && e.sec != null; });
+
+  function instLabel(id) { return id === DATA.own_installation ? "This machine" : "Machine " + String(id).slice(0, 8); }
+  function vkey(v) {
+    if (!v) return [1e9];
+    var before = v.indexOf("before-") === 0;
+    var nums = (before ? v.slice(7) : v).split(".").map(Number);
+    return nums.concat([before ? 0 : 1]);
+  }
+  function vcmp(a, b) {
+    var x = vkey(a), y = vkey(b);
+    for (var i = 0; i < Math.max(x.length, y.length); i++) {
+      var d = (x[i] || 0) - (y[i] || 0);
+      if (d) return d;
+    }
+    return 0;
+  }
+
+  // ---- filters ----
+  var state = {days: 0, project: "", inst: "", version: ""};
+  function fillSelect(id, values, label, all) {
+    var sel = document.getElementById(id);
+    sel.replaceChildren();
+    var o = document.createElement("option"); o.value = ""; o.textContent = all; sel.append(o);
+    values.forEach(function (v) {
+      var opt = document.createElement("option"); opt.value = v; opt.textContent = label(v); sel.append(opt);
+    });
+  }
+  fillSelect("f-project", Array.from(new Set(runs.map(function (r) { return r.project; }).filter(Boolean))).sort(),
+    function (v) { return v; }, "All projects");
+  fillSelect("f-inst", Array.from(new Set(runs.map(function (r) { return r.installation_id; }).concat(events.map(function (e) { return e.installation_id; })))).filter(Boolean)
+    .sort(function (a, b) { return (b === DATA.own_installation) - (a === DATA.own_installation); }), instLabel, "All machines");
+  fillSelect("f-version", Array.from(new Set(runs.map(function (r) { return r.skill_version; }).filter(Boolean))).sort(vcmp).reverse(),
+    function (v) { return v; }, "All versions");
+  [["f-days", "days"], ["f-project", "project"], ["f-inst", "inst"], ["f-version", "version"]].forEach(function (p) {
+    document.getElementById(p[0]).addEventListener("change", function (ev) {
+      state[p[1]] = p[1] === "days" ? Number(ev.target.value) : ev.target.value;
+      render();
+    });
+  });
+  function filtered() {
+    var since = state.days ? Date.now() - state.days * 864e5 : -Infinity;
+    return {
+      R: runs.filter(function (r) {
+        return r.date >= since && (!state.project || r.project === state.project) &&
+          (!state.inst || r.installation_id === state.inst) && (!state.version || r.skill_version === state.version);
+      }),
+      E: events.filter(function (e) { return e.date >= since && (!state.inst || e.installation_id === state.inst); })
+    };
+  }
+
+  // ---- tooltip (labels are data: textContent only) ----
+  var tip = document.getElementById("tip");
+  function placeTip(x, y) {
+    var pad = 12, r = tip.getBoundingClientRect();
+    var left = x + pad, top = y + pad;
+    if (left + r.width > window.innerWidth - 8) left = x - r.width - pad;
+    if (top + r.height > window.innerHeight - 8) top = y - r.height - pad;
+    tip.style.left = Math.max(8, left) + "px"; tip.style.top = Math.max(8, top) + "px";
+  }
+  function fillTip(title, rows) {
+    tip.replaceChildren();
+    var t = document.createElement("div"); t.className = "tip-title"; t.textContent = title; tip.append(t);
+    rows.forEach(function (r) {
+      var row = document.createElement("div"); row.className = "tip-row";
+      if (r.color) { var k = document.createElement("span"); k.className = "tip-key"; k.style.background = r.color; row.append(k); }
+      var v = document.createElement("strong"); v.textContent = r.value;
+      var l = document.createElement("span"); l.textContent = r.label;
+      row.append(v, l); tip.append(row);
+    });
+    tip.hidden = false;
+  }
+  function attachTip(sel, content) {
+    sel.attr("tabindex", 0)
+      .on("pointerenter pointermove", function (ev, d) { var c = content(d); fillTip(c[0], c[1]); placeTip(ev.clientX, ev.clientY); })
+      .on("pointerleave blur", function () { tip.hidden = true; })
+      .on("focus", function (ev, d) {
+        var c = content(d), b = this.getBoundingClientRect();
+        fillTip(c[0], c[1]); placeTip(b.left + b.width / 2, b.top);
+      });
+  }
+
+  // ---- shared drawing ----
+  function topRounded(x, y, w, h, r) {
+    r = Math.max(0, Math.min(r, h, w / 2));
+    return "M" + x + "," + (y + h) + "V" + (y + r) + "Q" + x + "," + y + " " + (x + r) + "," + y +
+      "H" + (x + w - r) + "Q" + (x + w) + "," + y + " " + (x + w) + "," + (y + r) + "V" + (y + h) + "Z";
+  }
+  function rightRounded(x, y, w, h, r) {
+    r = Math.max(0, Math.min(r, w, h / 2));
+    return "M" + x + "," + y + "H" + (x + w - r) + "Q" + (x + w) + "," + y + " " + (x + w) + "," + (y + r) +
+      "V" + (y + h - r) + "Q" + (x + w) + "," + (y + h) + " " + (x + w - r) + "," + (y + h) + "H" + x + "Z";
+  }
+  function empty(el, text) {
+    el.replaceChildren();
+    var p = document.createElement("p"); p.className = "empty"; p.textContent = text || "No data in this selection.";
+    el.append(p);
+  }
+  function legend(id, items) {
+    var el = document.getElementById(id);
+    el.replaceChildren();
+    items.forEach(function (it) {
+      var s = document.createElement("span"), i = document.createElement("i");
+      i.style.background = it.color; if (it.dot) i.className = "dot";
+      s.append(i, document.createTextNode(it.label)); el.append(s);
+    });
+  }
+  function yGrid(svg, y, x0, x1, fmt, n) {
+    var ticks = y.ticks(n || 4);
+    svg.append("g").selectAll("line").data(ticks).join("line").attr("class", "gridline")
+      .attr("x1", x0).attr("x2", x1).attr("y1", function (d) { return y(d); }).attr("y2", function (d) { return y(d); });
+    svg.append("g").selectAll("text").data(ticks).join("text")
+      .attr("x", x0 - 6).attr("y", function (d) { return y(d); }).attr("dy", "0.32em").attr("text-anchor", "end").text(fmt);
+  }
+
+  // Columns over time; with more than 60 runs, one column per week.
+  function columns(el, items, keys, color, fmt, tipFor) {
+    el.replaceChildren();
+    if (!items.length) return empty(el);
+    var W = Math.max(280, el.clientWidth), H = 260, m = {t: 12, r: 8, b: 28, l: 52};
+    var totals = items.map(function (it) { return keys.reduce(function (s, k) { return s + (it.values[k] || 0); }, 0); });
+    var x = d3.scaleBand().domain(d3.range(items.length)).range([m.l, W - m.r]).paddingInner(0.25).paddingOuter(0.1);
+    var y = d3.scaleLinear().domain([0, d3.max(totals) || 1]).nice().range([H - m.b, m.t]);
+    var bw = Math.min(24, x.bandwidth());
+    var svg = d3.select(el).append("svg").attr("width", W).attr("height", H).attr("role", "img");
+    yGrid(svg, y, m.l, W - m.r, fmt);
+    svg.append("line").attr("class", "baseline").attr("x1", m.l).attr("x2", W - m.r).attr("y1", y(0)).attr("y2", y(0));
+    var step = Math.max(1, Math.ceil(items.length / Math.max(1, Math.floor((W - m.l - m.r) / 64))));
+    svg.append("g").selectAll("text").data(items.filter(function (_, i) { return i % step === 0; })).join("text")
+      .attr("x", function (it) { return x(items.indexOf(it)) + x.bandwidth() / 2; }).attr("y", H - m.b + 16)
+      .attr("text-anchor", "middle").text(function (it) { return it.xLabel; });
+    items.forEach(function (it, i) {
+      var cx = x(i) + (x.bandwidth() - bw) / 2, cum = 0;
+      var present = keys.filter(function (k) { return (it.values[k] || 0) > 0; });
+      var g = svg.append("g");
+      present.forEach(function (k, j) {
+        var v = it.values[k], y0 = y(cum), y1 = y(cum + v), h = y0 - y1 - (j > 0 ? 2 : 0);
+        cum += v;
+        if (h <= 0.5) return;
+        var last = j === present.length - 1;
+        g.append("path").attr("d", last ? topRounded(cx, y1, bw, h, 4) : "M" + cx + "," + y1 + "h" + bw + "v" + h + "h" + (-bw) + "Z")
+          .style("fill", color(k));
+      });
+    });
+    var hits = svg.append("g").selectAll("g").data(items).join("g");
+    var hit = hits.append("rect").attr("class", "hit")
+      .attr("x", function (_, i) { return x(i) - x.step() * x.paddingInner() / 2; }).attr("y", m.t)
+      .attr("width", x.step()).attr("height", H - m.b - m.t);
+    hits.append("rect").attr("class", "hl")
+      .attr("x", function (_, i) { return x(i) + (x.bandwidth() - bw) / 2 - 3; })
+      .attr("y", function (it) { return y(keys.reduce(function (s, k) { return s + (it.values[k] || 0); }, 0)) - 3; })
+      .attr("width", bw + 6).attr("height", function (it) { return y(0) - y(keys.reduce(function (s, k) { return s + (it.values[k] || 0); }, 0)) + 3; })
+      .attr("rx", 5);
+    attachTip(hit, tipFor);
+  }
+
+  function hbars(el, items, fmt) {
+    el.replaceChildren();
+    if (!items.length) return empty(el);
+    var W = Math.max(280, el.clientWidth), m = {t: 4, r: 56, b: 4, l: 120}, row = 30;
+    var H = m.t + m.b + row * items.length;
+    var x = d3.scaleLinear().domain([0, d3.max(items, function (d) { return d.value; }) || 1]).range([m.l, W - m.r]);
+    var svg = d3.select(el).append("svg").attr("width", W).attr("height", H).attr("role", "img");
+    var g = svg.selectAll("g").data(items).join("g").attr("transform", function (_, i) { return "translate(0," + (m.t + i * row) + ")"; });
+    g.append("text").attr("class", "cat").attr("x", m.l - 8).attr("y", row / 2).attr("dy", "0.32em").attr("text-anchor", "end")
+      .text(function (d) { return d.label; });
+    g.append("path").style("fill", "var(--s1)").attr("d", function (d) { return rightRounded(m.l, (row - 18) / 2, Math.max(1, x(d.value) - m.l), 18, 4); });
+    g.append("text").attr("class", "value").attr("x", function (d) { return x(d.value) + 6; }).attr("y", row / 2).attr("dy", "0.32em")
+      .text(function (d) { return fmt(d.value); });
+    svg.append("line").attr("class", "baseline").attr("x1", m.l).attr("x2", m.l).attr("y1", m.t).attr("y2", H - m.b);
+    var hit = g.append("rect").attr("class", "hit").attr("x", 0).attr("y", 0).attr("width", W).attr("height", row);
+    attachTip(hit, function (d) { return [d.label, d.tip]; });
+  }
+
+  // Dots per category with the median as a bar; deterministic jitter.
+  function strip(el, groups, points, opts) {
+    el.replaceChildren();
+    groups = groups.filter(function (g) { return points.some(function (p) { return p.group === g; }); });
+    if (!points.length) return empty(el);
+    var W = Math.max(280, el.clientWidth), H = opts.height || 280, m = {t: 12, r: 8, b: 44, l: 52};
+    var x = d3.scaleBand().domain(groups).range([m.l, W - m.r]).padding(0.2);
+    var vals = points.map(function (p) { return p.value; });
+    var y = opts.log
+      ? d3.scaleLog().domain([Math.max(0.05, d3.min(vals)), Math.max(1, d3.max(vals))]).clamp(true).nice().range([H - m.b, m.t])
+      : d3.scaleLinear().domain([0, d3.max(vals) || 1]).nice().range([H - m.b, m.t]);
+    var svg = d3.select(el).append("svg").attr("width", W).attr("height", H).attr("role", "img");
+    // Minutes on the scale, but ticks on whole hours once the range passes 3h.
+    if (!opts.log && y.domain()[1] > 180) y.domain([0, Math.ceil(y.domain()[1] / 60) * 60]);
+    var ticks = opts.log ? [0.1, 0.5, 1, 5, 15, 60, 240].filter(function (t) { return t >= y.domain()[0] && t <= y.domain()[1]; })
+      : y.domain()[1] > 180 ? d3.ticks(0, y.domain()[1] / 60, 4).map(function (h) { return h * 60; }) : y.ticks(4);
+    svg.append("g").selectAll("line").data(ticks).join("line").attr("class", "gridline")
+      .attr("x1", m.l).attr("x2", W - m.r).attr("y1", y).attr("y2", y);
+    svg.append("g").selectAll("text").data(ticks).join("text").attr("x", m.l - 6).attr("y", y).attr("dy", "0.32em")
+      .attr("text-anchor", "end").text(minFmt);
+    groups.forEach(function (gname) {
+      var ps = points.filter(function (p) { return p.group === gname; });
+      var cx = x(gname) + x.bandwidth() / 2, spread = Math.min(60, x.bandwidth() * 0.4);
+      var g = svg.append("g");
+      ps.forEach(function (p, i) {
+        var j = ((i * 2654435761) % 1000) / 1000 - 0.5;
+        p.cx = cx + j * 2 * spread; p.cy = y(p.value);
+      });
+      g.selectAll("circle.dot").data(ps).join("circle").attr("class", "dot").attr("cx", function (p) { return p.cx; })
+        .attr("cy", function (p) { return p.cy; }).attr("r", 4)
+        .style("fill", function (p) { return p.failed ? "var(--critical)" : "var(--s1)"; })
+        .style("stroke", "var(--surface-1)").style("stroke-width", 2).style("opacity", 0.85);
+      var md = med(ps.map(function (p) { return p.value; }));
+      svg.append("line").attr("class", "median").attr("x1", cx - spread - 6).attr("x2", cx + spread + 6).attr("y1", y(md)).attr("y2", y(md));
+      var fails = ps.filter(function (p) { return p.failed; }).length;
+      svg.append("text").attr("class", "cat").attr("x", cx).attr("y", H - m.b + 16).attr("text-anchor", "middle").text(gname);
+      svg.append("text").attr("x", cx).attr("y", H - m.b + 31).attr("text-anchor", "middle")
+        .text(intFmt(ps.length) + " · median " + minFmt(md) + (opts.failures ? " · " + Math.round(100 * fails / ps.length) + "% failed" : ""));
+      var hit = g.selectAll("circle.hit").data(ps).join("circle").attr("class", "hit")
+        .attr("cx", function (p) { return p.cx; }).attr("cy", function (p) { return p.cy; }).attr("r", 12);
+      attachTip(hit, function (p) { return [p.title, p.tip]; });
+    });
+  }
+
+  // ---- views ----
+  function tile(parent, label, value, note, hero) {
+    var t = document.createElement("div"); t.className = "tile" + (hero ? " hero" : "");
+    var l = document.createElement("div"); l.className = "label"; l.textContent = label;
+    var v = document.createElement("div"); v.className = "value"; v.textContent = value;
+    t.append(l, v);
+    if (note) { var n = document.createElement("div"); n.className = "note"; n.textContent = note; t.append(n); }
+    parent.append(t);
+  }
+
+  function bins(R, valuesOf) {
+    if (R.length <= 60) {
+      return R.map(function (r) { return {runs: [r], values: valuesOf([r]), xLabel: dayFmt(r.date)}; });
+    }
+    var byWeek = d3.groups(R, function (r) { return +d3.timeWeek.floor(r.date); });
+    return byWeek.map(function (g) {
+      return {runs: g[1], week: new Date(g[0]), values: valuesOf(g[1]), xLabel: dayFmt(new Date(g[0]))};
+    });
+  }
+  function binTitle(it) {
+    if (it.week) return "Week of " + dayFmt(it.week) + " · " + it.runs.length + " runs";
+    var r = it.runs[0];
+    return dayFmt(r.date) + " · " + (r.project || "") + " · " + r.label + " · " + (r.skill_version || "?");
+  }
+
+  function render() {
+    var f = filtered(), R = f.R, E = f.E;
+    var weekly = R.length > 60;
+
+    // Tiles
+    var tiles = document.getElementById("tiles"); tiles.replaceChildren();
+    var spend = d3.sum(R, function (r) { return r.usd || 0; });
+    var prs = R.filter(function (r) { return r.pr_opened != null; });
+    var machines = new Set(R.map(function (r) { return r.installation_id; }));
+    tile(tiles, "Total spend", usdFmt(spend), intFmt(R.length) + " runs", true);
+    tile(tiles, "Median cost per run", R.length ? usdFmt(med(R.map(function (r) { return r.usd; }))) : "–");
+    tile(tiles, "Median wall time", minFmt(med(R.map(function (r) { return r.min_wall; }))));
+    tile(tiles, "PR opened", prs.length ? Math.round(100 * prs.filter(function (r) { return r.pr_opened; }).length / prs.length) + "%" : "–",
+      prs.length ? prs.filter(function (r) { return r.pr_opened; }).length + " of " + prs.length + " runs" : "");
+    tile(tiles, "Median problems per run", R.length ? d3.format(",.0f")(med(R.map(function (r) { return r.problems; }))) : "–");
+    tile(tiles, "Machines", intFmt(machines.size), machines.has(DATA.own_installation) ? "including this one" : "");
+
+    // Cost per run, by role
+    document.getElementById("cost-title").textContent = weekly ? "Cost per week" : "Cost per run";
+    var costBins = bins(R, function (rs) {
+      var v = {}; ROLES.forEach(function (k) { v[k] = d3.sum(rs, function (r) { return r.usdRole[k]; }); }); return v;
+    });
+    var usedRoles = ROLES.filter(function (k) { return costBins.some(function (b) { return b.values[k] > 0; }); });
+    legend("cost-legend", usedRoles.map(function (k) { return {label: ROLE_LABEL[k], color: roleColor(k)}; }));
+    columns(document.getElementById("cost"), costBins, ROLES, roleColor, function (v) { return "$" + d3.format("~s")(v); }, function (it) {
+      var rows = [{value: usdFmt(d3.sum(ROLES, function (k) { return it.values[k]; })), label: "total"}];
+      ROLES.slice().reverse().forEach(function (k) {
+        if (it.values[k] > 0) rows.push({value: usdFmt(it.values[k]), label: ROLE_LABEL[k], color: roleColor(k)});
+      });
+      return [binTitle(it), rows];
+    });
+
+    // Wall time
+    document.getElementById("wall-title").textContent = weekly ? "Median wall time per week" : "Wall time per run";
+    var wallBins = bins(R, function (rs) { return {wall: (med(rs.map(function (r) { return r.min_wall; })) || 0) / 60}; });
+    columns(document.getElementById("wall"), wallBins, ["wall"], function () { return "var(--s1)"; },
+      function (v) { return d3.format("~g")(v) + "h"; }, function (it) {
+        if (it.week) return [binTitle(it), [{value: minFmt(it.values.wall * 60), label: "median wall time"}]];
+        var r = it.runs[0];
+        return [binTitle(it), [
+          {value: minFmt(r.min_wall), label: "wall time"},
+          {value: minFmt(r.min_slowest_worker), label: "slowest worker"},
+          {value: minFmt(r.min_synthesis), label: "synthesis"},
+          {value: minFmt(r.min_user_wait), label: "waiting for you"},
+          {value: minFmt(r.min_rest), label: "everything else"},
+          {value: r.mode || "–", label: "mode"},
+          {value: r.workers != null ? String(r.workers) : "–", label: "workers"}
+        ]];
+      });
+
+    // Problems
+    document.getElementById("prob-title").textContent = weekly ? "Problems per week" : "Problems per run";
+    var probBins = bins(R, function (rs) {
+      var v = {}; PROBLEMS.forEach(function (p) { v[p.key] = d3.sum(rs, function (r) { return r.prob[p.key]; }); }); return v;
+    });
+    var keys = PROBLEMS.map(function (p) { return p.key; });
+    var usedProb = PROBLEMS.filter(function (p) { return probBins.some(function (b) { return b.values[p.key] > 0; }); });
+    legend("prob-legend", usedProb.map(function (p) { return {label: p.label, color: probColor(p.key)}; }));
+    columns(document.getElementById("prob"), probBins, keys, probColor, d3.format("~s"), function (it) {
+      var rows = [{value: intFmt(d3.sum(keys, function (k) { return it.values[k]; })), label: "total"}];
+      PROBLEMS.slice().reverse().forEach(function (p) {
+        if (it.values[p.key] > 0) rows.push({value: intFmt(it.values[p.key]), label: p.label, color: probColor(p.key)});
+      });
+      return [binTitle(it), rows];
+    });
+
+    // By version
+    var byVersion = d3.groups(R.filter(function (r) { return r.skill_version; }), function (r) { return r.skill_version; })
+      .sort(function (a, b) { return vcmp(b[0], a[0]); });
+    function verItems(metric) {
+      return byVersion.map(function (g) {
+        var rs = g[1];
+        return {label: g[0], value: med(rs.map(function (r) { return r[metric]; })) || 0, tip: [
+          {value: intFmt(rs.length), label: "runs"},
+          {value: usdFmt(med(rs.map(function (r) { return r.usd; })) || 0), label: "median cost"},
+          {value: minFmt(med(rs.map(function (r) { return r.min_wall; }))), label: "median wall time"},
+          {value: d3.format(",.0f")(med(rs.map(function (r) { return r.problems; })) || 0), label: "median problems"}
+        ]};
+      });
+    }
+    hbars(document.getElementById("ver-cost"), verItems("usd"), usdFmt);
+    hbars(document.getElementById("ver-wall"), verItems("min_wall"), minFmt);
+
+    // Heavy commands
+    legend("heavy-legend", [{label: "Succeeded", color: "var(--s1)", dot: true}, {label: "Failed (non-zero exit)", color: "var(--critical)", dot: true}]);
+    strip(document.getElementById("heavy"), KINDS, E.map(function (e) {
+      var failed = e.rc != null && e.rc !== 0;
+      return {group: KINDS.indexOf(e.kind) >= 0 ? e.kind : "other", value: Math.max(0.05, e.sec / 60), failed: failed,
+        title: d3.timeFormat("%b %d %H:%M")(e.date) + " · " + (e.tool || ""),
+        tip: [{value: minFmt(e.sec / 60), label: e.kind || "other"},
+              {value: e.rc == null ? "–" : String(e.rc), label: e.rc === 124 || e.rc === 137 ? "exit code (stopped at the time limit)" : "exit code"},
+              {value: instLabel(e.installation_id), label: ""}]};
+    }), {log: true, failures: true, height: 300});
+
+    // Units by size
+    var unitPts = [];
+    R.forEach(function (r) {
+      (r.units || []).forEach(function (u) {
+        if (u.min == null) return;
+        unitPts.push({group: SIZES.indexOf(u.size) >= 0 ? u.size : "?", value: u.min,
+          title: dayFmt(r.date) + " · " + r.label, tip: [{value: minFmt(u.min), label: "size " + (u.size || "?")}]});
+      });
+    });
+    strip(document.getElementById("units"), SIZES.concat(["?"]), unitPts, {height: 260});
+
+    // Context per turn
+    var ctx = ROLES.map(function (k) {
+      var v = R.map(function (r) { return ((r.by_role || {})[k] || {}).ktok_ctx_per_turn; });
+      var turns = d3.sum(R, function (r) { return ((r.by_role || {})[k] || {}).turns || 0; });
+      return {label: ROLE_LABEL[k], value: med(v), tip: [{value: d3.format(",.0f")(med(v) || 0) + "k", label: "median tokens per turn"},
+        {value: intFmt(turns), label: "turns in this selection"}]};
+    }).filter(function (d) { return d.value != null; });
+    hbars(document.getElementById("ctx"), ctx, function (v) { return d3.format(",.0f")(v) + "k"; });
+
+    // Table
+    var table = document.getElementById("runs-table"); table.replaceChildren();
+    var cols = [["Date", function (r) { return d3.timeFormat("%Y-%m-%d")(r.date); }], ["Project", function (r) { return r.project || "–"; }],
+      ["Run", function (r) { return r.slug || "–"; }], ["Version", function (r) { return r.skill_version || "–"; }],
+      ["Mode", function (r) { return r.mode || "–"; }], ["Workers", function (r) { return r.workers == null ? "–" : String(r.workers); }, 1],
+      ["Cost", function (r) { return usdFmt(r.usd || 0); }, 1], ["Wall", function (r) { return minFmt(r.min_wall); }, 1],
+      ["Problems", function (r) { return intFmt(r.problems); }, 1], ["PR", function (r) { return r.pr_opened ? "yes" : "no"; }],
+      ["Machine", function (r) { return instLabel(r.installation_id); }]];
+    var thead = table.createTHead().insertRow();
+    cols.forEach(function (c) { var th = document.createElement("th"); th.textContent = c[0]; if (c[2]) th.className = "num"; thead.append(th); });
+    var body = table.createTBody();
+    R.slice().reverse().forEach(function (r) {
+      var tr = body.insertRow();
+      cols.forEach(function (c) { var td = tr.insertCell(); td.textContent = c[1](r); if (c[2]) td.className = "num"; });
+    });
+    if (!R.length) { var tr = body.insertRow(), td = tr.insertCell(); td.colSpan = cols.length; td.className = "muted"; td.textContent = "No runs in this selection."; }
+  }
+
+  // ---- page ----
+  var meta = document.getElementById("meta");
+  meta.textContent = intFmt(runs.length) + " runs and " + intFmt(events.length) + " heavy commands from " +
+    new Set(runs.map(function (r) { return r.installation_id; })).size + " machine(s). Built " +
+    d3.timeFormat("%Y-%m-%d %H:%M")(new Date(DATA.generated)) + (DATA.note ? ". " + DATA.note : ".");
+
+  var themes = ["system", "light", "dark"], themeIdx = 0;
+  try { themeIdx = Math.max(0, themes.indexOf(localStorage.getItem("bbd-theme") || "system")); } catch (e) { themeIdx = 0; }
+  function applyTheme() {
+    var t = themes[themeIdx];
+    if (t === "system") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
+    document.getElementById("theme").textContent = "Theme: " + t;
+  }
+  document.getElementById("theme").addEventListener("click", function () {
+    themeIdx = (themeIdx + 1) % themes.length; applyTheme();
+    try { localStorage.setItem("bbd-theme", themes[themeIdx]); } catch (e) { /* per-viewer convenience only */ }
+  });
+  applyTheme();
+
+  var lastW = 0, timer = null;
+  new ResizeObserver(function () {
+    var w = document.querySelector("main").clientWidth;
+    if (w === lastW) return;
+    lastW = w; clearTimeout(timer); timer = setTimeout(render, 120);
+  }).observe(document.querySelector("main"));
+  render();
+})();
+</script>
+</body>
+</html>

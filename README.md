@@ -277,6 +277,17 @@ Any other command goes through your normal permission rules.
   The maintainer runs `metrics.py import <file>...`, which merges every
   machine into `~/.claude/bmad-batch-runs/metrics/`; the fields are listed in
   `references/metrics.md`.
+- **Dashboard:** `/bmad-batch-dashboard` (`/bmad-batch-build:bmad-batch-dashboard`
+  from the plugin) records any runs not yet recorded, refreshes the dataset
+  and opens one page of d3 charts: cost per run by role, wall time,
+  problems from the journals, cost and time by skill version, heavy command
+  times and failures, unit times by size, context per turn, and a table of
+  runs. Filters for date range, project, machine and skill version. Files
+  from other machines are added with
+  `dashboard.py --import <file>...`. The page is
+  `~/.claude/bmad-batch-runs/dashboard.html`; it holds its own data and needs
+  the network only for d3. `install-skill.py` also copies the dashboard to
+  `~/.claude/skills`, so it works in every project.
 - **System map:** when `docs/architecture/system-map.md` exists, the split
   reads it, and `check-map.py` first checks that every path it names still
   exists.
@@ -337,6 +348,9 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.12.3:** the `bmad-batch-dashboard` skill. Viewing it no longer counts
+  as a run when the installer checks for active runs, and runs started as a
+  plugin skill (`/bmad-batch-build:bmad-batch-build`) are now recorded.
 - **0.12.2:** `metrics.py export` and `import`: an anonymised metrics file
   to share, and one dataset of every machine's runs for a dashboard.
 - **0.12.1:** the Haiku coder reads a file before editing it.

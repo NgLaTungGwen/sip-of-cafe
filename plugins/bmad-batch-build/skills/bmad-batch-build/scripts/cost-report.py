@@ -486,6 +486,12 @@ def find_session(slug):
 SKILL_NAMES = ("bmad-batch-build", "bmad-parallel-build")
 
 
+def is_run_skill(name):
+    """The batch-build skill itself, also as a plugin skill (bmad-batch-build:bmad-batch-build),
+    but not a sibling such as bmad-batch-build:bmad-batch-dashboard."""
+    return str(name or "").split(":")[-1] in SKILL_NAMES
+
+
 def invokes(line):
     """True for a typed /bmad-batch-build command or a Skill call that loads it.
 
@@ -503,10 +509,10 @@ def invokes(line):
     c = m.get("content")
     if x.get("type") == "user":
         texts = [c] if isinstance(c, str) else [b.get("text", "") for b in c or [] if b.get("type") == "text"]
-        return any(f"<command-name>/{n}</command-name>" in t for t in texts for n in SKILL_NAMES)
+        return any(is_run_skill(n) for t in texts for n in re.findall(r"<command-name>/([\w:.-]+)</command-name>", t))
     if x.get("type") == "assistant" and isinstance(c, list):
         return any(b.get("type") == "tool_use" and b.get("name") == "Skill"
-                   and (b.get("input") or {}).get("skill") in SKILL_NAMES for b in c)
+                   and is_run_skill((b.get("input") or {}).get("skill")) for b in c)
     return False
 
 

@@ -17,10 +17,12 @@ copy, removes the files in "drop", runs the optional local patch (a Python
 script in the install folder, given the installed skill directory), and copies
 the agents into <root>/.claude/agents. Prints one line per target. A project
 whose Claude Code session wrote in the last 15 minutes is skipped (a run there
-may be using the scripts); --force installs anyway.
+may be using the scripts); --force installs anyway. The dashboard skill
+beside this one, when present, goes once to ~/.claude/skills.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,10 +46,16 @@ def invokes(line):
     c = m.get("content") if isinstance(m, dict) else None
     if x.get("type") == "user":
         texts = [c] if isinstance(c, str) else [b.get("text", "") for b in c or [] if isinstance(b, dict)]
-        return any("<command-name>/bmad-batch-build" in s for s in texts)
+        return any(is_run_skill(n) for s in texts for n in re.findall(r"<command-name>/([\w:.-]+)</command-name>", s))
     return x.get("type") == "assistant" and isinstance(c, list) and any(
         b.get("type") == "tool_use" and b.get("name") == "Skill"
-        and str((b.get("input") or {}).get("skill", "")).startswith("bmad-batch-build") for b in c)
+        and is_run_skill((b.get("input") or {}).get("skill")) for b in c)
+
+
+def is_run_skill(name):
+    """bmad-batch-build itself, also as a plugin skill (bmad-batch-build:bmad-batch-build);
+    viewing the dashboard (bmad-batch-build:bmad-batch-dashboard) is not a run."""
+    return str(name or "").split(":")[-1] == "bmad-batch-build"
 
 
 def active_minutes(root):
@@ -120,7 +128,27 @@ def install(target, dry, force=False):
     return f"{root}: installed {version}{note}; agents updated: {', '.join(changed) or 'none'}"
 
 
+def install_dashboard(dry):
+    """The dashboard skill (a sibling of this one) goes to the user's skills,
+    ~/.claude/skills/bmad-batch-dashboard, so /bmad-batch-dashboard works in
+    every project. Viewing it never runs the build scripts, so it needs no
+    active-run check."""
+    src = os.path.join(os.path.dirname(SKILL), "bmad-batch-dashboard")
+    if not os.path.isdir(src):
+        return None
+    dest = os.path.join(os.path.expanduser("~"), ".claude", "skills", "bmad-batch-dashboard")
+    if dry:
+        return f"dashboard: would install into {dest}"
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    return f"dashboard: installed into {dest} (/bmad-batch-dashboard)"
+
+
 def main(args):
+    line = install_dashboard("--dry-run" in args)
+    if line:
+        print(line)
     path = os.path.join(store(), "install", "installs.json")
     if not os.path.exists(path):
         print(f"install-skill: no {path}; create it (see this script's docstring) to install automatically")
