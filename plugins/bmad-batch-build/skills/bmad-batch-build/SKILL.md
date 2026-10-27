@@ -119,14 +119,17 @@ commands in the project profile, `<root>/.claude/bmad-batch-project.json`
   `python "<skill>/scripts/profile.py" detect "<root>" --write`, which drafts
   the profile from the lockfiles and package scripts. Then read the
   repository's AGENTS.md, CLAUDE.md, README and CONTRIBUTING for how it
-  installs, builds, tests and typechecks, and correct the file with Edit
+  installs, builds, tests and typechecks, and correct it with
+  `python "<skill>/scripts/profile.py" set "<root>" <key> '<JSON value>'`
+  (one call per field, for example `set "<root>" suite '{"dir": ".", "cmd": "npm test"}'`;
+  never Edit the file: Claude Code asks before every edit under `.claude/`)
   where they differ (they win: "use bun, never npm" changes every command)
   and fill in what the draft left empty. Every command runs from its `dir`
   without prompting; `targeted.test` keeps the `<files>` placeholder; leave
   `database.per_worktree` false. Show `profile.py show "<root>"` in the
   approval table under "Project commands (first run in this repository)",
   and after approval run `python "<skill>/scripts/profile.py" confirm "<root>"`.
-  A correction from the user goes into the file before confirming.
+  A correction from the user goes in with `profile.py set` before confirming.
 - `PROFILE stale`: lockfiles or package scripts changed since it was
   confirmed. Run `profile.py detect "<root>"` without `--write`, update the
   file where the commands changed, show what changed in the approval table,
@@ -135,6 +138,8 @@ commands in the project profile, `<root>/.claude/bmad-batch-project.json`
   approval.
 
 `<base>` is the profile's `base` branch; without a profile, setup's `BASE`.
+With `REMOTE none`, read every `origin/<base>` in this skill as `<base>`, and
+skip every fetch and push: the run ends on a local branch.
 
 **Tell the user when the run needs them.** Before every question to the user
 (the split approval, a gate failure, a stuck synthesis), send a

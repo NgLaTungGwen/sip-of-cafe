@@ -383,6 +383,7 @@ class Setup(unittest.TestCase):
         self.assertEqual(r.returncode, 0, out + r.stderr)
         self.assertIn("SETUP ok", out)
         self.assertRegex(out, r"PYTHON python")
+        self.assertRegex(out, r"UV (ok|installed)")
         # The plugin ships the agents itself; a copied install gets them in the project.
         plugin = os.path.exists(os.path.join(SKILL_DIR, "..", "..", ".claude-plugin", "plugin.json"))
         self.assertIn("AGENTS plugin" if plugin else "AGENTS copied", out)
@@ -416,6 +417,49 @@ class Setup(unittest.TestCase):
         finally:
             os.chdir(old)
             shutil.rmtree(root, ignore_errors=True)
+
+
+class NewRepo(unittest.TestCase):
+    """A small project without a lockfile or a remote: what the first fresh
+    install hit after setup.sh (profile left empty, origin/main missing)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp().replace("\\", "/")
+        with open(os.path.join(self.root, "package.json"), "w") as fh:
+            json.dump({"name": "x", "scripts": {"test": "node --test"}}, fh)
+        subprocess.run(["git", "init", "-q", "-b", "main", self.root], check=True)
+        subprocess.run(["git", "-C", self.root, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "i"], check=True)
+        self.profile = load("profile_mod", "profile.py")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_detects_a_package_json_without_lockfile(self):
+        prof = self.profile.detect(self.root)
+        self.assertEqual(prof["install"], [])  # no dependencies, nothing to install
+        self.assertEqual(prof["suite"], {"dir": ".", "cmd": "npm run test"})
+        self.assertEqual(prof["targeted"]["test"], "npm test -- <files>")
+        self.assertEqual(prof["base"], "main")
+        self.assertFalse(prof["notes"])
+
+    def test_set_changes_one_field_without_an_edit(self):
+        py = sys.executable
+        script = os.path.join(SCRIPTS, "profile.py")
+        subprocess.run([py, script, "set", self.root, "suite", '{"dir": ".", "cmd": "npm test"}'], check=True,
+                       capture_output=True)
+        subprocess.run([py, script, "set", self.root, "targeted.test", "node --test <files>"], check=True,
+                       capture_output=True)
+        prof = json.load(open(os.path.join(self.root, ".claude", "bmad-batch-project.json"), encoding="utf-8"))
+        self.assertEqual(prof["suite"]["cmd"], "npm test")
+        self.assertEqual(prof["targeted"]["test"], "node --test <files>")
+        self.assertIsNone(prof["confirmed"])
+
+    def test_base_ref_without_a_remote(self):
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        lib = os.path.join(SCRIPTS, "lib-profile.sh").replace("\\", "/")
+        r = subprocess.run([bash, "-c", f'. "{lib}"; base_ref "{self.root}"'], capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "main")
 
 
 class RunSkillName(unittest.TestCase):

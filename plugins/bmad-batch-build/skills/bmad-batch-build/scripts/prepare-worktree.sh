@@ -27,7 +27,7 @@ root=$1 name=$2 branch=$3
 root=${root//\\//}
 shift 3
 . "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
-apps=0 install=1 base="origin/$(profile_get "$root" base || echo main)" agents=""
+apps=0 install=1 base=$(base_ref "$root") agents=""
 while [ $# -gt 0 ]; do
   case $1 in
     --apps) apps=1 ;;

@@ -17,7 +17,7 @@ set -uo pipefail
 
 wt=$1 branch=$2 spec=$3
 . "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
-base=${4:-origin/$(profile_get "$wt" base || echo main)}
+base=${4:-$(base_ref "$wt")}
 reasons=()
 
 if [ ! -f "$spec" ]; then

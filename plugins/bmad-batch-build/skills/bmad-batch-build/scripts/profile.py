@@ -6,6 +6,8 @@ usage: python profile.py detect <root> [--write]   draft a profile from the file
        python profile.py show   <root>             summary for the approval table
        python profile.py confirm <root>            mark it confirmed (after approval)
        python profile.py get <root or worktree> <key>
+       python profile.py set <root> <key[.field]> <JSON value>   change one field
+                                                (e.g. set . suite '{"dir": ".", "cmd": "npm test"}')
 
 The profile lives at <root>/.claude/bmad-batch-project.json:
 
@@ -116,13 +118,24 @@ def base_branch(root):
         if subprocess.run(["git", "-C", root, "rev-parse", "--verify", "-q", f"origin/{b}"],
                           capture_output=True).returncode == 0:
             return b
-    return "main"
+    # No origin branch (no remote yet): the branch the checkout is on.
+    r = subprocess.run(["git", "-C", root, "symbolic-ref", "--quiet", "--short", "HEAD"], capture_output=True, text=True)
+    return r.stdout.strip() or "main"
+
+
+def node_dirs(root):
+    """package_dirs, or the root alone when it has a package.json but no
+    lockfile (a small project that never ran an install)."""
+    dirs = package_dirs(root)
+    if not dirs and os.path.exists(os.path.join(root, "package.json")):
+        dirs = ["."]
+    return dirs
 
 
 def fingerprint(root):
     """Lockfiles and package scripts: when they change, the profile may be stale."""
     h = hashlib.sha256()
-    for rel in package_dirs(root):
+    for rel in node_dirs(root):
         d = os.path.join(root, rel)
         scripts, _ = scripts_of(d)
         h.update(f"{rel}|{pm_of(d)}|{json.dumps(scripts, sort_keys=True)}\n".encode())
@@ -135,12 +148,15 @@ def fingerprint(root):
 def detect(root):
     prof = {"base": base_branch(root), "install": [], "checks": [], "suite": None, "targeted": None,
             "after_merge": [], "database": None, "notes": "", "confirmed": None}
-    dirs = package_dirs(root)
+    dirs = node_dirs(root)
     for rel in dirs:
         d = os.path.join(root, rel)
-        pm = pm_of(d)
-        prof["install"].append({"dir": rel, "cmd": INSTALL[pm]})
+        pm = pm_of(d) or "npm"
         scripts, deps = scripts_of(d)
+        if pm_of(d):
+            prof["install"].append({"dir": rel, "cmd": INSTALL[pm]})
+        elif deps:  # no lockfile yet: npm ci would refuse
+            prof["install"].append({"dir": rel, "cmd": "npm install --no-audit --no-fund --loglevel=error"})
         tag = "" if rel == "." else rel.replace("/", "-") + "-"
         for s in ("build", "typecheck", "lint", "test"):
             if s in scripts:
@@ -162,8 +178,8 @@ def detect(root):
                 test = "npx jest <files>"
             elif pm == "bun":
                 test = "bun test <files>"
-            else:
-                test = None
+            else:  # node --test, mocha, ...: the test script with the files appended
+                test = f"{pm} test -- <files>"
             tc = f"{pm} run typecheck" if "typecheck" in scripts else (
                 "npx tsc --noEmit" if os.path.exists(os.path.join(d, "tsconfig.json")) else None)
             prof["targeted"] = {"dir": rel, "test": test, "typecheck": tc}
@@ -206,7 +222,7 @@ def save(root, prof):
 
 
 def show(prof):
-    out = [f"base: origin/{prof.get('base')}"]
+    out = [f"base: {prof.get('base')}"]
     out += [f"install: {i['dir']}: {i['cmd']}" for i in prof.get("install") or []] or ["install: none"]
     out += [f"check {c['name']}: {c['dir']}: {c['cmd']}" for c in prof.get("checks") or []]
     s = prof.get("suite")
@@ -246,6 +262,27 @@ def main(args):
         print(show(prof))
         return 0
     prof = load(root)
+    if cmd == "set":
+        # Claude Code asks before an Edit to a file under .claude/, so the
+        # orchestrator corrects the profile through here instead.
+        if len(args) < 4:
+            print("usage: profile.py set <root> <key[.field]> <JSON value>")
+            return 2
+        prof = prof if prof is not None else detect(root)
+        try:
+            value = json.loads(args[3])
+        except ValueError:
+            value = args[3]
+        target, parts = prof, args[2].split(".")
+        for part in parts[:-1]:
+            if not isinstance(target.get(part), dict):
+                target[part] = {}
+            target = target[part]
+        target[parts[-1]] = value
+        prof["confirmed"] = None
+        save(root, prof)
+        print(show(prof))
+        return 0
     if cmd == "check":
         if prof is None:
             print("PROFILE none")

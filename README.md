@@ -50,13 +50,16 @@ resolves the rest on its own:
 - it installs BMAD when the project has none, and copies the run's agents
   into `<repo>/.claude/agents/`;
 - it keeps `.claude/worktrees/` out of git status;
-- it finds Python (`python3` or `python`) and the default branch;
+- it finds Python (`python3` or `python`) and the default branch, and
+  installs `uv` when it is missing (workers run BMAD's scripts with it);
 - it decides where tickets and the PR go: Azure DevOps tickets only with an
   ADO remote and a signed-in `az`, and the PR through `az`, `gh` or, without
   either, a pushed branch.
 
-It stops only for what it can't install itself: Python, or Node.js when BMAD
-still has to be installed. Claude Code loads a new `.claude/agents` folder at
+It stops only for what it can't install itself: Git, Python 3.9+, or
+Node.js when BMAD still has to be installed. Optional: `az` (signed in) for
+Azure DevOps tickets and PRs, `gh` for GitHub PRs, Docker for projects whose
+tests need a database. Claude Code loads a new `.claude/agents` folder at
 the next session start, so the first run after an npx install uses
 general-purpose agents with the same instructions instead of stopping; it
 costs a little more (no 1-hour cache).
@@ -363,6 +366,12 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.12.6:** `uv` is installed when missing; a new small project works on
+  the first run: a `package.json`
+  without a lockfile is detected (targeted tests run as `npm test -- <files>`),
+  the profile is corrected with `profile.py set` instead of an edit Claude
+  Code would ask about, and a repository without a remote branches from its
+  local base and skips fetch and push.
 - **0.12.5:**
   - `setup.sh` sets up a new project on its own; the run no longer stops
     when its agents aren't loaded yet (fallback to general-purpose agents);

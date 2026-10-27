@@ -7,6 +7,7 @@
 #
 # Prints one line per item, then SETUP ok|blocked:
 #   PYTHON <command>          the Python 3 to type for <skill>/scripts/*.py
+#   UV ok|installed           uv, which workers need; installed when missing
 #   BMAD ...                  ensure-bmad.sh: BMAD present or installed
 #   AGENTS plugin|project|copied
 #                             copied = written to <root>/.claude/agents just now;
@@ -33,6 +34,48 @@ for c in python3 python py; do
   fi
 done
 if [ -n "$py" ]; then echo "PYTHON $py"; else echo "PYTHON BLOCKED: install Python 3.9 or later"; blocked=1; fi
+
+# uv: workers render bmad-build-auto with `uv run`, which also fetches the
+# Python 3.11 that BMAD's scripts declare. Installed from PyPI when missing,
+# else with Astral's installer; then made reachable on PATH without touching
+# shell profiles, by copying it into a user folder that is already on PATH.
+if command -v uv >/dev/null 2>&1; then
+  echo "UV ok"
+elif [ -n "$py" ]; then
+  "$py" -m pip install --user --quiet --disable-pip-version-check uv >/dev/null 2>&1 || true
+  sdir=$("$py" -c 'import sysconfig
+try:
+    s = sysconfig.get_preferred_scheme("user")
+except AttributeError:
+    import os; s = os.name + "_user"
+print(sysconfig.get_path("scripts", s))' 2>/dev/null | tr -d '\r')
+  if [ -n "$sdir" ] && [ ! -e "$sdir/uv" ] && [ ! -e "$sdir/uv.exe" ]; then
+    # PyPI refused (an externally managed Python): Astral's own installer.
+    case "$(uname -s)" in
+      MINGW*|MSYS*|CYGWIN*) powershell.exe -NoProfile -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" >/dev/null 2>&1 ;;
+      *) curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | env UV_NO_MODIFY_PATH=1 sh >/dev/null 2>&1 ;;
+    esac
+    sdir="$HOME/.local/bin"
+  fi
+  if ! command -v uv >/dev/null 2>&1; then
+    sdir=$(cygpath -u "$sdir" 2>/dev/null || printf '%s' "$sdir")
+    IFS=: read -ra dirs <<< "$PATH"
+    for d in "${dirs[@]}"; do
+      case $d in "$HOME"/*) ;; *) continue ;; esac
+      if [ -d "$d" ] && [ -w "$d" ]; then
+        for f in "$sdir"/uv "$sdir"/uv.exe "$sdir"/uvx "$sdir"/uvx.exe; do [ -e "$f" ] && cp "$f" "$d/"; done
+        break
+      fi
+    done
+  fi
+  hash -r
+  if command -v uv >/dev/null 2>&1; then
+    echo "UV installed ($(command -v uv))"
+  else
+    echo "UV BLOCKED: could not install uv; install it from https://docs.astral.sh/uv/ and run the skill again"
+    blocked=1
+  fi
+fi
 
 if ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
   echo "GIT BLOCKED: $root is not a git repository"

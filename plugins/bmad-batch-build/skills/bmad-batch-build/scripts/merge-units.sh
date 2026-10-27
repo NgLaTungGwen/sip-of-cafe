@@ -26,7 +26,7 @@ scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 heavy="$scripts/heavy.sh"
 . "$scripts/lib-profile.sh"
 # The branch units start from: the project profile's base, else main.
-base="origin/$(profile_get "$wt" base || echo main)"
+base=$(base_ref "$wt")
 has_profile=0
 profile_get "$wt" base > /dev/null && has_profile=1
 
