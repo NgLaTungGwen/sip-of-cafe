@@ -13,7 +13,8 @@ Fill in:
   every session on the machine: it stays on `main` and nobody edits it
 - `<wt>`: `<store>/src/wt-<today>-<slug>`, this enhancer's own worktree
 - `<skillsrc>`: `<wt>/plugins/bmad-batch-build/skills/bmad-batch-build`
-- `<journal>`: the run's journal, `<root>/.claude/worktrees/_runs/<slug>-journal.md`
+- `<journal>`: the run's journal, the absolute path after `journal:` in the
+  output of the `cost-report.py --record` step (`<runs>/<slug>-journal.md`)
 - `<roots>`: the project roots to self-test against: every `root` in
   `<store>/install/installs.json`, or `<root>` when that file is missing
 - `<slug>`, `<today>` (YYYY-MM-DD)

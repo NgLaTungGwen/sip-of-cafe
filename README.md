@@ -326,7 +326,7 @@ Any other command goes through your normal permission rules.
   `~/.claude/bmad-batch-runs/runs.jsonl`, across all projects and with the
   machine's CPUs and RAM. It also sweeps up any run that wasn't recorded, and
   keeps gzipped logs, because Claude Code deletes transcripts after 30 days.
-- **Journal:** `<repo>/.claude/worktrees/_runs/<slug>-journal.md` records what
+- **Journal:** `~/.claude/bmad-batch-runs/runs/<repo>/<slug>/<slug>-journal.md` records what
   happened, failures first:
   - units blocked at the gate;
   - agents that ran out of turns or had to be resumed;
@@ -426,6 +426,11 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.12.10:** every run's files are kept in one place,
+  `~/.claude/bmad-batch-runs/runs/<project>/<slug>/` (the run file, plan,
+  tickets, synthesis state, cost report and journal), instead of loose in each
+  repository's `.claude/worktrees/_runs/`. `scripts/run_dir.py` creates and
+  prints the folder; older runs are still read from `_runs/`.
 - **0.12.9:** every question to the user is easier to read. Details go in
   the message; the dialog asks one short question per decision, with
   labelled options, the default first and a preview where it helps (the

@@ -3,7 +3,7 @@
 usage: python plan-waves.py <plan.json> [--busy] [--max-parallel N] [--no-tests]
 
 plan.json is written by the orchestrator at the split, next to the run file
-(_runs/<slug>-plan.json):
+(<slug>-plan.json in the run folder, run_dir.py):
 
     {"units": [
       {"id": 1, "title": "chart kit", "size": "M", "depends_on": [], "reason": ""},

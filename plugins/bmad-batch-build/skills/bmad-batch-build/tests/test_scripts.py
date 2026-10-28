@@ -485,6 +485,71 @@ class NewRepo(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "main")
 
 
+class RunDir(unittest.TestCase):
+    """0.12.10 moved each run's files out of <root>/.claude/worktrees/_runs/ into
+    one folder per run under the store; old session logs and runs still use the old place."""
+
+    def setUp(self):
+        self.store = tempfile.mkdtemp()
+        self.root = os.path.join(tempfile.mkdtemp(), "my-repo")
+        self.old = os.environ.get("BMAD_RUNS_DIR")
+        os.environ["BMAD_RUNS_DIR"] = self.store
+        self.rd = load("run_dir", "run_dir.py")
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("BMAD_RUNS_DIR", None)
+        else:
+            os.environ["BMAD_RUNS_DIR"] = self.old
+        shutil.rmtree(self.store, ignore_errors=True)
+        shutil.rmtree(os.path.dirname(self.root), ignore_errors=True)
+
+    def test_the_folder_is_per_project_and_slug_under_the_store(self):
+        path = self.rd.run_dir(self.root, "my-run", create=True)
+        self.assertEqual(path, os.path.normpath(os.path.join(self.store, "runs", "my-repo", "my-run")))
+        self.assertTrue(os.path.isdir(path))
+
+    def test_find_prefers_the_run_folder_and_falls_back_to_legacy(self):
+        legacy = self.rd.legacy_dir(self.root)
+        os.makedirs(legacy)
+        open(os.path.join(legacy, "r-plan.json"), "w").close()
+        self.assertEqual(self.rd.find(self.root, "r", "-plan.json"), os.path.join(legacy, "r-plan.json"))
+        new = os.path.join(self.rd.run_dir(self.root, "r", create=True), "r-plan.json")
+        open(new, "w").close()
+        self.assertEqual(self.rd.find(self.root, "r", "-plan.json"), new)
+        self.assertIsNone(self.rd.find(self.root, "r", ".md"))
+
+    def test_creating_the_folder_adopts_only_that_runs_legacy_files(self):
+        legacy = self.rd.legacy_dir(self.root)
+        os.makedirs(legacy)
+        for name in ("r.md", "r-synthesis.md", "r-bar.md", "r-bar-plan.json", "dbg.log"):
+            with open(os.path.join(legacy, name), "w") as fh:
+                fh.write("old")
+        path = self.rd.run_dir(self.root, "r")
+        os.makedirs(path)
+        with open(os.path.join(path, "r-synthesis.md"), "w") as fh:
+            fh.write("new")
+        self.rd.run_dir(self.root, "r", create=True)
+        self.assertEqual(sorted(os.listdir(path)), ["r-synthesis.md", "r.md"])
+        self.assertEqual(open(os.path.join(path, "r-synthesis.md")).read(), "new")
+        self.assertEqual(sorted(os.listdir(legacy)), ["dbg.log", "r-bar-plan.json", "r-bar.md", "r-synthesis.md"])
+
+    def test_session_lines_name_the_slug_in_either_layout(self):
+        cases = {
+            r'"file_path":"C:\Users\me\.claude\bmad-batch-runs\runs\repo\my-run\my-run.md"': "my-run",
+            "/home/me/.claude/bmad-batch-runs/runs/repo/my-run/my-run.md": "my-run",
+            "D:/repo/.claude/worktrees/_runs/old-run.md": "old-run",
+            r'"D:\repo\.claude\worktrees\_runs\old-run.md"': "old-run",
+            "D:/repo/.claude/worktrees/_runs/old-run-cost.txt": None,
+            "/s/runs/repo/my-run/my-run-journal.md and _runs/x-synthesis.md": None,
+            "/s/runs/repo/my-run/my-run-synthesis.md then /s/runs/repo/my-run/my-run.md": "my-run",
+        }
+        for line, slug in cases.items():
+            self.assertEqual(self.rd.slug_in(line), slug, line)
+        self.assertTrue(self.rd.mentions("x/runs/repo/a/a.md", "a"))
+        self.assertFalse(self.rd.mentions("x/runs/repo/a/a.md", "b"))
+
+
 class RunSkillName(unittest.TestCase):
     """Only the batch build itself counts as a run: its plugin form does, the
     dashboard (a sibling skill in the same plugin) does not."""

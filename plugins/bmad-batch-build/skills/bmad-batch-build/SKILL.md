@@ -49,6 +49,10 @@ Paths in this skill:
 - `<skill>` is this skill's own directory, the base directory Claude Code
   reported when it loaded this skill (under `.claude/skills/` for a copied
   install, under `~/.claude/plugins/` for a plugin install).
+- `<runs>` is this run's own folder, where every file of the run goes: the
+  absolute path printed by `python "<skill>/scripts/run_dir.py" <slug> --root "<root>"`,
+  `~/.claude/bmad-batch-runs/runs/<project>/<slug>/`. Every project's runs are
+  kept there, out of the repositories.
 
 ## 0. Set up
 
@@ -180,8 +184,13 @@ The user provides one of two things:
   `az boards work-item show --id <id> --query "fields.\"System.WorkItemType\"" -o tsv`.
 
 Give the run a short kebab-case slug and a conventional type (`feat`, `fix`,
-and so on). Record the run at `<root>/.claude/worktrees/_runs/<slug>.md`, which
-is gitignored. That file holds the source summary, the units, their branches
+and so on). Create the run folder and use the path it prints as `<runs>`:
+
+```bash
+python "<skill>/scripts/run_dir.py" <slug> --root "<root>"
+```
+
+Record the run at `<runs>/<slug>.md`. That file holds the source summary, the units, their branches
 and worktrees, and their gate results. Keep it updated after every step so the
 run can be resumed.
 
@@ -272,7 +281,7 @@ The worker sees only its intent.
 ### Schedule the units
 
 Decide it yourself from the units; don't ask. Write the plan file
-`<root>/.claude/worktrees/_runs/<slug>-plan.json`, in the format documented in
+`<runs>/<slug>-plan.json`, in the format documented in
 `<skill>/scripts/plan-waves.py`, with each unit's id, title, size,
 `depends_on` and reason. Then run it, adding `--busy` when the machine is busy
 and `--no-tests` when the profile has no `suite` or the repository's
@@ -280,7 +289,7 @@ instructions ban tests:
 
 ```bash
 n=$(ls ~/.cache/bmad-heavy/run.* 2>/dev/null | wc -l); [ "$n" -ge $(( $(nproc) / 3 )) ] && b=--busy || b=
-python "<skill>/scripts/plan-waves.py" "<root>/.claude/worktrees/_runs/<slug>-plan.json" $b [--no-tests]
+python "<skill>/scripts/plan-waves.py" "<runs>/<slug>-plan.json" $b [--no-tests]
 ```
 
 It sorts the units into waves: a wave holds the units whose dependencies are
@@ -459,10 +468,10 @@ with the workers.
    fetches into one `.git` race on `FETCH_HEAD`, which is why the scripts never
    fetch.
 2. In **one message**, send all of the following:
-   - **The tickets** (skip with `TICKETS off`): write `<root>/.claude/worktrees/_runs/<slug>-tickets.json`
+   - **The tickets** (skip with `TICKETS off`): write `<runs>/<slug>-tickets.json`
      in the format documented in `<skill>/scripts/ado_tickets.py`. Then make one
      Bash call with `run_in_background: true` and a long timeout:
-     `python "<skill>/scripts/ado_tickets.py" "<root>/.claude/worktrees/_runs/<slug>-tickets.json"`.
+     `python "<skill>/scripts/ado_tickets.py" "<runs>/<slug>-tickets.json"`.
      The IDs are written back into that file. If the call fails, re-run it once;
      it creates only what is still missing. If it fails again, carry on with the
      build and report the error at the end. Tickets never block the code.
@@ -577,8 +586,8 @@ The units left out are kept across waves too.
   worktree, and `<installed>` is that unit's branch. Otherwise it is `no`, and
   `<installed>` is the `<ibranch>` revision `<iwt>`'s install came from: the
   wave's base, or `none` in a run that only had lanes.
-- `<state>` is `<root>/.claude/worktrees/_runs/<slug>-synthesis.md`, and
-  `<tickets json>` is `<root>/.claude/worktrees/_runs/<slug>-tickets.json`.
+- `<state>` is `<runs>/<slug>-synthesis.md`, and
+  `<tickets json>` is `<runs>/<slug>-tickets.json`.
 
 Then:
 
@@ -610,10 +619,10 @@ python "<skill>/scripts/cost-report.py" --record <slug> --root "<root>"
 ```
 
 It finds this session's log, saves the full report to
-`<root>/.claude/worktrees/_runs/<slug>-cost.txt`, and appends one row to
+`<runs>/<slug>-cost.txt`, and appends one row to
 `~/.claude/bmad-batch-runs/runs.jsonl`: cost, time, review and repair counts,
 cache and turn-budget checks. It also writes the run journal,
-`<root>/.claude/worktrees/_runs/<slug>-journal.md` (scripts/journal.py): every
+`<runs>/<slug>-journal.md` (scripts/journal.py): every
 failed tool call, every command that failed inside `heavy.sh` or `bg.sh`,
 units blocked or failing the gate, agents that ended without their reply or
 were resumed, classifier denials, synthesis repairs, and the `SKILL ISSUES`

@@ -6,8 +6,9 @@ Usage: python cost-report.py <session.jsonl> [<session.jsonl> ...]
 
 --record is what the orchestrator runs at the end of every run. It finds the
 session that ran <slug> (the newest session log under ~/.claude/projects that
-mentions the run file _runs/<slug>.md), writes the report to
-<root>/.claude/worktrees/_runs/<slug>-cost.txt, and appends one JSON row to
+mentions the run file <slug>.md), writes the report to <slug>-cost.txt in
+the run folder (run_dir.py: ~/.claude/bmad-batch-runs/runs/<project>/<slug>/),
+and appends one JSON row to
 ~/.claude/bmad-batch-runs/runs.jsonl (BMAD_RUNS_DIR overrides the folder), one
 row per run across every project, replacing an earlier row of the same run.
 Rows also carry the machine's CPUs and RAM. scripts/runs-summary.py reads that file.
@@ -19,7 +20,7 @@ before recording existed. Reports go to ~/.claude/bmad-batch-runs/reports/.
 
 Both also build the run journal (journal.py): what failed and what the agents
 reported, written to <store>/journals/<session>.md (and, for --record, to
-_runs/<slug>-journal.md) and kept on the row under "journal".
+<slug>-journal.md in the run folder) and kept on the row under "journal".
 
 The main session is counted only from the skill invocation to the last
 synthesis Agent result, so unrelated work in the same session is excluded.
@@ -34,6 +35,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import journal  # noqa: E402  (the run journal, built alongside every row)
+import run_dir  # noqa: E402  (where a run's own files live)
 
 # $/MTok: input, output, cache read. Cache writes: 1.25x input (5m), 2x (1h).
 PRICES = {"opus": (4, 20, 0.20), "sonnet": (2, 10, 0.20), "haiku": (0.10, 0.50, 0.01), "fable": (10, 50, 1.0)}
@@ -473,12 +475,11 @@ def find_session(slug):
     A later session that only mentions the run file (a clean-up, a re-read)
     has no skill invocation, so it is skipped.
     """
-    needles = (f"_runs/{slug}.md", f"_runs\\\\{slug}.md")
     logs = glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl"))
     for path in sorted(logs, key=os.path.getmtime, reverse=True)[:40]:
         with open(path, encoding="utf-8", errors="ignore") as fh:
             lines = fh.readlines()
-        if any(n in line for line in lines for n in needles) and any(invokes(line) for line in lines):
+        if any(run_dir.mentions(line, slug) for line in lines) and any(invokes(line) for line in lines):
             return path
     return None
 
@@ -600,14 +601,14 @@ def build_row(session, slug, project, mode):
 
 def add_journal(row, session, slug, root, run_copy=False):
     """Builds the run journal (journal.py): keeps its items on the row, writes
-    <store>/journals/<session>.md, and with run_copy also
-    <root>/.claude/worktrees/_runs/<slug>-journal.md. Returns its headline."""
+    <store>/journals/<session>.md, and with run_copy also <slug>-journal.md
+    in the run folder. Returns its headline."""
     j = journal.build(session, slug, root, store_dir())
     row["journal"] = {"counts": j["counts"], "items": j["items"][:60], "outcome": j["outcome"]}
     text = journal.markdown(j, row)
     paths = [os.path.join(store_dir(), "journals", f"{row['session']}.md")]
     if run_copy and root:
-        paths.append(os.path.join(root, ".claude", "worktrees", "_runs", f"{slug}-journal.md"))
+        paths.append(os.path.join(run_dir.run_dir(root, slug), f"{slug}-journal.md"))
     for path in paths:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
@@ -622,8 +623,8 @@ def unit_minutes(row, slug, root):
     name, <slug>-<n>; a lane worker without the line can't be matched. When a
     unit was dispatched twice, the last worker counts. Returns None without a
     plan file."""
-    path = os.path.join(root or "", ".claude", "worktrees", "_runs", f"{slug}-plan.json")
-    if not root or not os.path.exists(path):
+    path = run_dir.find(root, slug, "-plan.json") if root else None
+    if not path:
         return None
     try:
         plan = json.load(open(path, encoding="utf-8"))
@@ -644,13 +645,13 @@ def unit_minutes(row, slug, root):
 def record(slug, root):
     session = find_session(slug)
     if not session:
-        print(f"record: no session log mentions _runs/{slug}.md")
+        print(f"record: no session log mentions the run file {slug}.md")
         return 1
-    runs = os.path.join(root, ".claude", "worktrees", "_runs")
-    run_file = os.path.join(runs, f"{slug}.md")
+    runs = run_dir.run_dir(root, slug)
+    run_file = run_dir.find(root, slug, ".md")
     mode = system_map = None
     issues = []
-    if os.path.exists(run_file):
+    if run_file:
         run_text = open(run_file, encoding="utf-8").read()
         m = re.search(r"^.*Mode:.*$", run_text, re.M)
         mode = m.group(0).strip() if m else None
@@ -697,10 +698,8 @@ def session_info(path):
                     cwd = json.loads(line).get("cwd")
                 except ValueError:
                     pass
-            if slug is None and "_runs" in line:
-                m = re.search(r"_runs[/\\\\]+([\w.-]+?)\.md", line)
-                if m and not m.group(1).endswith(("-cost", "-synthesis", "-contracts", "-spec")):
-                    slug = m.group(1)
+            if slug is None and "runs" in line:
+                slug = run_dir.slug_in(line)
     project = os.path.basename(os.path.normpath(cwd)) if cwd else os.path.basename(os.path.dirname(path))
     return invoked, slug, project, cwd
 

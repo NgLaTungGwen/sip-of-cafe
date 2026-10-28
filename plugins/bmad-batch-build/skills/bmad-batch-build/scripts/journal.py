@@ -3,7 +3,7 @@
 usage: python journal.py <session.jsonl> [--slug <slug>] [--root <main checkout>]
 
 cost-report.py builds it for every run it records or collects, writes
-<root>/.claude/worktrees/_runs/<slug>-journal.md and ~/.claude/bmad-batch-runs/
+<slug>-journal.md in the run folder (run_dir.py) and ~/.claude/bmad-batch-runs/
 journals/<session>.md, and keeps the items on the run's row in runs.jsonl. The
 end-of-run report shows its problems, and the enhancer agent reads it to fix
 the skill.
@@ -29,7 +29,10 @@ import os
 import re
 import sys
 
-ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import run_dir  # noqa: E402  (where a run's own files live)
+
+ANSI =re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 ERR = re.compile(r"(\w*Error\b|\bERR!|\bFAIL\b|\bfailed\b|error TS\d+|No such file|not found|denied|refused)", re.I)
 
 # Display order: what most needs the user's eye first.
@@ -335,8 +338,8 @@ def build(session, slug=None, root=None, store=None):
 
     # The run file's own notes.
     if root and slug:
-        rf = os.path.join(root, ".claude", "worktrees", "_runs", f"{slug}.md")
-        if os.path.exists(rf):
+        rf = run_dir.find(root, slug, ".md")
+        if rf:
             for line in open(rf, encoding="utf-8", errors="ignore"):
                 s = line.strip()
                 m = re.match(r"^-?\s*SKILL ISSUE: (.+)$", s)
