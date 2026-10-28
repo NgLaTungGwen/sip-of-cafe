@@ -2,6 +2,64 @@
 
 Claude Code skills.
 
+## ado-eod-report
+
+Writes your end-of-day report from your Azure DevOps board. It reads every
+work item you changed that day, plus items assigned to you that someone else
+moved, such as QA closing a bug. It sorts the work into PXP, SXP, Timetable
+and Others, and infers your upcoming tasks from what you did and what is still
+open. It lists blockers, then prints the report as plain text, ready to copy.
+It only reads from ADO.
+
+### Install
+
+```bash
+claude plugin marketplace add NgLaTungGwen/sip-of-cafe
+claude plugin install ado-eod-report@sip-of-cafe
+```
+
+or `npx skills add NgLaTungGwen/sip-of-cafe` and pick `ado-eod-report`.
+
+### Set up once
+
+1. **Create a PAT** at `https://dev.azure.com/<org>/_usersSettings/tokens`,
+   with the scopes **Work Items: Read & write** and **Code: Read** (Code: Read
+   is used for PR status).
+2. **Store it** in your own terminal, not in the chat. Either:
+   - `export AZURE_DEVOPS_EXT_PAT=<token>` in your shell profile; or
+   - `python3 <skill>/scripts/ado_eod.py config --pat-stdin`, then paste the
+     token and press Ctrl-D. It's saved to `~/.config/ado-eod-report/pat` with
+     owner-only access.
+3. **The organization** is read from the repository's ADO remote. Outside an
+   ADO repository, run `config --org <org>` once; the skill asks you for it.
+
+### Use
+
+```
+/ado-eod-report                     # today
+/ado-eod-report yesterday
+/ado-eod-report 2026-10-24 also paired with Minh on the Timetable import
+```
+
+(With the plugin install: `/ado-eod-report:ado-eod-report`.) Notes after the
+date go into the report for work that ADO doesn't show.
+
+### Sections
+
+An item goes to the first section whose words appear in its project, area
+path, iteration path or tags (as whole words, any case); everything else goes
+to Others. The defaults match `PXP`, `SXP` and `Timetable`. To change them:
+
+```bash
+python3 <skill>/scripts/ado_eod.py config --sections \
+  '[{"name":"PXP","match":["PXP","Payments"]},{"name":"SXP","match":["SXP"]},
+    {"name":"Timetable","match":["Timetable"]},{"name":"Others","match":[]}]'
+```
+
+`config --timezone Asia/Ho_Chi_Minh` sets which day counts as "today" when the
+machine's clock zone is wrong; `config --show` prints the settings and where
+the PAT comes from, never the PAT itself.
+
 ## bmad-batch-build
 
 Turns a meeting transcript or a list of work items into one reviewed pull
@@ -36,8 +94,8 @@ npx skills add NgLaTungGwen/sip-of-cafe
 npx skills add NgLaTungGwen/sip-of-cafe -g
 ```
 
-The repository has two skills, `bmad-batch-build` and `bmad-batch-dashboard`;
-if the installer asks which to add, take both.
+The repository has three skills: `bmad-batch-build` and `bmad-batch-dashboard`
+(take both for batch builds), and `ado-eod-report` (see below).
 
 Nothing else to set up. The first step of every run, `scripts/setup.sh`,
 resolves the rest on its own:

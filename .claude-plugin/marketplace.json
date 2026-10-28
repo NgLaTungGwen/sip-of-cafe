@@ -11,6 +11,11 @@
       "name": "bmad-batch-build",
       "source": "./plugins/bmad-batch-build",
       "description": "BMAD batch build: one bmad-build-auto worker per unit, in parallel worktrees or in turn in one worktree (chosen automatically), then a synthesis agent opens one Azure DevOps PR."
+    },
+    {
+      "name": "ado-eod-report",
+      "source": "./plugins/ado-eod-report",
+      "description": "End-of-day report from your Azure DevOps board: the day's work items grouped by section, upcoming tasks inferred from them, and blockers, printed as plain text to copy."
     }
   ]
 }

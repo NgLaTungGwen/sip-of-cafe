@@ -1,0 +1,8 @@
+{
+  "name": "ado-eod-report",
+  "version": "0.1.0",
+  "description": "End-of-day report from your Azure DevOps board: the day's work items grouped by section, upcoming tasks inferred from them, and blockers, printed as plain text to copy.",
+  "author": {
+    "name": "Jayson Nguyen"
+  }
+}
