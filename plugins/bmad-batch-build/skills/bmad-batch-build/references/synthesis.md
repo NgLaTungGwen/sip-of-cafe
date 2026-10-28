@@ -50,8 +50,9 @@ or "none" when everything is already on <ibranch>>
 Units left out (they did not build), from every wave so far: <list with
 blocking condition, or "none">
 
-ADO tickets: plan file `<tickets json>`; stories <#ids>; per unit
-<unit n: #task id>. If ticket creation failed: "none: <error>". With tickets
+Tickets: script `<tickets script>` (ado_tickets.py for Azure DevOps,
+gh_tickets.py for GitHub issues); plan file `<tickets json>`; stories <#ids>;
+per unit <unit n: #task id>. If ticket creation failed: "none: <error>". With tickets
 off (setup said so): "off".
 
 PR tool: `<pr>` (from the run's setup: az, gh or none).
@@ -186,7 +187,7 @@ opened. Otherwise make one call, with the
 numbers of the merged units:
 
 ```bash
-python "<skill>/scripts/ado_tickets.py" "<tickets json>" --link-pr <pr id> --merged <n,n,...>
+python "<skill>/scripts/<tickets script>" "<tickets json>" --link-pr <pr id> --merged <n,n,...>
 ```
 
 It links the PR to the merged units' stories and tasks, never to a left-out
@@ -194,6 +195,12 @@ unit's task, because that work isn't in this PR. When no unit was left out it
 also turns on close-on-complete. It prints the linked IDs and whether
 close-on-complete is on, and exits non-zero if an ID didn't link. The `az`
 calls take up to a minute each.
+
+With `gh_tickets.py` the links are the PR description's `Work items:` line,
+which the script rewrites: `Closes #n` for each issue when no unit was left
+out, so GitHub closes them when the PR merges, otherwise `Refs #n`. GitHub
+closes issues only on merges into the default branch; for a PR into another
+branch the script says close-on-complete is off.
 
 ## 6. Reply
 

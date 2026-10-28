@@ -93,7 +93,8 @@ the PAT comes from, never the PAT itself.
 Turns a meeting transcript or a list of work items into one reviewed pull
 request. It splits the material into units and shows you the plan. Once you
 approve it, the skill runs one `bmad-build-auto` worker per unit in its own git
-worktree, creates the Azure DevOps tickets, and has a synthesis agent merge
+worktree, creates the tickets (Azure DevOps work items or GitHub issues),
+and has a synthesis agent merge
 everything into one branch, get it green and open one PR.
 
 It adapts to your repository. On the first run it works out how your project
@@ -132,13 +133,14 @@ resolves the rest on its own:
 - it keeps `.claude/worktrees/` out of git status;
 - it finds Python (`python3` or `python`) and the default branch, and
   installs `uv` when it is missing (workers run BMAD's scripts with it);
-- it decides where tickets and the PR go: Azure DevOps tickets only with an
-  ADO remote and a signed-in `az`, and the PR through `az`, `gh` or, without
-  either, a pushed branch.
+- it decides where tickets and the PR go: Azure DevOps tickets with an ADO
+  remote and a signed-in `az`, GitHub issues with a GitHub remote and a
+  signed-in `gh`, and the PR through `az`, `gh` or, without either, a pushed
+  branch.
 
 It stops only for what it can't install itself: Git, Python 3.9+, or
 Node.js when BMAD still has to be installed. Optional: `az` (signed in) for
-Azure DevOps tickets and PRs, `gh` for GitHub PRs, Docker for projects whose
+Azure DevOps tickets and PRs, `gh` for GitHub issues and PRs, Docker for projects whose
 tests need a database. Claude Code loads a new `.claude/agents` folder at
 the next session start, so the first run after an npx install uses
 general-purpose agents with the same instructions instead of stopping; it
@@ -359,7 +361,8 @@ states one, and `<type>/<slug>` otherwise.
   first unit's worktree.
 - **Scripts do the mechanical work:**
   - `merge-units.sh` handles merges, migration-number checks and reinstalls;
-  - `ado_tickets.py` creates and links the tickets.
+  - `ado_tickets.py` (Azure DevOps) or `gh_tickets.py` (GitHub) creates and
+    links the tickets.
 
 ### Many runs on one machine
 
@@ -458,9 +461,10 @@ Any other command goes through your normal permission rules.
   isn't there. An existing install is left alone. Set `BMAD_VERSION` to pin
   another release.
 - Tickets and PR:
-  - Tickets need the Azure CLI with the `azure-devops` extension and
-    `az devops configure` defaults. If ticket creation fails, the run carries
-    on and reports it.
+  - Azure DevOps tickets need the Azure CLI with the `azure-devops`
+    extension and `az devops configure` defaults. GitHub issues need `gh`
+    signed in (`gh auth login`) with write access to the repository. If
+    ticket creation fails, the run carries on and reports it.
   - The PR opens on Azure DevOps (`az repos pr`) or GitHub (`gh pr`).
 
 ### Troubleshooting
@@ -512,6 +516,11 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.12.11:** tickets on GitHub. With a GitHub remote and `gh` signed in,
+  the run creates a story issue and one sub-issue per unit (assigned to you,
+  labelled `bmad-parallel-build`), reuses pasted issues, and writes the PR's
+  `Work items:` line as `Closes #n` (or `Refs #n` when a unit was left out),
+  as it does with Azure DevOps work items.
 - **0.12.10:** every run's files are kept in one place,
   `~/.claude/bmad-batch-runs/runs/<project>/<slug>/` (the run file, plan,
   tickets, synthesis state, cost report and journal), instead of loose in each

@@ -1,6 +1,6 @@
 ---
 name: bmad-batch-build
-description: 'Orchestrate a BMAD batch build from a meeting transcript or pasted work items. Splits the material into independent units and, after the user approves the split, runs one bmad-build-auto worker per unit: in parallel worktrees, in turn in one worktree (lane), or in dependency waves that mix both, chosen automatically from the sizes and dependencies of the units. It also creates the Azure DevOps tickets (a User Story and one Task per unit, reusing any pasted work items). A synthesis agent then merges the results into one branch, gets it green, and opens one PR linked to those tickets. Use when the user says "batch build", "parallel build", "fan out bmad-build", "orchestrate the build", or hands over a transcript or a set of work items to implement together.'
+description: 'Orchestrate a BMAD batch build from a meeting transcript or pasted work items. Splits the material into independent units and, after the user approves the split, runs one bmad-build-auto worker per unit: in parallel worktrees, in turn in one worktree (lane), or in dependency waves that mix both, chosen automatically from the sizes and dependencies of the units. It also creates the tickets, in Azure DevOps (a User Story and one Task per unit) or as GitHub issues (a story issue and one sub-issue per unit), reusing any pasted work items. A synthesis agent then merges the results into one branch, gets it green, and opens one PR linked to those tickets. Use when the user says "batch build", "parallel build", "fan out bmad-build", "orchestrate the build", or hands over a transcript or a set of work items to implement together.'
 ---
 
 # BMAD Batch Build
@@ -9,7 +9,7 @@ You are the orchestrator. You split the work, dispatch workers, check what they
 return and hand the results to synthesis. You never write product code
 yourself.
 
-The flow is: input → split → mode → **user approves** → ADO tickets +
+The flow is: input → split → mode → **user approves** → tickets +
 worktrees + workers → gate → synthesis → one PR linked to the tickets.
 
 The schedule is chosen automatically from the split's dependencies (section
@@ -75,8 +75,11 @@ can go. Keep its lines:
 
 - `PYTHON <cmd>`: type `<cmd>` wherever this skill says `python`.
 - `BASE <branch>`: `<base>` when the project has no profile.
-- `TICKETS ado` or `TICKETS off (...)`: with `off`, skip every ticket step
-  (creating and linking); the approval table says "Tickets: off (<reason>)".
+- `TICKETS ado`, `TICKETS gh` or `TICKETS off (...)`: with `ado` the
+  tickets go to Azure DevOps and `<tickets script>` is `ado_tickets.py`; with
+  `gh` they are GitHub issues and `<tickets script>` is `gh_tickets.py`. With
+  `off`, skip every ticket step (creating and linking); the approval table
+  says "Tickets: off (<reason>)". Pass `<tickets script>` to synthesis too.
 - `PR az`, `PR gh` or `PR none (...)`: pass it to synthesis as `<pr>`.
 - `AGENTS note: ...`: a project copy of an agent differs from the shipped one
   and was kept; pass that line on to the user.
@@ -179,9 +182,13 @@ The user provides one of two things:
   ambiguous so you can raise it at the split approval.
 - **Pasted work items.** These are already analysed. Treat each item's title,
   description and acceptance criteria as the requirement. If an item carries an
-  ADO ID (`#1234`, `1234` or a work item URL), record the ID. If you don't know
-  its type, read it with
+  ADO ID (`#1234`, `1234` or a work item URL), or with `TICKETS gh` a GitHub
+  issue number (`#123` or an issue URL), record the ID. If you don't know an
+  ADO item's type, read it with
   `az boards work-item show --id <id> --query "fields.\"System.WorkItemType\"" -o tsv`.
+  A GitHub issue has no type: it is a story if it already has sub-issues
+  (`gh api repos/<owner>/<repo>/issues/<n> --jq .sub_issues_summary.total`
+  is above 0), otherwise a task.
 
 Give the run a short kebab-case slug and a conventional type (`feat`, `fix`,
 and so on). Create the run folder and use the path it prints as `<runs>`:
@@ -332,8 +339,12 @@ sign.
 
 ### Tickets
 
-Only with `TICKETS ado` from setup; with `TICKETS off` the run has no tickets
-and the table's ticket column says `off`.
+Only with `TICKETS ado` or `TICKETS gh` from setup; with `TICKETS off` the
+run has no tickets and the table's ticket column says `off`.
+
+On GitHub the same pattern uses issues: the story is an issue and each Task
+is a sub-issue of it. Below, "User Story" and "Task" mean those issues, and
+an existing issue's role follows the rule under "Pasted work items".
 
 The house pattern on the board is a User Story, such as "Story 7.7 - ...", with
 one Task per piece of work. The PR links to the story and its tasks. Map the
@@ -353,7 +364,8 @@ run onto that pattern, and **reuse what already exists**:
 A new story's title is a plain behaviour statement, like the board's existing
 ones. Its description is a short HTML summary of the source and the list of
 units. A new Task's title is the unit title, and its description is the unit's
-intent as HTML.
+intent as HTML. With `TICKETS gh`, write both descriptions in Markdown
+instead.
 
 ## 3. Get approval (the one planned checkpoint)
 
@@ -390,7 +402,8 @@ adjust and cancel. Building directly means:
 - build the units in this session, in dependency order, with `bmad-build`,
   passing the units' intents as one work list;
 - open one PR as `<skill>/references/synthesis.md` section 4 describes, link
-  the tickets when `TICKETS ado`, and report as in section 8.
+  the tickets as its section 5 does unless `TICKETS off`, and report as in
+  section 8.
 
 Approving it still approves the new tickets.
 
@@ -405,7 +418,7 @@ Follow "How to ask" above:
 - **The message holds the plan**: the story line, the table, the Mode line,
   any Advice, Combined, map and "Project commands" lines, and the run facts
   (worktree, branch, base commit, and whether anything is pushed, opened as a
-  PR or written to ADO).
+  PR or written to the ticket tracker).
 - **The approval question** gives the counts, for example `Approve the split:
   2 units in one lane, about 230 min?`. Options: Approve, Adjust, Cancel,
   with **Build directly** first instead when there is Advice. A correction to
@@ -469,9 +482,9 @@ with the workers.
    fetch.
 2. In **one message**, send all of the following:
    - **The tickets** (skip with `TICKETS off`): write `<runs>/<slug>-tickets.json`
-     in the format documented in `<skill>/scripts/ado_tickets.py`. Then make one
-     Bash call with `run_in_background: true` and a long timeout:
-     `python "<skill>/scripts/ado_tickets.py" "<runs>/<slug>-tickets.json"`.
+     in the format documented in `<skill>/scripts/<tickets script>`. Then make
+     one Bash call with `run_in_background: true` and a long timeout:
+     `python "<skill>/scripts/<tickets script>" "<runs>/<slug>-tickets.json"`.
      The IDs are written back into that file. If the call fails, re-run it once;
      it creates only what is still missing. If it fails again, carry on with the
      build and report the error at the end. Tickets never block the code.
@@ -634,8 +647,8 @@ Then end with a short summary:
 
 - the PR link
 - the tickets, with links: the story, each Task and which unit it belongs to,
-  what was created and what was reused, and whether ADO will close them when
-  the PR completes
+  what was created and what was reused, and whether ADO or GitHub will close
+  them when the PR completes
 - the units that were merged, and any that were left out. A left-out unit's
   Task stays open and isn't linked.
 - the repairs synthesis made

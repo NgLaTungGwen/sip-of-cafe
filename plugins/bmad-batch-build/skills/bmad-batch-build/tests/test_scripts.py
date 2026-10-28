@@ -2,7 +2,9 @@
 
 Each fix to a script should add a case here that fails without the fix.
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -401,7 +403,18 @@ class Setup(unittest.TestCase):
         subprocess.run(["git", "-C", root, "remote", "add", "origin", "https://github.com/acme/app.git"], check=True)
         subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
                         "--allow-empty", "-m", "init"], check=True)
-        r = subprocess.run([bash, os.path.join(SCRIPTS, "setup.sh"), root], capture_output=True, text=True)
+        # A stub gh, so the result doesn't depend on this machine's gh sign-in.
+        stub = tempfile.mkdtemp()
+        gh = os.path.join(stub, "gh")
+
+        def with_gh(code):
+            with open(gh, "w", newline="\n") as f:
+                f.write(f"#!/bin/sh\nexit {code}\n")
+            os.chmod(gh, 0o755)
+            return dict(os.environ, PATH=stub + os.pathsep + os.environ["PATH"])
+
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "setup.sh"), root], capture_output=True, text=True,
+                           env=with_gh(1))
         out = r.stdout
         self.assertEqual(r.returncode, 0, out + r.stderr)
         self.assertIn("SETUP ok", out)
@@ -414,11 +427,15 @@ class Setup(unittest.TestCase):
         self.assertIn("IGNORE added", out)
         self.assertIn("BASE trunk", out)
         self.assertIn("REMOTE github", out)
-        self.assertIn("TICKETS off", out)
-        r = subprocess.run([bash, os.path.join(SCRIPTS, "setup.sh"), root], capture_output=True, text=True)
+        self.assertIn("TICKETS off (GitHub remote, but the gh CLI is missing or not signed in", out)
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "setup.sh"), root], capture_output=True, text=True,
+                           env=with_gh(0))
         self.assertIn("IGNORE ok", r.stdout)  # the rule is added once
         self.assertIn("AGENTS plugin" if plugin else "AGENTS project", r.stdout)
+        self.assertIn("TICKETS gh", r.stdout)  # gh signed in: GitHub issues
+        self.assertIn("PR gh", r.stdout)
         shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(stub, ignore_errors=True)
 
     def test_ado_remote_parsing(self):
         tickets = load("ado_tickets", "ado_tickets.py")
@@ -440,6 +457,154 @@ class Setup(unittest.TestCase):
         finally:
             os.chdir(old)
             shutil.rmtree(root, ignore_errors=True)
+
+    def test_gh_remote_parsing(self):
+        tickets = load("gh_tickets", "gh_tickets.py")
+        root = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", root], check=True)
+        cases = {
+            "https://github.com/acme/app.git": "acme/app",
+            "https://tok@github.com/acme/my.app": "acme/my.app",
+            "git@github.com:acme/app.git": "acme/app",
+            "ssh://git@github.com/acme/app.git": "acme/app",
+            "https://dev.azure.com/org1/P/_git/repo": None,
+        }
+        old = os.getcwd()
+        try:
+            os.chdir(root)
+            for url, want in cases.items():
+                subprocess.run(["git", "remote", "remove", "origin"], capture_output=True)
+                subprocess.run(["git", "remote", "add", "origin", url], check=True)
+                self.assertEqual(tickets.gh_remote(), want, url)
+        finally:
+            os.chdir(old)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_gh_work_items_line(self):
+        """The link step replaces the PR's Work items: line, or adds one above
+        the footer, so a re-run never adds a second line."""
+        tickets = load("gh_tickets", "gh_tickets.py")
+        line = "Work items: Closes #1, Closes #2"
+        body = "## What changed\n- a\n\nWork items: #1 #2\n\n🤖 Generated with [Claude Code](x)"
+        self.assertEqual(tickets.with_work_items(body, line),
+                         "## What changed\n- a\n\n" + line + "\n\n🤖 Generated with [Claude Code](x)")
+        self.assertEqual(tickets.with_work_items("## What changed\n\n🤖 Generated with x", line),
+                         "## What changed\n\n" + line + "\n\n🤖 Generated with x")
+        self.assertEqual(tickets.with_work_items("Summary\n", line), "Summary\n\n" + line + "\n")
+        self.assertEqual(tickets.with_work_items("a\r\nWork items: #1\r\nb", line), "a\r\n" + line + "\r\nb")
+
+    def fake_gh(self, tickets, replies):
+        """Replace gh_tickets.gh with a fake that records each call and answers
+        from `replies`, a function of the call's arguments."""
+        calls = []
+
+        def gh(*args, stdin=None):
+            calls.append((args, stdin))
+            return replies(args, stdin)
+        tickets.gh = gh
+        tickets.REPO = "acme/app"
+        return calls
+
+    def write_plan(self, plan):
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(plan, f)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_gh_tickets_create(self):
+        """New issues are created and attached as sub-issues by database id;
+        existing ones are reused untouched; a failed attach keeps the number."""
+        tickets = load("gh_tickets", "gh_tickets.py")
+        ids = iter([(10, 1010), (11, 1011), (12, 1012), (13, 1013)])
+
+        def replies(args, stdin):
+            if args[:2] == ("api", "user"):
+                return "me"
+            if args[-2:] == ("--input", "-") and args[3].endswith("/issues"):
+                number, db_id = next(ids)
+                return json.dumps({"number": number, "id": db_id})
+            if args[3:4] == ("repos/acme/app/issues/10/sub_issues",) and json.loads(stdin)["sub_issue_id"] == 1013:
+                raise RuntimeError("gh api -X failed: sub-issues disabled")
+            return ""
+        calls = self.fake_gh(tickets, replies)
+        path = self.write_plan({
+            "stories": [{"key": "s1", "id": None, "title": "S", "description": "story"},
+                        {"key": "s2", "id": 5, "title": "Old", "description": "x"}],
+            "tasks": [{"unit": 1, "story": "s1", "id": None, "title": "T1", "description": "one"},
+                      {"unit": 2, "story": "s2", "id": None, "title": "T2", "description": "two"},
+                      {"unit": 3, "story": "s1", "id": None, "title": "T3", "description": "three"},
+                      {"unit": 4, "story": "s2", "id": 7, "title": "T4", "description": "four"}],
+        })
+        with self.assertRaises(SystemExit) as exit_:
+            tickets.main(path)
+        self.assertEqual(exit_.exception.code, 1)  # unit 3's attach failed
+        with open(path, encoding="utf-8") as f:
+            plan = json.load(f)
+        self.assertEqual([s["id"] for s in plan["stories"]], [10, 5])
+        self.assertEqual([t["id"] for t in plan["tasks"]], [11, 12, 13, 7])  # 13 kept although its attach failed
+        creates = [json.loads(s) for a, s in calls if a[-2:] == ("--input", "-") and a[3].endswith("/issues")]
+        self.assertEqual(len(creates), 4)  # the story and units 1 to 3; reused items make no call
+        self.assertTrue(creates[1]["body"].endswith("Part of #10"))
+        self.assertTrue(creates[2]["body"].endswith("Part of #5"))
+        self.assertEqual(creates[0]["assignees"], ["me"])
+        self.assertEqual(creates[0]["labels"], ["bmad-parallel-build"])
+        attach = [(a[3], json.loads(s)) for a, s in calls if a[3:4] and a[3].endswith("/sub_issues")]
+        self.assertEqual(attach, [("repos/acme/app/issues/10/sub_issues", {"sub_issue_id": 1011}),
+                                  ("repos/acme/app/issues/5/sub_issues", {"sub_issue_id": 1012}),
+                                  ("repos/acme/app/issues/10/sub_issues", {"sub_issue_id": 1013})])
+
+    def link_case(self, merged, base="main", closing=None):
+        """Runs link() on a two-unit plan; returns (stdout, the body written, the calls, exit code)."""
+        tickets = load("gh_tickets", "gh_tickets.py")
+        written = []
+
+        def replies(args, stdin):
+            if args[:2] == ("pr", "view") and "body,baseRefName" in args:
+                return json.dumps({"body": "Summary\n\n🤖 Generated with x", "baseRefName": base})
+            if args[:2] == ("pr", "edit"):
+                with open(args[args.index("--body-file") + 1], encoding="utf-8", newline="") as f:
+                    written.append(f.read())
+            if args[:2] == ("repo", "view"):
+                return "main"
+            if "closingIssuesReferences" in args:
+                return "\n".join(closing or [])
+            return ""
+        calls = self.fake_gh(tickets, replies)
+        path = self.write_plan({
+            "stories": [{"key": "s1", "id": 3, "title": "S", "description": ""}],
+            "tasks": [{"unit": 1, "story": "s1", "id": 4, "title": "A", "description": ""},
+                      {"unit": 2, "story": "s1", "id": 5, "title": "B", "description": ""}],
+        })
+        out, code = io.StringIO(), 0
+        with contextlib.redirect_stdout(out):
+            try:
+                tickets.link(path, "9", set(merged))
+            except SystemExit as exc:
+                code = exc.code
+        return out.getvalue(), written[0], calls, code
+
+    def test_gh_link_all_merged(self):
+        out, body, _, code = self.link_case(["1", "2"], closing=["3", "4", "5"])
+        self.assertEqual(code, 0)
+        self.assertIn("Work items: Closes #3, Closes #4, Closes #5\n\n🤖", body)
+        self.assertIn("close-on-complete: on", out)
+
+    def test_gh_link_unit_left_out(self):
+        out, body, calls, _ = self.link_case(["1"])
+        self.assertIn("Work items: Refs #3, Refs #4\n", body)  # #5 did not merge
+        self.assertIn("close-on-complete: off (a unit was left out)", out)
+        self.assertFalse(any("closingIssuesReferences" in a for a, _ in calls))
+
+    def test_gh_link_not_default_branch(self):
+        out, _, calls, code = self.link_case(["1", "2"], base="develop")
+        self.assertEqual(code, 0)
+        self.assertIn("close-on-complete: off (the PR targets develop", out)
+        self.assertFalse(any("closingIssuesReferences" in a for a, _ in calls))
+
+    def test_gh_link_missing_reference(self):
+        _, _, _, code = self.link_case(["1", "2"], closing=["3", "4"])
+        self.assertEqual(code, "not linked: 5")
 
 
 class NewRepo(unittest.TestCase):

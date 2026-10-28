@@ -16,7 +16,9 @@
 #   IGNORE ok|added           .claude/worktrees kept out of git status
 #   BASE <branch>             the default branch (when there is no profile)
 #   REMOTE ado|github|other|none
-#   TICKETS ado|off (<why>)   Azure DevOps tickets, only with an ADO remote and az
+#   TICKETS ado|gh|off (<why>)
+#                             Azure DevOps tickets with an ADO remote and az;
+#                             GitHub issues with a GitHub remote and gh
 #   PR az|gh|none (<why>)     the CLI synthesis opens the PR with
 # A BLOCKED line says what the user must install; nothing else stops a run.
 set -uo pipefail
@@ -149,11 +151,15 @@ if [ "$remote" = ado ] && [ "$az_ok" = 1 ]; then
 elif [ "$remote" = ado ]; then
   echo "TICKETS off (Azure DevOps remote, but the az CLI is missing or not signed in: az login)"
   echo "PR none (push the branch and open the PR in the browser)"
+elif [ "$remote" = github ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  echo "TICKETS gh"
+  echo "PR gh"
+elif [ "$remote" = github ]; then
+  echo "TICKETS off (GitHub remote, but the gh CLI is missing or not signed in: gh auth login)"
+  echo "PR none (push the branch and open the PR in the browser)"
 else
   echo "TICKETS off ($remote remote)"
-  if [ "$remote" = github ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-    echo "PR gh"
-  elif [ "$remote" = none ]; then
+  if [ "$remote" = none ]; then
     echo "PR none (no origin remote: the run ends with a local branch)"
   else
     echo "PR none (push the branch and open the PR in the browser)"
