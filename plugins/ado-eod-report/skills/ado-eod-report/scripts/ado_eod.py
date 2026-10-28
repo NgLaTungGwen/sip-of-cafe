@@ -5,20 +5,21 @@ usage:
     python ado_eod.py collect [--date today|yesterday|YYYY-MM-DD] [--org URL]
     python ado_eod.py config [--org URL] [--sections JSON] [--timezone IANA] [--pat-stdin] [--show]
 
-check    signs in with the PAT and prints `OK <name> <org>`.
+check    signs in and prints `OK <name> <email> <org> (via <PAT|az login>)`.
 collect  prints one JSON document: every work item the PAT's owner changed that
          day (or that is assigned to them and changed state that day), what
          changed and when, its parent, linked PRs and their status, the report
          section it belongs to, and the open items still assigned to them.
 config   saves settings to <config dir>/config.json (the PAT to <config dir>/pat).
 
-The PAT comes from AZURE_DEVOPS_EXT_PAT, then ADO_PAT, then <config dir>/pat.
-The config dir is ADO_EOD_HOME, or ~/.config/ado-eod-report. The organization
+Sign-in: a PAT from AZURE_DEVOPS_EXT_PAT, then ADO_PAT, then <config dir>/pat.
+Without one, or when Azure DevOps rejects it, the Azure CLI sign-in (`az login`)
+is used instead. The config dir is ADO_EOD_HOME, or ~/.config/ado-eod-report. The organization
 comes from --org, then the config, then the origin remote of the current
-directory. Scopes: Work Items (Read & write); Code (Read) adds PR status.
+directory. PAT scopes: Work Items (Read & write); Code (Read) adds PR status.
 
 Every failure prints one line `ERROR <CODE>: <message>` and exits 2. Codes:
-NO_PAT, NO_ORG, AUTH, FORBIDDEN, NOT_FOUND, NETWORK, BAD_ARGS.
+NO_AUTH, NO_ORG, AUTH, FORBIDDEN, NOT_FOUND, NETWORK, BAD_ARGS.
 """
 import argparse
 import base64
@@ -27,6 +28,7 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -37,6 +39,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 API = "7.1"
+# The Azure DevOps application ID: `az` issues tokens for this resource.
+ADO_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"
 DEFAULT_SECTIONS = [
     {"name": "PXP", "match": ["PXP"]},
     {"name": "SXP", "match": ["SXP"]},
@@ -103,6 +107,42 @@ def save_pat(pat: str) -> Path:
     except OSError:
         pass
     return path
+
+
+def org_tenant(org: str) -> str:
+    """The Entra tenant that backs the organization. Azure DevOps names it in
+    X-VSS-ResourceTenant even on an unauthenticated request; "" when unknown."""
+    # Without this header ADO redirects to its sign-in page, which drops the tenant.
+    req = urllib.request.Request(f"{org}/_apis/connectionData?api-version={API}",
+                                 headers={"X-TFS-FedAuthRedirect": "Suppress"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            headers = resp.headers
+    except urllib.error.HTTPError as e:
+        headers = e.headers
+    except (urllib.error.URLError, OSError):
+        return ""
+    tenant = (headers.get("X-VSS-ResourceTenant") or "").split(",")[0].strip()
+    return "" if tenant in ("", "00000000-0000-0000-0000-000000000000") else tenant
+
+
+def az_token(tenant: str = ""):
+    """An Azure DevOps access token from the Azure CLI sign-in, or None when az
+    is missing or not signed in. With a tenant, the token comes from it: az's
+    default subscription may sit in another tenant than the organization."""
+    az = shutil.which("az") or shutil.which("az.cmd")
+    if not az:
+        return None
+    cmd = [az, "account", "get-access-token", "--resource", ADO_RESOURCE,
+           "--query", "accessToken", "-o", "tsv", "--only-show-errors"]
+    for extra in ([["--tenant", tenant]] if tenant else []) + [[]]:
+        try:
+            result = subprocess.run(cmd + extra, capture_output=True, text=True, timeout=90)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    return None
 
 
 def normalize_org(org: str) -> str:
@@ -180,9 +220,12 @@ def parse_time(value: str) -> dt.datetime:
 # --- HTTP ---------------------------------------------------------------------
 
 class Client:
-    def __init__(self, org: str, pat: str):
+    def __init__(self, org: str, pat: str = None, token: str = None):
         self.org = org
-        self.auth = "Basic " + base64.b64encode(f":{pat}".encode()).decode()
+        if pat:
+            self.auth, self.via = "Basic " + base64.b64encode(f":{pat}".encode()).decode(), "PAT"
+        else:
+            self.auth, self.via = f"Bearer {token}", "az login"
 
     def call(self, method: str, url: str, body=None):
         if not url.startswith("http"):
@@ -198,7 +241,8 @@ class Client:
                     text = resp.read().decode("utf-8")
                     # A wrong or expired PAT gets 203 with a sign-in page, not 401.
                     if resp.status == 203 or not text.lstrip().startswith(("{", "[")):
-                        raise Fail("AUTH", "Azure DevOps did not accept the PAT (expired, revoked or wrong organization)")
+                        raise Fail("AUTH", f"Azure DevOps did not accept the {self.via} sign-in "
+                                           "(expired, revoked, or not a member of this organization)")
                     return json.loads(text)
             except urllib.error.HTTPError as e:
                 detail = e.read().decode("utf-8", "replace")
@@ -206,9 +250,10 @@ class Client:
                     time.sleep(float(e.headers.get("Retry-After") or 2 ** attempt))
                     continue
                 if e.code == 401:
-                    raise Fail("AUTH", "Azure DevOps rejected the PAT (401): expired, revoked or for another organization")
+                    raise Fail("AUTH", f"Azure DevOps rejected the {self.via} sign-in (401): "
+                                       "expired, revoked, or not a member of this organization")
                 if e.code == 403:
-                    raise Fail("FORBIDDEN", f"the PAT lacks a scope for {url.split('?')[0]}")
+                    raise Fail("FORBIDDEN", f"the {self.via} sign-in has no access to {url.split('?')[0]}")
                 if e.code == 404:
                     raise Fail("NOT_FOUND", f"not found: {url.split('?')[0]}")
                 raise Fail("HTTP", f"{e.code} from {url.split('?')[0]}: {message_of(detail)}")
@@ -421,8 +466,8 @@ def web_url(org: str, fields: dict, wid: int) -> str:
     return f"{org}/{urllib.parse.quote(fields.get('System.TeamProject', ''))}/_workitems/edit/{wid}"
 
 
-def collect(client: Client, day: dt.date, tz, sections: list) -> dict:
-    me = whoami(client)
+def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None) -> dict:
+    me = me or whoami(client)
     start = dt.datetime.combine(day, dt.time.min, tzinfo=tz)
     end = start + dt.timedelta(days=1)
     warnings = []
@@ -444,7 +489,7 @@ def collect(client: Client, day: dt.date, tz, sections: list) -> dict:
     with ThreadPoolExecutor(max_workers=8) as pool:
         prs = dict(zip(pr_jobs, pool.map(lambda job: fetch_pr(client, *job[1]), pr_jobs)))
     if any(p.get("error") == "FORBIDDEN" for p in prs.values()):
-        warnings.append("PR status unknown: the PAT has no Code (Read) scope")
+        warnings.append("PR status unknown: the sign-in can't read code (a PAT needs the Code (Read) scope)")
 
     out_items = []
     for wid, (item, summary) in worked.items():
@@ -494,14 +539,40 @@ def collect(client: Client, day: dt.date, tz, sections: list) -> dict:
 
 # --- commands -----------------------------------------------------------------
 
-def client_from(args, cfg) -> Client:
-    pat, _ = load_pat()
-    if not pat:
-        raise Fail("NO_PAT", f"no PAT: set AZURE_DEVOPS_EXT_PAT or write it to {config_dir() / 'pat'}")
+def connect(args, cfg):
+    """(client, me) signed in with the PAT, or with `az login` when there is no
+    PAT or Azure DevOps rejects it."""
     org = resolve_org(getattr(args, "org", ""), cfg)
     if not org:
         raise Fail("NO_ORG", "no organization: save one with `config --org https://dev.azure.com/<org>`")
-    return Client(org, pat)
+    pat, _ = load_pat()
+    failure = None
+    if pat:
+        client = Client(org, pat=pat)
+        try:
+            return client, whoami(client)
+        except Fail as e:
+            if e.code != "AUTH":
+                raise
+            failure = e
+    tenant = org_tenant(org)
+    login = f"az login --tenant {tenant} --scope {ADO_RESOURCE}/.default" if tenant else "az login"
+    token = az_token(tenant)
+    if token:
+        client = Client(org, token=token)
+        try:
+            return client, whoami(client)
+        except Fail as e:
+            if e.code != "AUTH":
+                raise
+            failure = Fail("AUTH", f"{failure or e}; for az, sign in to the organization's tenant: `{login}`")
+    if failure:
+        raise failure
+    if shutil.which("az") or shutil.which("az.cmd"):
+        raise Fail("NO_AUTH", f"no PAT, and az has no sign-in for this organization: run `{login}`, "
+                              f"or set AZURE_DEVOPS_EXT_PAT / write a PAT to {config_dir() / 'pat'}")
+    raise Fail("NO_AUTH", f"no sign-in: set AZURE_DEVOPS_EXT_PAT, write a PAT to {config_dir() / 'pat'}, "
+                          "or install the Azure CLI and run `az login`")
 
 
 def main(argv=None) -> int:
@@ -542,14 +613,14 @@ def main(argv=None) -> int:
                 print(f"PAT saved to {save_pat(pat)}")
             save_config(cfg)
             _, source = load_pat()
-            shown = dict(cfg, sections=cfg.get("sections", DEFAULT_SECTIONS), pat=source or "none")
+            shown = dict(cfg, sections=cfg.get("sections", DEFAULT_SECTIONS),
+                         pat=source or "none (az login is used if signed in)")
             print(json.dumps(shown, indent=2))
             return 0
 
-        client = client_from(args, cfg)
+        client, me = connect(args, cfg)
         if args.cmd == "check":
-            me = whoami(client)
-            print(f"OK {me['name']} <{me['email']}> {client.org}")
+            print(f"OK {me['name']} <{me['email']}> {client.org} (via {client.via})")
             return 0
 
         tz = timezone(cfg)
@@ -558,7 +629,7 @@ def main(argv=None) -> int:
         if first_run:
             cfg["sections"] = DEFAULT_SECTIONS
             save_config(cfg)
-        result = collect(client, day, tz, cfg["sections"])
+        result = collect(client, day, tz, cfg["sections"], me)
         result["first_run"] = first_run
         print(json.dumps(result, ensure_ascii=False, indent=1))
         return 0

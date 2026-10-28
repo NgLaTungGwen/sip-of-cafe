@@ -1,12 +1,13 @@
 ---
 name: ado-eod-report
-description: "Write the user's end-of-day (EOD) report from their Azure DevOps board. Reads every work item they changed that day, groups the work into PXP, SXP, Timetable and Others, infers the upcoming tasks from what was done, lists blockers, and prints the report as plain text to copy. Needs an Azure DevOps PAT. Use when the user types /ado-eod-report, or asks for their EOD report, end-of-day report, daily report or daily status from ADO."
+description: "Write the user's end-of-day (EOD) report from their Azure DevOps board. Reads every work item they changed that day, groups the work into PXP, SXP, Timetable and Others, infers the upcoming tasks from what was done, lists blockers, and prints the report as plain text to copy. Signs in with an Azure DevOps PAT, or with the Azure CLI sign-in (az login) when there is no PAT. Use when the user types /ado-eod-report, or asks for their EOD report, end-of-day report, daily report or daily status from ADO."
 ---
 
 # ADO EOD report
 
 Builds the user's end-of-day report from Azure DevOps. The script reads the
-board with the user's PAT; you turn what it returns into a short report a
+board with the user's PAT, or with their `az login` session when there is no
+PAT or the PAT is rejected. You turn what it returns into a short report a
 senior engineering manager can read in under a minute.
 
 `<skill>` below is this skill's folder. Run Python as `python3` (`python` on
@@ -25,10 +26,18 @@ Windows).
 python3 "<skill>/scripts/ado_eod.py" check
 ```
 
-`OK <name> <email> <org>` means you can go on. If you get an error line,
-handle it and run `check` again:
+`OK <name> <email> <org> (via PAT)` or `(via az login)` means you can go
+on. If you get an error line, handle it and run `check` again:
 
-- **`ERROR NO_PAT`**: the user needs a PAT. Tell them, briefly:
+- **`ERROR NO_AUTH`**: no PAT, and no Azure CLI sign-in that works for this
+  organization. Offer the two ways, Azure CLI first when the message names
+  an `az login` command:
+  - **Azure CLI:** they run the `az login ...` command from the error
+    themselves. It opens a browser, so suggest typing it as
+    `! az login --tenant ... --scope ...` in the prompt. The `--tenant` part
+    matters: the organization can sit in another tenant than their default
+    `az` account.
+  - **PAT:**
   1. Open `https://dev.azure.com/<org>/_usersSettings/tokens` and click
      **New Token**.
   2. Select the organization, and the scopes **Work Items: Read & write**
@@ -47,10 +56,13 @@ handle it and run `check` again:
   transcript.
 - **`ERROR NO_ORG`**: no ADO remote here and none saved. Ask for the
   organization URL or name, then run `config --org <it>`.
-- **`ERROR AUTH`**: the token expired, was revoked, or belongs to another
-  organization. Ask for a new token (as above).
-- **`ERROR FORBIDDEN`**: the token lacks the Work Items scope. Ask the user to
-  edit the token's scopes.
+- **`ERROR AUTH`**: the PAT expired, was revoked or belongs to another
+  organization, and `az login` didn't work either. When the message names an
+  `az login --tenant ...` command, offer that first; otherwise, a new PAT (as
+  above).
+- **`ERROR FORBIDDEN`**: the PAT lacks the Work Items scope, or the `az`
+  account has no access to the project. Ask the user to fix the PAT's scopes,
+  or to get access to the project.
 - **`ERROR NETWORK`**: say that Azure DevOps can't be reached, and stop.
 
 ## 2. Collect

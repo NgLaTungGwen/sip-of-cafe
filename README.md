@@ -22,15 +22,21 @@ or `npx skills add NgLaTungGwen/sip-of-cafe` and pick `ado-eod-report`.
 
 ### Set up once
 
-1. **Create a PAT** at `https://dev.azure.com/<org>/_usersSettings/tokens`,
-   with the scopes **Work Items: Read & write** and **Code: Read** (Code: Read
-   is used for PR status).
-2. **Store it** in your own terminal, not in the chat. Either:
-   - `export AZURE_DEVOPS_EXT_PAT=<token>` in your shell profile; or
-   - `python3 <skill>/scripts/ado_eod.py config --pat-stdin`, then paste the
+1. **Sign in**, with either of these:
+   - **Azure CLI**: when there is no PAT, or Azure DevOps rejects it, the
+     skill uses your `az login` session. The token comes from the
+     organization's own tenant, which can differ from your default `az`
+     account. If that tenant has no sign-in, the skill gives you the exact
+     command:
+     `az login --tenant <org tenant> --scope 499b84ac-1321-427f-aa17-267ca6975798/.default`.
+   - **PAT**: create one at `https://dev.azure.com/<org>/_usersSettings/tokens`,
+     with the scopes **Work Items: Read & write** and **Code: Read** (Code:
+     Read is used for PR status). Store it in your own terminal, not in the
+     chat: either `export AZURE_DEVOPS_EXT_PAT=<token>` in your shell profile,
+     or run `python3 <skill>/scripts/ado_eod.py config --pat-stdin`, paste the
      token and press Ctrl-D. It's saved to `~/.config/ado-eod-report/pat` with
      owner-only access.
-3. **The organization** is read from the repository's ADO remote. Outside an
+2. **The organization** is read from the repository's ADO remote. Outside an
    ADO repository, run `config --org <org>` once; the skill asks you for it.
 
 ### Use
@@ -59,6 +65,13 @@ python3 <skill>/scripts/ado_eod.py config --sections \
 `config --timezone Asia/Ho_Chi_Minh` sets which day counts as "today" when the
 machine's clock zone is wrong; `config --show` prints the settings and where
 the PAT comes from, never the PAT itself.
+
+### Recent changes
+
+- **0.2.0:** sign in with `az login` when there is no PAT, or when the PAT is
+  rejected. The token comes from the organization's own tenant, and the error
+  names the `az login --tenant ...` command when that tenant has no sign-in.
+- **0.1.0:** first version.
 
 ## bmad-batch-build
 

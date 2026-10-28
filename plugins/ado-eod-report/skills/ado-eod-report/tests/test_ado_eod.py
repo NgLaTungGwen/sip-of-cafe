@@ -175,6 +175,84 @@ class Collect(unittest.TestCase):
         self.assertEqual(eod.touched_ids(client, DAY), [101, 102])
 
 
+class SignIn(unittest.TestCase):
+    """The PAT wins; `az login` is used without one, or when the PAT is rejected."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.env = mock.patch.dict(os.environ, {"ADO_EOD_HOME": self.home}, clear=False)
+        self.env.start()
+        for var in ("AZURE_DEVOPS_EXT_PAT", "ADO_PAT"):
+            os.environ.pop(var, None)
+        self.args = mock.Mock(org="acme")
+        self.tenant = mock.patch.object(eod, "org_tenant", return_value="t-1")
+        self.tenant.start()
+
+    def tearDown(self):
+        self.tenant.stop()
+        self.env.stop()
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def whoami(self, rejected=()):
+        def fake(client):
+            if client.via in rejected:
+                raise eod.Fail("AUTH", f"Azure DevOps rejected the {client.via} sign-in")
+            return ME
+        return mock.patch.object(eod, "whoami", side_effect=fake)
+
+    def test_pat_first_without_calling_az(self):
+        os.environ["ADO_PAT"] = "p"
+        with self.whoami(), mock.patch.object(eod, "az_token") as az:
+            client, me = eod.connect(self.args, {})
+        self.assertEqual(client.via, "PAT")
+        self.assertTrue(client.auth.startswith("Basic "))
+        az.assert_not_called()
+
+    def test_az_login_without_pat(self):
+        with self.whoami(), mock.patch.object(eod, "az_token", return_value="tok"):
+            client, me = eod.connect(self.args, {})
+        self.assertEqual((client.via, client.auth), ("az login", "Bearer tok"))
+        self.assertEqual(me, ME)
+
+    def test_az_login_when_pat_rejected(self):
+        os.environ["ADO_PAT"] = "expired"
+        with self.whoami(rejected=("PAT",)), mock.patch.object(eod, "az_token", return_value="tok"):
+            client, _ = eod.connect(self.args, {})
+        self.assertEqual(client.via, "az login")
+
+    def test_rejected_pat_without_az_reports_the_pat(self):
+        os.environ["ADO_PAT"] = "expired"
+        with self.whoami(rejected=("PAT",)), mock.patch.object(eod, "az_token", return_value=None):
+            with self.assertRaises(eod.Fail) as e:
+                eod.connect(self.args, {})
+        self.assertEqual(e.exception.code, "AUTH")
+        self.assertIn("PAT", str(e.exception))
+
+    def test_both_rejected_names_both(self):
+        os.environ["ADO_PAT"] = "expired"
+        with self.whoami(rejected=("PAT", "az login")), mock.patch.object(eod, "az_token", return_value="tok"):
+            with self.assertRaises(eod.Fail) as e:
+                eod.connect(self.args, {})
+        self.assertIn("az login --tenant t-1", str(e.exception))
+
+    def test_az_token_asked_for_the_org_tenant(self):
+        with self.whoami(), mock.patch.object(eod, "az_token", return_value="tok") as az:
+            eod.connect(self.args, {})
+        az.assert_called_once_with("t-1")
+
+    def test_az_token_tries_tenant_then_default(self):
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append(cmd)
+            ok = "--tenant" not in cmd
+            return mock.Mock(returncode=0 if ok else 1, stdout="tok\n" if ok else "")
+        with mock.patch.object(eod.shutil, "which", return_value="/usr/bin/az"), \
+                mock.patch.object(eod.subprocess, "run", side_effect=run):
+            self.assertEqual(eod.az_token("t-1"), "tok")
+        self.assertEqual(["--tenant" in c for c in calls], [True, False])
+
+
 class Commands(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp()
@@ -193,10 +271,12 @@ class Commands(unittest.TestCase):
             code = eod.main(list(argv))
         return code, buf.getvalue()
 
-    def test_missing_pat_is_one_error_line(self):
-        code, out = self.run_main("check", "--org", "acme")
+    def test_no_pat_and_no_az_is_one_error_line(self):
+        with mock.patch.object(eod, "az_token", return_value=None), \
+                mock.patch.object(eod, "org_tenant", return_value=""):
+            code, out = self.run_main("check", "--org", "acme")
         self.assertEqual(code, 2)
-        self.assertTrue(out.startswith("ERROR NO_PAT:"))
+        self.assertTrue(out.startswith("ERROR NO_AUTH:"))
 
     def test_config_saves_pat_and_never_prints_it(self):
         code, out = self.run_main("config", "--org", "acme", "--pat-stdin", stdin="secret-pat\n")
