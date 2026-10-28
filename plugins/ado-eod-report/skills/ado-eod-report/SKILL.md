@@ -84,7 +84,11 @@ It prints JSON:
     changed fields;
   - `prs`: linked pull requests, with status `active`, `draft`, `completed`
     or `abandoned`, and approval counts;
-  - `blocked` and `url`.
+  - `blocked` and `url`;
+  - `merged_today`: the user's PRs, linked to this item, that merged that
+    day. Such items are listed even when nobody touched them on the board.
+- `merged_prs`: every PR the user authored that merged that day, in any
+  project, with its linked `work_items`.
 - `open_assigned`: open items assigned to the user that weren't touched that
   day, highest priority first.
 - `warnings`, and `first_run`.
@@ -127,9 +131,14 @@ Use exactly this layout. Keep every section heading, even when it's empty.
 
 ### Accomplished lines
 
-- **One line per piece of work.** When two or more tasks under the same
-  parent were worked on, write one line for the parent:
-  `**[User Story #100]:** ... (tasks #101, #102) -> <status>`.
+- **List every task.** When tasks under the same parent were worked on,
+  write one line for the parent, then one indented line per task under it:
+  ```
+  - **[User Story #100]:** <what the story delivered> -> <status>
+    - **[Task #101]:** <what was done> -> <status>
+    - **[Task #102]:** <what was done> -> <status>
+  ```
+  A task line doesn't repeat the PR its parent line already names.
 - **Say what was done, not what the ticket is called.** Use the title,
   today's comments and the changes. For example:
   - title "Retry logic for payment webhook";
@@ -140,6 +149,9 @@ Use exactly this layout. Keep every section heading, even when it's empty.
   Don't invent work the data doesn't show. When there is only a title, keep
   the line close to it.
 - **Status words, from `state_end` and `prs`:**
+  - A merged PR wins over the board: an item with `merged_today`, or a
+    `completed` PR, is **Done, PR #n merged** whatever its state says. The
+    board often still shows New after a merge.
   - Done, Closed or Completed: **Done**. A merged PR adds "PR #n merged".
   - Resolved: **Resolved, awaiting verification**.
   - Active, In Progress or Committed with an active PR: **In review (PR #n)**.
@@ -156,6 +168,10 @@ Use exactly this layout. Keep every section heading, even when it's empty.
   items". Otherwise leave them out.
 - **Order** each section by importance: Done first, then In review, then In
   progress.
+- **A merged PR with no linked work item** still gets a line, in the section
+  its project matches: `**[PR #<n>]:** <what it did> -> Merged`.
+- **Section headings** are the configured sections, in their order; the
+  template's names are the defaults.
 - **An empty section** gets `- No updates`.
 
 ### Upcoming Task(s)
@@ -193,8 +209,21 @@ whom or what, and since when if it's known. If there are none, write
 
 ## 4. Print
 
-Print the report in one fenced `text` block, so the user sees exactly the
-characters they will copy, `**` included:
+The user pastes the report into Teams, which shows markdown as raw `#` and
+`**`. So also put it on the clipboard as rich text:
+
+1. Write the same report as an HTML fragment to a file in the scratchpad:
+   `<p><b>EOD Report</b></p>`, then `<p><b>Today Accomplished:</b></p>` with
+   one `<ul>` whose items are the sections in bold, each holding a nested
+   `<ul>` of the lines (stories hold a further `<ul>` of their tasks); then
+   `<p><b>Upcoming task(s):</b></p>` and `<p><b>Blocker(s):</b></p>`, each with
+   a `<ul>`. Bold the `[Type #id]:` prefix and the status word. Escape `&`,
+   `<`, `>` and write `->` as `-&gt;`.
+2. On Windows, copy it:
+   `powershell -NoProfile -STA -File "<skill>/scripts/copy_html.ps1" <file.html>`.
+   Elsewhere, skip this step.
+
+Then print the report in one fenced `text` block too, as a fallback:
 
 ````
 ```text
@@ -203,7 +232,8 @@ characters they will copy, `**` included:
 ```
 ````
 
-Below the block, write at most three short lines:
+Below the block, say first that the report is on the clipboard and pastes
+into Teams with Ctrl+V. Then write at most three short lines:
 - how many work items were read, and anything left out on purpose (planning
   noise, items only someone else touched);
 - any `warnings`, such as PR status being unknown;

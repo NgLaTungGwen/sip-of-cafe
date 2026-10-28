@@ -6,10 +6,12 @@ Claude Code skills.
 
 Writes your end-of-day report from your Azure DevOps board. It reads every
 work item you changed that day, plus items assigned to you that someone else
-moved, such as QA closing a bug. It sorts the work into PXP, SXP, Timetable
-and Others, and infers your upcoming tasks from what you did and what is still
-open. It lists blockers, then prints the report as plain text, ready to copy.
-It only reads from ADO.
+moved, such as QA closing a bug, and the work items of every PR of yours that
+merged that day, even when the board still shows them as New. It sorts the
+work into PXP, SXP, Timetable and Others, lists each task under its story, and
+infers your upcoming tasks from what you did and what is still open. It lists
+blockers, then puts the report on your clipboard as rich text, so it pastes
+into Teams with its bold and bullets. It only reads from ADO.
 
 ### Install
 
@@ -29,12 +31,15 @@ or `npx skills add NgLaTungGwen/sip-of-cafe` and pick `ado-eod-report`.
      account. If that tenant has no sign-in, the skill gives you the exact
      command:
      `az login --tenant <org tenant> --scope 499b84ac-1321-427f-aa17-267ca6975798/.default`.
+     An organization not connected to Microsoft Entra ID (backed by Microsoft
+     accounts) rejects `az login` tokens: use a PAT there.
    - **PAT**: create one at `https://dev.azure.com/<org>/_usersSettings/tokens`,
      with the scopes **Work Items: Read & write** and **Code: Read** (Code:
      Read is used for PR status). Store it in your own terminal, not in the
      chat: either `export AZURE_DEVOPS_EXT_PAT=<token>` in your shell profile,
      or run `python3 <skill>/scripts/ado_eod.py config --pat-stdin`, paste the
-     token and press Ctrl-D. It's saved to `~/.config/ado-eod-report/pat` with
+     token, press Enter, then Ctrl-D (in Windows cmd or PowerShell: Ctrl-Z,
+     then Enter). It's saved to `~/.config/ado-eod-report/pat` with
      owner-only access.
 2. **The organization** is read from the repository's ADO remote. Outside an
    ADO repository, run `config --org <org>` once; the skill asks you for it.
@@ -49,6 +54,11 @@ or `npx skills add NgLaTungGwen/sip-of-cafe` and pick `ado-eod-report`.
 
 (With the plugin install: `/ado-eod-report:ado-eod-report`.) Notes after the
 date go into the report for work that ADO doesn't show.
+
+On Windows the report lands on your clipboard as rich text: click into the
+Teams message box and press Ctrl+V. The headings stay bold and the tasks nest
+under their stories. The same report is also printed as plain text, for other
+places.
 
 ### Sections
 
@@ -68,6 +78,11 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.3.0:** the work items of your PRs merged that day are listed and count
+  as done, even when the board still shows them as New; merged PRs with no
+  work item get their own line. Each task gets its own line under its story.
+  On Windows the report is copied as rich text for Teams. The sign-in check
+  asks for the `7.1-preview` API version that `connectionData` requires.
 - **0.2.0:** sign in with `az login` when there is no PAT, or when the PAT is
   rejected. The token comes from the organization's own tenant, and the error
   names the `az login --tenant ...` command when that tenant has no sign-in.

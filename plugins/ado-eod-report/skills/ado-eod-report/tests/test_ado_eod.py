@@ -133,9 +133,10 @@ class FakeClient(eod.Client):
                   update(2, "2026-10-28T09:00:00Z", System_State={"oldValue": "Active", "newValue": "Closed"})],
             102: [update(1, "2026-10-28T09:00:00Z", by="x", System_State={"newValue": "Active"})],
         }
+        self.merged = {}  # PR id -> linked work item ids
 
     def call(self, method, url, body=None):
-        if url.endswith("connectionData"):
+        if "connectionData" in url:
             return {"authenticatedUser": {"id": "me-1", "providerDisplayName": "Quy"}}
         if url.endswith("wiql"):
             ids = [200, 101] if "NOT IN" in body["query"] else [101, 102]
@@ -144,6 +145,14 @@ class FakeClient(eod.Client):
             return {"value": [self.items[i] for i in body["ids"]]}
         if "/updates" in url:
             return {"value": self.updates[int(url.split("/workItems/")[1].split("/")[0])]}
+        if url.startswith("_apis/git/pullrequests?"):
+            self.pr_query = url
+            return {"value": [{"pullRequestId": pr, "title": f"PR {pr}",
+                               "repository": {"id": "r1", "name": "web", "project": {"id": "p1", "name": "PXP"}}}
+                              for pr in self.merged]}
+        if url.endswith("/workitems"):
+            pr = int(url.split("/pullRequests/")[1].split("/")[0])
+            return {"value": [{"id": str(i)} for i in self.merged[pr]]}
         if "/pullrequests/" in url:
             return {"status": "completed", "title": "Retry fix", "repository": {"name": "web"}, "reviewers": [{"vote": 10}]}
         raise AssertionError(url)
@@ -161,6 +170,35 @@ class Collect(unittest.TestCase):
         self.assertEqual(item["url"], "https://dev.azure.com/acme/PXP/_workitems/edit/101")
         self.assertEqual([o["id"] for o in out["open_assigned"]], [200])
         self.assertEqual(out["open_assigned"][0]["section"], "Timetable")
+        self.assertEqual(out["merged_prs"], [])
+        self.assertEqual(item["merged_today"], [])
+
+    def test_items_of_a_merged_pr_are_listed_though_untouched(self):
+        client = FakeClient()
+        client.items[300] = {"id": 300, "fields": {"System.Title": "Linked task", "System.WorkItemType": "Task",
+                                                   "System.State": "New", "System.TeamProject": "PXP"}}
+        client.updates[300] = [update(1, "2026-10-20T08:00:00Z", System_State={"newValue": "New"})]
+        client.merged = {60: [300], 61: []}
+        out = eod.collect(client, DAY, UTC, eod.DEFAULT_SECTIONS)
+        linked = next(i for i in out["items"] if i["id"] == 300)
+        self.assertEqual((linked["state_end"], linked["events"], linked["merged_today"]), ("New", [], [60]))
+        self.assertEqual([(p["id"], p["work_items"]) for p in out["merged_prs"]], [(60, [300]), (61, [])])
+        self.assertIn("searchCriteria.creatorId=me-1", client.pr_query)
+        self.assertIn("searchCriteria.minTime=2026-10-28T00%3A00%3A00Z", client.pr_query)
+
+    def test_merged_pr_search_refused_is_a_warning(self):
+        client = FakeClient()
+        real = client.call
+
+        def call(method, url, body=None):
+            if url.startswith("_apis/git/pullrequests?"):
+                raise eod.Fail("FORBIDDEN", "no code scope")
+            return real(method, url, body)
+
+        client.call = call
+        out = eod.collect(client, DAY, UTC, eod.DEFAULT_SECTIONS)
+        self.assertEqual([i["id"] for i in out["items"]], [101])
+        self.assertTrue(any("Merged PRs unknown" in w for w in out["warnings"]))
 
     def test_wiql_falls_back_when_ever_is_refused(self):
         client = FakeClient()

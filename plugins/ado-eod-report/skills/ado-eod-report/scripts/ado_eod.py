@@ -275,7 +275,7 @@ def message_of(detail: str) -> str:
 # --- collecting ---------------------------------------------------------------
 
 def whoami(client: Client) -> dict:
-    user = client.call("GET", "_apis/connectionData")["authenticatedUser"]
+    user = client.call("GET", f"_apis/connectionData?api-version={API}-preview")["authenticatedUser"]
     email = (user.get("properties", {}).get("Account", {}) or {}).get("$value", "")
     return {"id": user["id"], "name": user.get("providerDisplayName", ""), "email": email}
 
@@ -462,6 +462,27 @@ def fetch_pr(client: Client, project: str, repo: str, pr: int) -> dict:
             "approved": sum(v >= 5 for v in votes), "waiting_or_rejected": sum(v < 0 for v in votes)}
 
 
+def merged_prs(client: Client, me: dict, start: dt.datetime, end: dt.datetime) -> list:
+    """This person's pull requests completed inside [start, end), across the
+    organization, with the work items linked to each. A merge often leaves
+    those items untouched on the board, so they are found from the PR side."""
+    utc = lambda t: t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    query = urllib.parse.urlencode({
+        "searchCriteria.creatorId": me["id"], "searchCriteria.status": "completed",
+        "searchCriteria.queryTimeRangeType": "closed",
+        "searchCriteria.minTime": utc(start), "searchCriteria.maxTime": utc(end), "$top": 200})
+    out = []
+    for p in client.call("GET", f"_apis/git/pullrequests?{query}").get("value", []):
+        repo = p.get("repository") or {}
+        project = (repo.get("project") or {}).get("id", "")
+        links = client.call("GET", f"{project}/_apis/git/repositories/{repo.get('id')}"
+                                   f"/pullRequests/{p['pullRequestId']}/workitems").get("value", [])
+        out.append({"id": p["pullRequestId"], "title": p.get("title", ""), "repo": repo.get("name", ""),
+                    "project": (repo.get("project") or {}).get("name", ""),
+                    "work_items": sorted(int(w["id"]) for w in links)})
+    return sorted(out, key=lambda p: p["id"])
+
+
 def web_url(org: str, fields: dict, wid: int) -> str:
     return f"{org}/{urllib.parse.quote(fields.get('System.TeamProject', ''))}/_workitems/edit/{wid}"
 
@@ -472,7 +493,16 @@ def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None) -
     end = start + dt.timedelta(days=1)
     warnings = []
 
-    ids = touched_ids(client, day)
+    try:
+        merged = merged_prs(client, me, start, end)
+    except Fail as e:
+        if e.code not in ("FORBIDDEN", "AUTH", "HTTP"):
+            raise
+        merged = []
+        warnings.append("Merged PRs unknown: the sign-in can't read code (a PAT needs the Code (Read) scope)")
+    merged_ids = {wid for p in merged for wid in p["work_items"]}
+
+    ids = sorted(set(touched_ids(client, day)) | merged_ids)
     items = fetch_items(client, ids, relations=True) if ids else {}
     with ThreadPoolExecutor(max_workers=8) as pool:
         updates = dict(zip(items, pool.map(lambda wid: fetch_updates(client, wid), items)))
@@ -480,7 +510,7 @@ def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None) -
     worked = {}
     for wid, item in items.items():
         summary = summarize(updates[wid], me, start, end, tz)
-        if summary["events"] and relevant(item["fields"], summary, me):
+        if wid in merged_ids or (summary["events"] and relevant(item["fields"], summary, me)):
             worked[wid] = (item, summary)
 
     parents = {parent_id(item) for item, _ in worked.values()} - {None}
@@ -517,6 +547,7 @@ def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None) -
             "parent": {"id": pid, "type": parent.get("System.WorkItemType"), "title": parent.get("System.Title")}
             if pid else None,
             "prs": [prs[(wid, ref)] for ref in pr_refs(item)],
+            "merged_today": [p["id"] for p in merged if wid in p["work_items"]],
             "events": summary["events"],
             "url": web_url(client.org, f, wid),
         })
@@ -533,7 +564,7 @@ def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None) -
                              "priority": f.get("Microsoft.VSTS.Common.Priority"), "blocked": is_blocked(f)})
 
     return {"date": day.isoformat(), "timezone": str(tz), "org": client.org, "me": me,
-            "sections": [s["name"] for s in sections], "items": out_items,
+            "sections": [s["name"] for s in sections], "items": out_items, "merged_prs": merged,
             "open_assigned": open_out, "warnings": warnings}
 
 
