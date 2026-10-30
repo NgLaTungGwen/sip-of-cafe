@@ -127,7 +127,9 @@ bash "<skill>/scripts/bg.sh" run "<iwt>" verify "bash '<skill>/scripts/heavy.sh'
 
 as a Bash call with `run_in_background: true`, then
 `bash "<skill>/scripts/bg.sh" wait "<iwt>" verify` once per Bash call while it
-prints still running. The log ends with the log folder and one
+prints still running. Once heavy.sh lets verify start, the log's first line
+names the log folder, so you can tail a check's `<check>.log` there while it
+runs. The log ends with the folder again and one
 `<check>.rc:<exit code>` line per check. Those logs sit outside the worktree,
 so the tree stays clean. Read only the failing part of each log whose check
 didn't return 0.

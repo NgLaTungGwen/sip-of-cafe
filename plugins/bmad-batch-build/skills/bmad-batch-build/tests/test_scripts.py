@@ -257,6 +257,45 @@ class HeavyShell(unittest.TestCase):
         self.assertLessEqual(lo_f, hi_f)
 
 
+class VerifyLogFolder(unittest.TestCase):
+    """verify.sh named its log folder only after every check ended, so a
+    synthesis waiting on it saw an empty verify.log for the whole verify
+    (test-cases, intake-toolchain-ux, empty-repo-default-branch)."""
+
+    def test_log_folder_is_printed_before_the_checks_end(self):
+        import threading
+        root = tempfile.mkdtemp().replace("\\", "/")
+        os.makedirs(os.path.join(root, ".claude"))
+        # One check that runs until the test lets it end.
+        with open(os.path.join(root, ".claude", "bmad-batch-project.json"), "w") as fh:
+            json.dump({"base": "main", "checks": [
+                {"name": "slow", "dir": ".", "cmd": "while [ ! -f go ]; do sleep 0.2; done"}]}, fh)
+        subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        p = subprocess.Popen([bash, os.path.join(SCRIPTS, "verify.sh"), root],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        first = []
+        reader = threading.Thread(target=lambda: first.append(p.stdout.readline()), daemon=True)
+        reader.start()
+        try:
+            reader.join(20)
+            self.assertTrue(first and first[0].startswith("logs: "), "no log folder while the check runs")
+            # Asked of bash: Windows Python cannot open Git Bash's /tmp.
+            folder = first[0][len("logs: "):].strip()
+            self.assertEqual(subprocess.run([bash, "-c", f'[ -d "{folder}" ]']).returncode, 0, folder)
+            self.assertIsNone(p.poll())
+        finally:
+            open(os.path.join(root, "go"), "w").close()
+            try:
+                out = p.communicate(timeout=30)[0]
+            except subprocess.TimeoutExpired:
+                p.kill()
+                out = p.communicate()[0]
+            shutil.rmtree(root, ignore_errors=True)
+        # The end of the output is unchanged: the folder, then one rc line per check.
+        self.assertTrue(out.rstrip().endswith("slow.rc:0"), out)
+
+
 class PrepareWorktree(unittest.TestCase):
     def pinned(self, with_api, extra=()):
         bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")

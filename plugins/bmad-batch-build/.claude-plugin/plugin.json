@@ -1,6 +1,6 @@
 {
   "name": "bmad-batch-build",
-  "version": "0.12.11",
+  "version": "0.12.12",
   "description": "BMAD batch build: one bmad-build-auto worker per unit, in parallel worktrees or in turn in one worktree (chosen automatically), then a synthesis agent opens one Azure DevOps PR.",
   "author": {
     "name": "Jayson Nguyen"

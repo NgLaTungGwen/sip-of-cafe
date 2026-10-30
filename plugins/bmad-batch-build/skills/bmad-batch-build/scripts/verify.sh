@@ -25,6 +25,9 @@ for a in "$@"; do
 done
 
 v=$(mktemp -d)
+# Named first as well as last, so whoever waits can tail <check>.log there
+# while the checks run (verify.log stayed empty until the end before).
+echo "logs: $v"
 cd "$wt" || exit 2
 . "$(dirname "${BASH_SOURCE[0]}")/lib-packages.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
