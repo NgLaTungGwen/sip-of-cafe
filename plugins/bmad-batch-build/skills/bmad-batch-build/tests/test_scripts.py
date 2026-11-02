@@ -808,5 +808,128 @@ class Dashboard(unittest.TestCase):
             shutil.rmtree(store, ignore_errors=True)
 
 
+def git_repo(files):
+    """A repository on main with these files committed (path -> text)."""
+    root = tempfile.mkdtemp().replace("\\", "/")
+    subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+    for path, text in files.items():
+        os.makedirs(os.path.dirname(os.path.join(root, path)) or root, exist_ok=True)
+        with open(os.path.join(root, path), "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    git = ["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(git + ["add", "-A"], check=True)
+    subprocess.run(git + ["commit", "-q", "-m", "init"], check=True)
+    return root, git
+
+
+class TrackedBmad(unittest.TestCase):
+    """xt-ioc-backend (2026-10-30) tracks _bmad and .claude/skills in git: the
+    checkout already had them, `cp -r` copied each inside itself (_bmad/_bmad,
+    .claude/skills/skills), render_skill.py found no config.user.toml, and the
+    clean-tree check could not pass."""
+
+    def test_tracked_folders_are_not_nested_and_the_tree_stays_clean(self):
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        root, git = git_repo({
+            ".gitignore": "_bmad/config.user.toml\n.claude/worktrees/\n.env\n",
+            "package.json": "{}",
+            "_bmad/core/config.yaml": "x: 1\n",
+            "_bmad/custom/.keep": "",
+            ".claude/skills/tracked/SKILL.md": "---\nname: tracked\n---\n",
+        })
+        with open(os.path.join(root, "_bmad", "config.user.toml"), "w") as f:
+            f.write('communication_language = "English"\n')
+        os.makedirs(os.path.join(root, ".claude", "skills", "local"))
+        with open(os.path.join(root, ".claude", "skills", "local", "SKILL.md"), "w") as f:
+            f.write("---\nname: local\n---\n")
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "prepare-worktree.sh"), root, "u1", "b1",
+                            "--no-install", "--base", "HEAD"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        wt = r.stdout.strip().splitlines()[-1]
+        self.assertFalse(os.path.exists(os.path.join(wt, "_bmad", "_bmad")))
+        self.assertFalse(os.path.exists(os.path.join(wt, ".claude", "skills", "skills")))
+        self.assertTrue(os.path.isfile(os.path.join(wt, "_bmad", "config.user.toml")))
+        self.assertTrue(os.path.isfile(os.path.join(wt, ".claude", "skills", "local", "SKILL.md")))
+        status = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True).stdout
+        self.assertEqual(status, "")
+        with open(os.path.join(wt, "_bmad", "custom", "bmad-build-auto.toml"), encoding="utf-8") as f:
+            toml = f.read()
+        PrepareWorktree.tomllib_ok(self, toml)
+        # The rules every agent of the unit needs, from the same run's journal.
+        self.assertIn("Never write a file or a script through a heredoc", toml)
+        self.assertIn("replaces step-04's instruction to re-engage", toml)
+        self.assertIn("The one exception is {diff_file}", toml)
+
+
+class MergeRejected(unittest.TestCase):
+    """xt-ioc-backend's commit-msg hook rejected "merge: ...", and
+    merge-units.sh reported a CONFLICT that did not exist."""
+
+    def repo(self, profile=None):
+        root, git = git_repo({"a.txt": "a\n"})
+        hook = os.path.join(root, ".git", "hooks", "commit-msg")
+        with open(hook, "w", newline="\n") as f:
+            f.write('#!/bin/sh\ngrep -qE "^(feat|fix|chore)(\\(.+\\))?: " "$1" || { echo "bad type" >&2; exit 1; }\n')
+        os.chmod(hook, 0o755)
+        subprocess.run(git + ["checkout", "-q", "-b", "u1"], check=True)
+        with open(os.path.join(root, "b.txt"), "w") as f:
+            f.write("b\n")
+        subprocess.run(git + ["add", "b.txt"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "feat: b"], check=True)
+        subprocess.run(git + ["checkout", "-q", "main"], check=True)
+        if profile:
+            os.makedirs(os.path.join(root, ".claude"), exist_ok=True)
+            with open(os.path.join(root, ".claude", "bmad-batch-project.json"), "w") as f:
+                json.dump(profile, f)
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "merge-units.sh"), root, "u1:unit one"],
+                           capture_output=True, text=True, env=env)
+        return root, r
+
+    def test_a_hook_rejection_is_not_a_conflict(self):
+        root, r = self.repo()
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertIn("REJECTED u1", r.stdout)
+        self.assertNotIn("CONFLICT", r.stdout)
+        self.assertIn("bad type", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(root, ".git", "MERGE_HEAD")))  # left for the agent to commit
+
+    def test_the_profile_sets_the_merge_message(self):
+        root, r = self.repo({"base": "main", "merge_message": "chore(merge): {title} ({branch})"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("MERGED u1", r.stdout)
+        msg = subprocess.run(["git", "-C", root, "log", "-1", "--format=%s"], capture_output=True, text=True).stdout
+        self.assertEqual(msg.strip(), "chore(merge): unit one (u1)")
+
+
+class Encoding(unittest.TestCase):
+    """A Windows console (cp1252) has no '≈': plan-waves.py stopped with
+    UnicodeEncodeError while printing the schedule (2026-10-30)."""
+
+    def test_plan_waves_prints_on_a_cp1252_console(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "plan.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"units": [unit(1), unit(2)]}, f)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "plan-waves.py"), path],
+                           capture_output=True, env=dict(os.environ, PYTHONIOENCODING="cp1252", BMAD_RUNS_DIR=d))
+        self.assertEqual(r.returncode, 0, r.stderr.decode("utf-8", "replace"))
+        self.assertIn("≈", r.stdout.decode("utf-8"))
+
+
+class Roles(unittest.TestCase):
+    """The coder a worker launches (general-purpose, 'implement it') was
+    counted as a reviewer, so reports put 50-56% of the cost on review."""
+
+    def test_the_implementer_is_not_a_reviewer(self):
+        coder = json.dumps({"message": {"content": "> Read /wt/_bmad-output/spec-u1.md fully and implement it. The spec is the sole source of truth."}})
+        reviewer = json.dumps({"message": {"content": "Conduct a review of CONTENT."}})
+        for mod in (load("cost_report", "cost-report.py"), journal):
+            self.assertEqual(mod.role({"spawnDepth": 2}, coder), "implementer")
+            self.assertEqual(mod.role({"spawnDepth": 2}, reviewer), "reviewer")
+            self.assertEqual(mod.role({"spawnDepth": 2, "agentType": "haiku-implementer"}, coder), "haiku")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,7 @@
   --axis: #c3c2b7;
   --border: rgba(11, 11, 11, 0.10);
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
-  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948; --s9: #0f8fa8;
   --critical: #d03b3b;
   --good-text: #006300;
 }
@@ -32,7 +32,7 @@
     --axis: #383835;
     --border: rgba(255, 255, 255, 0.10);
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
-    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --s9: #2aa7bf;
     --good-text: #0ca30c;
   }
 }
@@ -47,7 +47,7 @@
   --axis: #383835;
   --border: rgba(255, 255, 255, 0.10);
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
-  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --s9: #2aa7bf;
   --good-text: #0ca30c;
 }
 * { box-sizing: border-box; }
@@ -215,8 +215,9 @@ th.num { text-align: right; }
   var DATA = JSON.parse(document.getElementById("dash-data").textContent);
 
   // Colors follow the entity, never its rank: each role and problem group owns a slot.
-  var ROLES = ["main", "worker", "haiku", "reviewer", "synthesis", "explore", "enhancer", "other"];
-  var ROLE_LABEL = {main: "Orchestrator", worker: "Workers", haiku: "Haiku coders", reviewer: "Reviewers",
+  // implementer came last (0.12.13) so every older role keeps its color.
+  var ROLES = ["main", "worker", "haiku", "reviewer", "synthesis", "explore", "enhancer", "other", "implementer"];
+  var ROLE_LABEL = {main: "Orchestrator", worker: "Workers", haiku: "Haiku coders", reviewer: "Reviewers", implementer: "Coders (general-purpose)",
     synthesis: "Synthesis", explore: "Explore", enhancer: "Enhancer", other: "Other agents"};
   var PROBLEMS = [
     {key: "tool", label: "Failed tool calls", kinds: ["tool_error"]},

@@ -7,7 +7,13 @@
 # Merges each branch in order with --no-ff. A branch already in HEAD is
 # skipped, so after resolving a conflict (and committing it) the same call can
 # simply be run again. On a conflict it stops, leaves the merge in progress and
-# exits 3 after printing "CONFLICT <branch>" and the conflicted files.
+# exits 3 after printing "CONFLICT <branch>" and the conflicted files. When the
+# merge has no conflict but git refuses to commit it (a commit-msg hook that
+# rejects the message), it leaves the merge in progress and exits 5 after
+# printing "REJECTED <branch>" and git's output.
+#
+# The merge message is "merge: <title>", or the profile's merge_message with
+# {title} and {branch} filled in (for a commit-msg hook with its own format).
 #
 # Once every branch is in, it prints one line per check:
 #   MIGRATIONS  ok, or the numbers that collide (the agent renumbers them)
@@ -30,18 +36,30 @@ base=$(base_ref "$wt")
 has_profile=0
 profile_get "$wt" base > /dev/null && has_profile=1
 
+template='merge: {title}'
+if [ "$has_profile" = 1 ] && t=$(profile_get "$wt" merge_message) && [ -n "$t" ]; then template=$t; fi
+
 for arg in "$@"; do
   br=${arg%%:*} title=${arg#*:}
   if git merge-base --is-ancestor "$br" HEAD; then
     echo "MERGED $br (already in HEAD)"
     continue
   fi
-  if git merge --no-ff "$br" -m "merge: $title" > /dev/null 2>&1; then
+  msg=${template//\{title\}/$title}
+  msg=${msg//\{branch\}/$br}
+  if out=$(git merge --no-ff "$br" -m "$msg" 2>&1); then
     echo "MERGED $br"
-  else
+  elif [ -n "$(git diff --name-only --diff-filter=U)" ]; then
     echo "CONFLICT $br"
     git diff --name-only --diff-filter=U | sed 's/^/  /'
     exit 3
+  else
+    # No conflicted file: the merge itself worked and the commit was refused,
+    # usually by a commit-msg hook. Finish it with `git commit` and a message
+    # the hook accepts, then run the same call again.
+    echo "REJECTED $br"
+    printf '%s\n' "$out" | tail -n 15 | sed 's/^/  /'
+    exit 5
   fi
 done
 

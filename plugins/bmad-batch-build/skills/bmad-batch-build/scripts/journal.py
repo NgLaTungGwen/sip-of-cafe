@@ -137,7 +137,13 @@ def role(meta, first):
         return "worker"
     if agent == "bmad-batch-enhancer":
         return "enhancer"
-    return "reviewer" if meta.get("spawnDepth", 1) > 1 else "other"
+    if meta.get("spawnDepth", 1) <= 1:
+        return "other"
+    # A worker's coder: the Haiku one launched as general-purpose (fallback
+    # agents), or a general-purpose one (bmad-build-auto's handoff).
+    if "haiku-implementer.md and follow it" in first:
+        return "haiku"
+    return "implementer" if "fully and implement it" in first else "reviewer"
 
 
 def reply_text(lines):

@@ -21,6 +21,10 @@ The profile lives at <root>/.claude/bmad-batch-project.json:
      "database": null,
      "notes": "", "confirmed": "2026-10-26", "fingerprint": "..."}
 
+An optional "merge_message" (e.g. "chore(merge): {title}") replaces the
+"merge: {title}" message merge-units.sh gives each unit merge, for a
+repository whose commit-msg hook wants its own format.
+
 Every command is a plain string, so a stack detect does not know (Python, Go,
 .NET...) is handled by writing its commands in by hand. The scripts use the
 profile when it exists and keep their original behaviour when it does not.
@@ -315,4 +319,8 @@ def main(args):
 
 
 if __name__ == "__main__":
+    # A Windows console is cp1252, which has no '≈' or '≤' (UnicodeEncodeError).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main(sys.argv[1:]))

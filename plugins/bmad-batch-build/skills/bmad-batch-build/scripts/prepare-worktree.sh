@@ -49,15 +49,41 @@ fi
 # fetches into one .git race on FETCH_HEAD.
 git -C "$root" worktree add -b "$branch" "$wt" "$base" >&2
 
-cp -r "$root/_bmad" "$wt/_bmad"
+exclude=$(git -C "$wt" rev-parse --path-format=absolute --git-path info/exclude)
+# hide <path>: keep a file this script adds out of the worktree's git status,
+# so bmad-build-auto's clean-tree check passes.
+hide() {
+  if git -C "$wt" ls-files --error-unmatch -- "$1" > /dev/null 2>&1; then
+    git -C "$wt" update-index --skip-worktree -- "$1"
+  elif ! git -C "$wt" check-ignore -q -- "$1"; then
+    mkdir -p "$(dirname "$exclude")"
+    grep -qxF "/$1" "$exclude" 2>/dev/null || echo "/$1" >> "$exclude"
+  fi
+}
+# copy_in <path>: bring a gitignored folder of the main checkout into the
+# worktree. A project that tracks the folder already has it after checkout,
+# where `cp -r` would land inside it (_bmad/_bmad, .claude/skills/skills), so
+# then only what git doesn't track is copied in.
+copy_in() {
+  [ -e "$root/$1" ] || return 0
+  if [ ! -e "$wt/$1" ]; then
+    mkdir -p "$(dirname "$wt/$1")"
+    cp -r "$root/$1" "$wt/$1"
+    return 0
+  fi
+  local p
+  while IFS= read -r -d '' p; do
+    p=${p%/}
+    mkdir -p "$(dirname "$wt/$p")"
+    cp -r "$root/$p" "$wt/$p"
+    hide "$p"
+  done < <(git -C "$root" ls-files --others --directory -z -- "$1")
+}
+copy_in _bmad
 mkdir -p "$wt/.claude"
 # A plugin install may leave the project without .claude/skills of its own.
-if [ -d "$root/.claude/skills" ]; then
-  cp -r "$root/.claude/skills" "$wt/.claude/skills"
-fi
-if [ -d "$root/.claude/agents" ]; then
-  cp -r "$root/.claude/agents" "$wt/.claude/agents"
-fi
+copy_in .claude/skills
+copy_in .claude/agents
 
 # A private test database per worktree. Without one every run shares
 # <dev db>_test, and each run's teardown deletes rows the other created
@@ -154,8 +180,9 @@ cat > "$wt/_bmad/custom/bmad-build-auto.toml" <<EOF
 persistent_facts = [
   "The project root for this run is $wt. Every file read, edit, test and git command targets that directory. Never touch anything outside $wt: not the main checkout $root, and not any other worktree.",
   "Run shell commands as \`cd $wt && ...\`, or use \`git -C $wt\`. Every command here is bash: with no Bash tool (PowerShell only, on Windows), run each one as bash -c '<command>' through PowerShell, writing a single quote inside it as two, and never translate it into PowerShell.",
-  "Source files change only through the implementation subagent, review fixes included. For every fix round, launch a new \`${impl_type}\`${impl_fix} with the Agent tool in the foreground, giving it the spec path and the fixes. Never resume an earlier one with SendMessage: that runs in the background, and you would end your turn before the fixes land. Never end your turn or hand back while a fix round is running. The parent edits only the spec and files under _bmad-output/.",
-  "No single Bash call may run longer than 10 minutes; Claude Code moves a longer one to the background. Start anything that can take longer (the full suite, a build, an install) with \`bash $bg run $wt <name> \"<command>\"\` as a Bash call with run_in_background: true, and wait for it with one \`bash $bg wait $wt <name>\` per Bash call, repeated while it prints still running. Never wrap a wait in a loop, \`timeout\` or \`sleep\`. Logs and scratch files stay inside $wt.",
+  "Source files change only through the implementation subagent, review fixes included. For every fix round, launch a new \`${impl_type}\`${impl_fix} with the Agent tool in the foreground, giving it the spec path and the fixes. Never resume an earlier one with SendMessage: that runs in the background, and you would end your turn before the fixes land. This replaces step-04's instruction to re-engage the same implementation subagent. Never end your turn or hand back while a fix round is running. The parent edits only the spec and files under _bmad-output/.",
+  "No single Bash call may run longer than 10 minutes; Claude Code moves a longer one to the background. Start anything that can take longer (the full suite, a build, an install) with \`bash $bg run $wt <name> \"<command>\"\` as a Bash call with run_in_background: true, and wait for it with one \`bash $bg wait $wt <name>\` per Bash call, repeated while it prints still running. Never wrap a wait in a loop, \`timeout\` or \`sleep\`. Logs and scratch files stay inside $wt. The one exception is {diff_file}, which steps 03 and 04 write to the system temp directory: keep it there, because inside $wt it would end up in the next diff.",
+  "Write and change files with the Write or Edit tool. Never write a file or a script through a heredoc in Bash (\`cat > f <<'EOF'\`, \`python - <<'EOF'\`): quotes and backticks inside it break the shell, and the harness blocks the python one. Write the script to a file under $wt/_bmad-output/ with the Write tool, then run it.",
   "Workflow gaps: if the spec template has no baseline_revision, set it to the output of \`git -C $wt rev-parse HEAD\` before the first change. If _bmad-output/ is gitignored, commit the spec with \`git add -f\`. Exclude _bmad-output from git pathspecs with ':(exclude)_bmad-output'; the short form ':!_bmad-output' fails with 'Unimplemented pathspec magic'.",
   "Dependencies install in the background while you plan; planning needs only the checkout. Before any command that needs node_modules (tests, typecheck, build, lint), run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, halt with its output as the blocking condition.",
   "Testing has one owner per check. The implementation subagent runs the targeted test files and the typecheck of each workspace it touched, after its first pass and after every review fix, and reports the results. You do not re-run them: if it reports one it could not get green, send that back to it. $suite_fact Synthesis builds, so skip the build unless the intent, the spec's Verification or AGENTS.md requires one; then run it once, after the implementation subagent returns, through the queue: \`bash $heavy 'cd $wt && <the project build command>'\`.",
@@ -176,6 +203,7 @@ Launch a subagent with no prior conversation context, using the \`${impl_type}\`
 > When you're done, report what you changed, how you verified it, and anything left incomplete or risky.
 """
 EOF
+hide _bmad/custom/bmad-build-auto.toml
 
 if [ "$install" = 0 ]; then
   echo "$wt"

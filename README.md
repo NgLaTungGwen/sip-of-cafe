@@ -516,6 +516,20 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.12.13:** fixes from user run reports.
+  - A merge that a commit-msg hook refuses prints `REJECTED <branch>`
+    (exit 5) instead of a false `CONFLICT`. The profile's optional
+    `merge_message` (for example `chore(merge): {title}`) sets the message.
+  - A project that tracks `_bmad` or `.claude/skills` in git no longer gets
+    `_bmad/_bmad` or `.claude/skills/skills` in its worktrees. Only untracked
+    files such as `config.user.toml` are copied in, and the tree stays clean.
+  - Scripts print on a Windows cp1252 console without `UnicodeEncodeError`.
+  - Each unit's build session is told: no heredoc scripts; a fix round always
+    launches a new coder (this overrides step-04's re-engage); the diff file
+    may stay in the system temp folder.
+  - The cost report and dashboard count a worker's general-purpose coder as
+    `implementer` (column `$impl`). It was counted as `reviewer`, which
+    overstated review cost.
 - **0.12.11:** tickets on GitHub. With a GitHub remote and `gh` signed in,
   the run creates a story issue and one sub-issue per unit (assigned to you,
   labelled `bmad-parallel-build`), reuses pasted issues, and writes the PR's

@@ -53,4 +53,8 @@ def main(args):
 
 
 if __name__ == "__main__":
+    # A Windows console is cp1252, which has no '≈' or '≤' (UnicodeEncodeError).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main(sys.argv[1:]))

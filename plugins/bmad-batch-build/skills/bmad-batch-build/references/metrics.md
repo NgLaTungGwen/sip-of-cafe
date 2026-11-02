@@ -42,7 +42,7 @@ at least that often.
 | `slug` | Run name; on the maintainer's own rows only |
 | `skill_version`, `version_exact` | Version that ran; `version_exact` false means guessed from dates (`before-X` = older than X) |
 | `mode` | `lane`, `parallel`, `waves`, or null for runs before modes were recorded |
-| `usd`, `usd_by_role` | Cost in USD, total and per role (`main`, `worker`, `haiku`, `reviewer`, `synthesis`, `explore`, `other`) |
+| `usd`, `usd_by_role` | Cost in USD, total and per role (`main`, `worker`, `haiku`, `implementer`, `reviewer`, `synthesis`, `explore`, `other`); `implementer` is a worker's general-purpose coder, counted under `reviewer` before 0.12.13 |
 | `usd_idle_max` | Upper bound on the cost of cache re-writes after the cache expired in an idle gap, summed over all agents |
 | `mtok_in`, `ktok_out`, `mtok_w1h_subagents` | Input Mtok, output ktok, subagent 1-hour cache writes in Mtok |
 | `min_wall` | Wall time of the run, minutes |

@@ -170,6 +170,10 @@ def link(path: str, pr: str, merged: set) -> None:
 
 
 if __name__ == "__main__":
+    # A Windows console is cp1252, which has no '≈' or '≤' (UnicodeEncodeError).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     if "--link-pr" in sys.argv:
         args = sys.argv[1:]
         merged = args[args.index("--merged") + 1].split(",") if "--merged" in args else []

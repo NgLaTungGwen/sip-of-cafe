@@ -80,6 +80,15 @@ both units' intent survives: read both specs, but only the parts about the
 conflicted files. Never drop a unit's change silently. Commit the merge, then
 run the same command again; it carries on from the next branch.
 
+`REJECTED <branch>` (exit 5) is not a conflict: the merge worked and git
+refused the commit, usually because a commit-msg hook rejected the message;
+git's output follows. Read the hook's rule there, finish the merge with
+`git -C <iwt> commit -m "<a message the hook accepts>"` (never `--no-verify`),
+and run the same command again. When the repository always needs that
+format, record it for later runs with
+`python "<skill>/scripts/profile.py" set <root> merge_message "<template>"`;
+`{title}` and `{branch}` in it are filled in per merge.
+
 ## 2. Repair what merges cleanly but breaks
 
 After the last merge the script prints its checks and has already done the

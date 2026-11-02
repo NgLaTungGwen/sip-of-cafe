@@ -93,7 +93,13 @@ def role(meta, first_line):
         return "synthesis"
     if agent in ("bmad-batch-worker", "bmad-pb-worker") or "Build Auto worker" in first_line:
         return "worker"
-    return "reviewer" if meta.get("spawnDepth", 1) > 1 else "other"
+    if meta.get("spawnDepth", 1) <= 1:
+        return "other"
+    # A worker's coder: the Haiku one launched as general-purpose (fallback
+    # agents), or a general-purpose one (bmad-build-auto's handoff).
+    if "haiku-implementer.md and follow it" in first_line:
+        return "haiku"
+    return "implementer" if "fully and implement it" in first_line else "reviewer"
 
 
 def wait_kind(block):
@@ -332,7 +338,7 @@ def report(paths):
     timing = []
     units = []
     fix_merge = []
-    print(f"{'session':10} {'date':10} {'workers':>7} {'$total':>7} {'$main':>6} {'$work':>6} {'$rev':>5} {'$haiku':>6} {'$synth':>6} {'$idle≤':>6} {'Mtok in':>8} {'Ktok out':>8}")
+    print(f"{'session':10} {'date':10} {'workers':>7} {'$total':>7} {'$main':>6} {'$work':>6} {'$impl':>5} {'$rev':>5} {'$haiku':>6} {'$synth':>6} {'$idle≤':>6} {'Mtok in':>8} {'Ktok out':>8}")
     for p in paths:
         acc, ed, start, waits, spans, quality, ivals = run(p)
         for k, iv in ivals.items():
@@ -350,7 +356,7 @@ def report(paths):
         tok_in = sum(v["tok_in"] for v in acc.values())
         tok_out = sum(v["tok_out"] for v in acc.values())
         print(f"{os.path.basename(p)[:8]:10} {start[:10]:10} {acc['worker']['agents']:7} {sum(usd.values()):7.1f} "
-              f"{usd.get('main', 0):6.1f} {usd.get('worker', 0):6.1f} {usd.get('reviewer', 0):5.1f} "
+              f"{usd.get('main', 0):6.1f} {usd.get('worker', 0):6.1f} {usd.get('implementer', 0):5.1f} {usd.get('reviewer', 0):5.1f} "
               f"{usd.get('haiku', 0):6.2f} {usd.get('synthesis', 0):6.1f} {sum(v['usd_idle'] for v in acc.values()):6.1f} "
               f"{tok_in / 1e6:8.1f} {tok_out / 1e3:8.0f}")
         ask = acc["main"]["user_wait"]
@@ -426,17 +432,17 @@ def report(paths):
 
     print("\nTool wait time (tool_use -> tool_result). 'total' sums every call; 'union' counts time\n"
           "covered by parallel calls once, so it is what the role actually spent waiting on that kind.")
-    print(f"{'role':10} {'kind':22} {'calls':>5} {'total':>7} {'union':>7} {'avg':>7} {'union/run':>9}")
+    print(f"{'role':11} {'kind':22} {'calls':>5} {'total':>7} {'union':>7} {'avg':>7} {'union/run':>9}")
     for (lab, kind), (cnt, sec) in sorted(all_waits.items(), key=lambda kv: -all_union[kv[0]]):
         if sec < 600:
             continue
         u = all_union[(lab, kind)]
-        print(f"{lab:10} {kind:22} {cnt:5} {sec / 3600:6.1f}h {u / 3600:6.1f}h {sec / cnt / 60:6.1f}m {u / n / 60:8.0f}m")
+        print(f"{lab:11} {kind:22} {cnt:5} {sec / 3600:6.1f}h {u / 3600:6.1f}h {sec / cnt / 60:6.1f}m {u / n / 60:8.0f}m")
     print()
     print("$in is uncached input; $idle≤ is an upper bound (a whole write after a long gap is counted).")
-    print(f"{'role':10} {'agents':>6} {'turns':>6} {'Mtok in':>8} {'Mtok out':>8} {'$write':>7} {'$read':>6} {'$in':>5} {'$out':>6} {'$total':>7} {'$idle≤':>7}")
+    print(f"{'role':11} {'agents':>6} {'turns':>6} {'Mtok in':>8} {'Mtok out':>8} {'$write':>7} {'$read':>6} {'$in':>5} {'$out':>6} {'$total':>7} {'$idle≤':>7}")
     for k, v in sorted(grand.items(), key=lambda kv: -cost(kv[1])):
-        print(f"{k:10} {v['agents']:6} {v['turns']:6} {v['tok_in']/1e6:8.1f} {v['tok_out']/1e6:8.2f} {v['usd_write']:7.1f} "
+        print(f"{k:11} {v['agents']:6} {v['turns']:6} {v['tok_in']/1e6:8.1f} {v['tok_out']/1e6:8.2f} {v['usd_write']:7.1f} "
               f"{v['usd_read']:6.1f} {v['usd_in']:5.1f} {v['usd_out']:6.1f} {cost(v):7.1f} {v['usd_idle']:7.1f}")
     print("\nIdle cache rewrites, upper bound (gap beyond the 5 min or 1 h TTL), by what the agent was waiting on:")
     for (lab, tool), v in idle.most_common(10):
@@ -788,6 +794,10 @@ def collect(quiet=False, refresh=False):
 
 
 if __name__ == "__main__":
+    # A Windows console is cp1252, which has no '≈' or '≤' (UnicodeEncodeError).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     args = sys.argv[1:]
     if args[:1] == ["--record"]:
         root = args[args.index("--root") + 1] if "--root" in args else os.getcwd()
