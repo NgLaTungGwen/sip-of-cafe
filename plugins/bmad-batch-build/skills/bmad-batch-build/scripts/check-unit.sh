@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Gate one worker's unit before synthesis.
 #
-# usage: check-unit.sh <worktree> <branch> <spec file> [<base rev>]
+# usage: check-unit.sh [--bug] <worktree> <branch> <spec file> [<base rev>]
 #
 # <base rev> defaults to origin/<the project profile's base>, else origin/main. In lane mode the units share one branch,
 # so pass the HEAD recorded before the unit started.
@@ -13,8 +13,25 @@
 # "### <date> — Review pass" entry (step 4 appends one on every pass, even with
 # zero findings; the template's HTML comment alone does not count). A worker
 # that coded first and wrote the spec afterwards produces exactly that shape.
+#
+# --bug (a unit whose intent says `Kind: bug`): the spec's `## Reproduction`
+# must hold a `RED:` line (the reproduction failing before the fix) and a
+# `GREEN:` line (passing after it).
+#
+# When the project profile has an "app", the unit must also have passed
+# app-check.sh, run through bg.sh as app-<spec file name without .md>: its rc
+# file is 0, and no code outside _bmad-output changed after the HEAD it
+# checked.
 set -uo pipefail
 
+bug= args=()
+for a in "$@"; do
+  case $a in
+    --bug) bug=1 ;;
+    *) args+=("$a") ;;
+  esac
+done
+set -- "${args[@]}"
 wt=$1 branch=$2 spec=$3
 . "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
 base=${4:-$(base_ref "$wt")}
@@ -36,6 +53,26 @@ else
   grep -q '<intent-contract>' "$spec" || reasons+=("no <intent-contract>: plan step skipped")
   passes=$(awk '/^## Review Triage Log/ {f=1; next} f && /^## / {exit} f && /^### .*Review pass/' "$spec" | wc -l)
   [ "$passes" -gt 0 ] || reasons+=("no review pass in Review Triage Log: review step skipped")
+  if [ -n "$bug" ]; then
+    repro=$(awk '/^## Reproduction/ {f=1; next} f && /^## / {exit} f' "$spec")
+    printf '%s\n' "$repro" | grep -qE '^[-* ]*RED:' || reasons+=("bug unit with no RED: line under ## Reproduction")
+    printf '%s\n' "$repro" | grep -qE '^[-* ]*GREEN:' || reasons+=("bug unit with no GREEN: line under ## Reproduction")
+  fi
+fi
+
+if profile_get "$wt" app.start > /dev/null; then
+  name="app-$(basename "$spec" .md)"
+  dir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)/bmad"
+  if [ ! -f "$dir/$name.rc" ]; then
+    reasons+=("no app check ($name)")
+  elif [ "$(cat "$dir/$name.rc")" != 0 ]; then
+    reasons+=("app check failed (rc $(cat "$dir/$name.rc"), log $dir/$name.log)")
+  else
+    checked=$(sed -nE 's/^HEAD ([0-9a-f]+).*/\1/p' "$dir/$name.log" | head -1)
+    if [ -z "$checked" ] || ! git -C "$wt" diff --quiet "$checked" "$branch" -- . ':(exclude)_bmad-output' 2>/dev/null; then
+      reasons+=("code changed after the app check ($name): run it again")
+    fi
+  fi
 fi
 
 [ -z "$(git -C "$wt" status --porcelain)" ] || reasons+=("dirty tree")

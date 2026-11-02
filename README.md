@@ -101,6 +101,36 @@ It adapts to your repository. On the first run it works out how your project
 installs, builds and tests, shows you those commands with the plan, and
 remembers them once you confirm.
 
+### How it keeps quality up
+
+The PR gets human review. Before it gets there, the skill relies on evidence
+from running the code, not on an agent saying it is done:
+
+- **Every unit is planned and reviewed.** Each worker writes a spec before any
+  code and runs up to four review layers on the result. The gate
+  (`check-unit.sh`) rejects a unit whose spec shows a skipped plan or review.
+- **Bugs are reproduced first.** A unit of kind `bug` must show its
+  reproduction failing before the fix (`RED:`) and passing after it
+  (`GREEN:`), and its intent lists the behaviour that must not change. The
+  gate rejects a bug unit without both lines.
+- **The app is checked running** (opt-in, with `app` in the project profile).
+  The worker writes a drive script that exercises each acceptance criterion
+  against the live app, with curl or Playwright. `app-check.sh` starts the app
+  on the worktree's own port, runs the script and stops the app. The gate
+  rejects a unit whose check failed, never ran, or ran before a later code
+  change.
+- **What synthesis changes is reviewed too.** Conflict resolutions and
+  `fix(merge)` commits get a fresh reviewer, which sees only that diff
+  (`synthesis-diff.sh`) and the agreed interfaces. That review runs at most
+  two rounds, and findings still open are listed in the PR.
+- **Repeated mistakes become checks.** The final synthesis groups the review
+  findings the units fixed (`review-findings.py`) and keeps a per-project tally
+  across runs. A kind of mistake that comes back gets a proposed lint rule, type
+  or test helper. These proposals appear in the run report; nothing is added
+  to the PR.
+- **Synthesis stops early.** It reports `stuck` after two failed fix attempts
+  on the same failure, instead of grinding on.
+
 Formerly `bmad-parallel-build` (renamed in 0.6.0). If you still have the old
 plugin, uninstall `bmad-parallel-build@sip-of-cafe` and install
 `bmad-batch-build@sip-of-cafe`. You can delete old `bmad-pb-*` agent copies in
@@ -245,9 +275,17 @@ The commands the skill runs live in a project profile,
   "targeted": {"dir": "app", "test": "npx vitest run <files> --reporter=dot",
                "typecheck": "npm run typecheck"},
   "after_merge": [],
-  "database": null
+  "database": null,
+  "app": {"dir": "app", "start": "npm run dev -- --port {port}",
+          "url": "http://127.0.0.1:{port}/", "timeout": 180}
 }
 ```
+
+`app` is optional, and `detect` never fills it in. Set it for a web app or an
+API that a script can drive, and every unit is then checked in the running app.
+The `{port}` placeholder (also available as `$APP_PORT` and `$PORT`) is the
+worktree's own port, so units running in parallel never collide. The skill
+waits until `url` answers.
 
 - **First run:** `scripts/profile.py detect` drafts the profile from your
   files:
@@ -516,6 +554,21 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.13.0:** verification ideas from Lauren Tan's pstack, Stripe's Minions
+  and Kiro (see "How it keeps quality up").
+  - Check in the running app: the profile's optional `app`, `app-check.sh`,
+    and a gate that requires a pass at the unit's final code.
+  - Bug units (`Kind: bug`) must record a `RED:` and a `GREEN:` reproduction;
+    their intents list the behaviour that must not change. The gate takes the
+    new `--bug` flag.
+  - A fresh reviewer checks the code synthesis wrote itself (`synthesis-diff.sh`),
+    at most two rounds, before the PR opens. The synthesis reply has a new
+    `REVIEW:` line.
+  - Synthesis stops as `stuck` after two failed fix attempts instead of three.
+  - Final synthesis proposes lint, type or test checks for review findings
+    that recur (`review-findings.py`, `review-classes.md` per project). The
+    synthesis reply has a new `RULES:` line, and the run report has a "Checks
+    to add" section.
 - **0.12.13:** fixes from user run reports.
   - A merge that a commit-msg hook refuses prints `REJECTED <branch>`
     (exit 5) instead of a false `CONFLICT`. The profile's optional

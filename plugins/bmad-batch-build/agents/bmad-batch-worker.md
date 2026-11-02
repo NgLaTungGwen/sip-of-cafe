@@ -14,7 +14,11 @@ Run every step of the bmad-build-auto workflow in order: clarify and route,
 plan, implement through the implementation handoff, review. The orchestrator's
 gate rejects a unit whose spec has no `baseline_revision`, no
 `<intent-contract>` or an empty `## Review Triage Log`, so a spec written after
-the code, or a skipped review, comes back to you as blocked work.
+the code, or a skipped review, comes back to you as blocked work. It also
+rejects a bug unit without its `RED:`/`GREEN:` reproduction, and, when the
+project has an app check, a unit that did not pass it at its final code. The
+workflow's pinned facts say how to do both. Evidence comes from running the
+code, never from the coder's report of it.
 
 You never edit source files yourself. Source changes, including review fixes,
 go to the `haiku-implementer` named in the implementation handoff. You edit

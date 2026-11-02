@@ -21,6 +21,16 @@ The profile lives at <root>/.claude/bmad-batch-project.json:
      "database": null,
      "notes": "", "confirmed": "2026-10-26", "fingerprint": "..."}
 
+An optional "app" turns on the check in the running app (app-check.sh):
+
+    "app": {"dir": ".", "start": "npm run dev -- --port {port}",
+            "url": "http://127.0.0.1:{port}/", "timeout": 180}
+
+"start" runs the app and keeps running; {port} (also $APP_PORT and $PORT)
+is the worktree's own port, so the command must take it. "url" answers once
+the app is up. detect leaves it out: set it for a project with a web app or
+an API a unit can drive, and every unit must then pass the check at the gate.
+
 An optional "merge_message" (e.g. "chore(merge): {title}") replaces the
 "merge: {title}" message merge-units.sh gives each unit merge, for a
 repository whose commit-msg hook wants its own format.
@@ -235,6 +245,8 @@ def show(prof):
     out.append(f"targeted: {t.get('dir')}: test `{t.get('test')}`, typecheck `{t.get('typecheck')}`" if t else "targeted: none")
     out += [f"after merge: {c['dir']}: {c['cmd']}" for c in prof.get("after_merge") or []]
     out.append(f"database: {json.dumps(prof.get('database'))}")
+    a = prof.get("app")
+    out.append(f"app check: {a.get('dir')}: `{a.get('start')}` at {a.get('url')}" if a else "app check: none")
     if prof.get("notes"):
         out.append(f"notes: {prof['notes']}")
     return "\n".join(out)

@@ -115,7 +115,17 @@ vt=$(( $(nproc 2>/dev/null || echo 8) / 4 )); [ "$vt" -lt 2 ] && vt=2
 printf '\nVITEST_MAX_FORKS=%s\nVITEST_MAX_THREADS=%s\nVITEST_MIN_FORKS=1\nVITEST_MIN_THREADS=1\n' "$vt" "$vt" >> "$wt/.env"
 
 scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-heavy="$scripts/heavy.sh" bg="$scripts/bg.sh"
+heavy="$scripts/heavy.sh" bg="$scripts/bg.sh" app="$scripts/app-check.sh"
+
+# A project whose profile names an app gets each unit checked in the running
+# app (app-check.sh). Every worktree gets its own port, so parallel units
+# never start two dev servers on one.
+app_fact=""
+if profile_get "$root" app.start > /dev/null; then
+  port=$("$PROFILE_PY" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+  printf 'APP_PORT=%s\n' "$port" >> "$wt/.env"
+  app_fact="  \"Check the unit in the running app after the last review fix, before you set the final status. With the Write tool, write a drive script at $wt/_bmad-output/evidence/<stem>/drive.sh (or .mjs, .py), where <stem> is the spec's file name without .md. It exercises every acceptance criterion against \$APP_URL (curl for an API, Playwright for a page, saving screenshots in the same folder), prints what it saw for each, and exits non-zero when one fails. Run it with \`bash $bg run $wt app-<stem> \\\"bash $heavy 'bash $app $wt _bmad-output/evidence/<stem>/drive.sh'\\\"\` as a Bash call with run_in_background: true, then \`bash $bg wait $wt app-<stem>\`, again while it prints still running. The script starts the app on this worktree's own port, runs the drive script and stops the app. A failure is a finding: send the fix to a new implementation subagent and run the check again. Add \`## Verification Evidence\` to the spec, one line per acceptance criterion with what the drive script observed, and commit the evidence folder with the spec. The gate reads the result: it rejects the unit when the check failed, never ran, or ran before a later code change.\","
+fi
 
 # How the coder is launched: by its agent name, or, with --agents
 # general-purpose (a session that has not loaded the run's agents yet, such as
@@ -186,6 +196,8 @@ persistent_facts = [
   "Workflow gaps: if the spec template has no baseline_revision, set it to the output of \`git -C $wt rev-parse HEAD\` before the first change. If _bmad-output/ is gitignored, commit the spec with \`git add -f\`. Exclude _bmad-output from git pathspecs with ':(exclude)_bmad-output'; the short form ':!_bmad-output' fails with 'Unimplemented pathspec magic'.",
   "Dependencies install in the background while you plan; planning needs only the checkout. Before any command that needs node_modules (tests, typecheck, build, lint), run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, halt with its output as the blocking condition.",
   "Testing has one owner per check. The implementation subagent runs the targeted test files and the typecheck of each workspace it touched, after its first pass and after every review fix, and reports the results. You do not re-run them: if it reports one it could not get green, send that back to it. $suite_fact Synthesis builds, so skip the build unless the intent, the spec's Verification or AGENTS.md requires one; then run it once, after the implementation subagent returns, through the queue: \`bash $heavy 'cd $wt && <the project build command>'\`.",
+  "When the intent starts with \`Kind: bug\`, reproduce the bug before fixing it. The plan's first task is a test that shows the bug; the implementation subagent runs it before the fix, where it must fail, and after, where it must pass, and reports both result lines. Keep a test for each item of the intent's Unchanged behaviour list too. Record the reproduction in the spec under \`## Reproduction\`, one line each: \`RED: <command> -> <the failing line>\` and \`GREEN: <command> -> <the passing line>\`. In a project that runs no tests, reproduce it through the app check when there is one, otherwise write \`RED: traced: <file:line and why it fails>\` and \`GREEN: traced: <what the fix changes there>\`. The gate rejects a bug unit without both lines.",
+$app_fact
   "file:AGENTS.md",
 ]
 

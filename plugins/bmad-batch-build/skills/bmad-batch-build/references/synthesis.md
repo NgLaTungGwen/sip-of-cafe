@@ -26,6 +26,9 @@ the workers at the start of the run:
 Merge-script output, interface lines and the state file keep the agent's own
 reading small: it opens a spec or a file only where a check points at it.
 
+`<rules file>` is `review-classes.md` in the project's runs folder, the parent
+of `<runs>`: the kinds of mistake reviewers made units fix, across runs.
+
 ---
 
 You are the synthesis agent for a BMAD batch build.
@@ -57,7 +60,8 @@ off (setup said so): "off".
 
 PR tool: `<pr>` (from the run's setup: az, gh or none).
 
-Read `<iwt>/AGENTS.md` first.
+Read `<iwt>/AGENTS.md` first. Then record where your own work starts:
+`git -C <iwt> rev-parse HEAD` is `<start>`; write it into `<state>`.
 
 ## 1. Merge
 
@@ -155,13 +159,53 @@ When something fails, find the cause in the merged code and fix it, then commit
 the fix as `fix(merge): ...`. Don't weaken, skip or delete tests to get green.
 The pipeline's `Acceptance` stage fails by design, so ignore it.
 
-**Stop and report if you're stuck.** If the same failure survives three serious
+**Stop and report if you're stuck.** If the same failure survives two serious
 fix attempts, or a fix would mean choosing between two units' requirements, do
 not open a PR. First write `<state>`: what is merged, the repairs so far, which
 checks pass, the failing command and the last lines of its output, what you
 tried, and the open decision. Then reply with `RESULT: stuck` and the same
 facts. If the answer comes late, a fresh synthesis agent picks up from that
 file instead of re-writing this whole context.
+
+## 3b. Review your own changes
+
+The units were reviewed in their workers; what you changed was not. Conflict
+resolutions and `fix(merge)` commits go into the PR, so one fresh reviewer
+checks them before it opens. Once every check is green:
+
+```bash
+bash "<skill>/scripts/synthesis-diff.sh" "<iwt>" <start> <the "To merge now" branches>
+```
+
+It writes the diff into the worktree's git dir and prints its path.
+`SYNTH-DIFF none`
+means you changed nothing beyond clean merges: note `REVIEW: none (no
+synthesis changes)` and go on. Otherwise launch one reviewer with `Agent`
+(`subagent_type: general-purpose`, `model: opus`, foreground), with this
+prompt:
+
+```text
+Review the changes a merge agent made while combining independently built
+units into one branch. Read <the diff file> and nothing else first; open a
+source file in <iwt> only where the diff needs its context. Do not edit
+anything.
+The units and the interfaces they agreed:
+<the "Units in the run so far" list>
+Check: each conflict resolution keeps both units' intent and drops nothing;
+providers and consumers match the agreed interfaces; no test was weakened,
+skipped or deleted; no new bug (wrong condition, lost error handling, a
+duplicate that should be one).
+Reply with one line per finding, `[high|medium|low] <file>:<line> <problem>`,
+or `none`. Judge the code, not what a commit message says it does.
+```
+
+Fix every high and medium finding (`fix(merge): review: ...`), re-run what
+the fix touches, then run the script again with `<start>` set to the head the
+reviewer saw, and send only that new diff for one more review. Stop after two
+review rounds: findings still open go into the PR under `## Open review
+findings`, and into `REVIEW:`. Low findings you don't fix go there as well.
+The full verify of section 3 runs after the last fix, so the PR opens at the
+commit that was reviewed and verified.
 
 **Final `no`:** when every check is green, skip sections 4 and 5. Update
 `<state>` with what is merged and verified, then reply with `RESULT:
@@ -190,6 +234,32 @@ Once every check is green and Final is `yes`:
    `🤖 Generated with [Claude Code](https://claude.com/claude-code)`
 7. Every commit you make ends with:
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
+
+## 4b. Propose checks for repeated mistakes
+
+Only when Final is `yes`. A mistake that reviewers caught twice will be made
+again; a lint rule, a type or a test helper catches it every time, for free.
+Run
+
+```bash
+python "<skill>/scripts/review-findings.py" <every unit's spec path>
+```
+
+It prints each review finding a unit fixed: spec, severity, review layer and
+text. Group them into kinds of mistake (such as "error path untested",
+"unchecked null from the API", "fake diverges from the real adapter"). Read
+`<rules file>` if it exists. A kind qualifies when units of this run fixed it
+2 or more times, or when `<rules file>` already lists it from an earlier run.
+Append this run's kinds to `<rules file>` with the Write or Edit tool (create
+it with a `# Review findings by kind` heading), one line each:
+`- <today> <slug>: <kind> - <count> (<spec names>)`.
+
+For each kind that qualifies, propose the cheapest mechanical check the
+repository's tools already allow: an ESLint or Ruff rule, a compiler flag, a
+type that makes the bad state unrepresentable, a test helper. Give the exact
+config or code and the past findings it would have caught. Do not add it to
+the PR: it would be unreviewed code. Write the proposals into `<state>` and
+reply with them in `RULES:`.
 
 ## 5. Link the tickets
 
@@ -224,6 +294,8 @@ TICKETS: <linked #ids; whether close-on-complete is on; or none>
 MERGED: <unit titles>
 REPAIRS: <one line per fix(merge) commit, or none>
 VERIFY: <each check and its pass or fail result>
+REVIEW: <rounds, findings fixed, findings left open; or none (no synthesis changes)>
+RULES: <each proposed check: the kind of mistake, how many times, the rule; or none>
 NOTES: <anything the user must know, or none>
 SKILL ISSUES: <each time a skill script, its settings or these instructions
 got in the way and you worked around it (for example a test command that

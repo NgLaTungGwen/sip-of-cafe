@@ -931,5 +931,197 @@ class Roles(unittest.TestCase):
             self.assertEqual(mod.role({"spawnDepth": 2, "agentType": "haiku-implementer"}, coder), "haiku")
 
 
+def bash_path():
+    return os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+
+
+SPEC = """---
+status: done
+baseline_revision: 'abc'
+---
+<intent-contract>x</intent-contract>
+
+## Review Triage Log
+
+### 2026-11-02 — Review pass
+- findings:
+  - `[medium]` `patch` (blind) Error path untested — fixed: test added.
+  - `[low]` `reject` (edge) Cosmetic naming.
+  - `[high]` `patch` (intent) Null from the API not checked — fixed.
+{extra}"""
+
+
+def unit_repo(extra="", profile=None):
+    """A repository whose branch u1 holds one finished unit: a spec under
+    _bmad-output and one code commit ahead of main."""
+    root, git = git_repo({"a.txt": "a\n", ".gitignore": ".env\n"})
+    if profile:
+        os.makedirs(os.path.join(root, ".claude"), exist_ok=True)
+        with open(os.path.join(root, ".claude", "bmad-batch-project.json"), "w") as f:
+            json.dump(profile, f)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "profile"], check=True)
+    subprocess.run(git + ["checkout", "-q", "-b", "u1"], check=True)
+    os.makedirs(os.path.join(root, "_bmad-output"))
+    spec = os.path.join(root, "_bmad-output", "spec-u1.md").replace("\\", "/")
+    with open(spec, "w", encoding="utf-8", newline="\n") as f:
+        f.write(SPEC.replace("{extra}", extra))
+    with open(os.path.join(root, "b.txt"), "w") as f:
+        f.write("b\n")
+    subprocess.run(git + ["add", "-A"], check=True)
+    subprocess.run(git + ["commit", "-q", "-m", "feat: b"], check=True)
+    return root, git, spec
+
+
+def gate(*args):
+    r = subprocess.run([bash_path(), os.path.join(SCRIPTS, "check-unit.sh"), *args], capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+class BugGate(unittest.TestCase):
+    """A bug unit must show the bug failing before the fix and passing after
+    it (pstack's bug playbook, Kiro's bugfix specs)."""
+
+    def test_a_bug_unit_needs_red_and_green(self):
+        root, _, spec = unit_repo()
+        self.assertEqual(gate(root, "u1", spec, "main")[0], 0)  # a change unit needs none
+        rc, out = gate("--bug", root, "u1", spec, "main")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("no RED:", out)
+        self.assertIn("no GREEN:", out)
+
+    def test_a_reproduced_bug_is_ready(self):
+        extra = "\n## Reproduction\n- RED: npx vitest run a.test.ts -> 1 failed\n- GREEN: npx vitest run a.test.ts -> 1 passed\n"
+        root, _, spec = unit_repo(extra)
+        rc, out = gate("--bug", root, "u1", spec, "main")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out.startswith("READY"), out)
+
+
+class AppGate(unittest.TestCase):
+    """With an app in the profile, a unit must pass app-check.sh at the code
+    its branch holds: a running-app check, not a report of one."""
+
+    def setUp(self):
+        py = sys.executable.replace("\\", "/")
+        profile = {"base": "main", "app": {"dir": ".", "start": f'"{py}" -m http.server {{port}} --bind 127.0.0.1',
+                                           "url": "http://127.0.0.1:{port}/", "timeout": 60}}
+        self.root, self.git, self.spec = unit_repo(profile=profile)
+
+    def check(self, drive_body):
+        os.makedirs(os.path.join(self.root, "_bmad-output", "evidence"), exist_ok=True)
+        with open(os.path.join(self.root, "_bmad-output", "evidence", "drive.sh"), "w", newline="\n") as f:
+            f.write(drive_body)
+        subprocess.run(self.git + ["add", "-A"], check=True)
+        subprocess.run(self.git + ["commit", "-q", "-m", "evidence"], check=True)
+        cmd = f"bash '{SCRIPTS}/app-check.sh' '{self.root}' _bmad-output/evidence/drive.sh".replace("\\", "/")
+        return subprocess.run([bash_path(), os.path.join(SCRIPTS, "bg.sh"), "run", self.root, "app-spec-u1", cmd],
+                              capture_output=True, text=True, timeout=120)
+
+    def test_no_check_is_not_ready(self):
+        rc, out = gate(self.root, "u1", self.spec, "main")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("no app check (app-spec-u1)", out)
+
+    def test_a_passing_check_is_ready_until_the_code_changes(self):
+        r = self.check('code=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL"); echo "home: $code"; [ "$code" = 200 ]\n')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rc, out = gate(self.root, "u1", self.spec, "main")
+        self.assertEqual(rc, 0, out)
+        with open(os.path.join(self.root, ".git", "bmad", "app-spec-u1.log")) as f:
+            text = f.read()
+        self.assertIn("home: 200", text)
+        self.assertIn("APP up after", text)
+        with open(os.path.join(self.root, "b.txt"), "w") as f:
+            f.write("changed\n")
+        subprocess.run(self.git + ["commit", "-q", "-am", "fix: later"], check=True)
+        rc, out = gate(self.root, "u1", self.spec, "main")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("code changed after the app check", out)
+
+    def test_a_failing_drive_fails_the_gate(self):
+        r = self.check("echo 'criterion 1: wrong total'; exit 1\n")
+        self.assertEqual(r.returncode, 1)
+        rc, out = gate(self.root, "u1", self.spec, "main")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("app check failed (rc 1", out)
+
+
+class SynthesisDiff(unittest.TestCase):
+    """What synthesis wrote itself (conflict resolutions, fix(merge) commits)
+    reached the PR without any review."""
+
+    def test_only_synthesis_changes_are_in_the_diff(self):
+        root, git = git_repo({"a.txt": "one\n"})
+        for br, text, extra in (("u1", "one-u1\n", "u1.txt"), ("u2", "one-u2\n", "u2.txt")):
+            subprocess.run(git + ["checkout", "-q", "-b", br, "main"], check=True)
+            for path, body in (("a.txt", text), (extra, "unit file\n")):
+                with open(os.path.join(root, path), "w", newline="\n") as f:
+                    f.write(body)
+            subprocess.run(git + ["add", "-A"], check=True)
+            subprocess.run(git + ["commit", "-q", "-m", f"feat: {br}"], check=True)
+        subprocess.run(git + ["checkout", "-q", "main"], check=True)
+        start = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+        def run():
+            return subprocess.run([bash_path(), os.path.join(SCRIPTS, "synthesis-diff.sh"), root, start, "u1", "u2"],
+                                  capture_output=True, text=True).stdout.strip()
+
+        subprocess.run(git + ["merge", "-q", "--no-ff", "u1", "-m", "merge: u1"], check=True)
+        self.assertEqual(run(), "SYNTH-DIFF none")  # a clean merge is the units' own code
+        subprocess.run(git + ["merge", "-q", "--no-ff", "u2", "-m", "merge: u2"], capture_output=True)
+        with open(os.path.join(root, "a.txt"), "w", newline="\n") as f:
+            f.write("one-resolved\n")
+        subprocess.run(git + ["commit", "-q", "-am", "merge: u2"], check=True)
+        with open(os.path.join(root, "c.txt"), "w", newline="\n") as f:
+            f.write("repair\n")
+        subprocess.run(git + ["add", "c.txt"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "fix(merge): repair"], check=True)
+        out = run()
+        self.assertIn("1 commits, 1 resolved merges", out)
+        with open(os.path.join(root, ".git", "bmad", "synthesis.diff"), encoding="utf-8") as f:
+            diff = f.read()
+        self.assertIn("one-resolved", diff)
+        self.assertIn("fix(merge): repair", diff)
+        self.assertNotIn("u2.txt", diff)  # the unit's own commit was reviewed by its worker
+        status = subprocess.run(["git", "-C", root, "status", "--porcelain"], capture_output=True, text=True).stdout
+        self.assertEqual(status, "")
+
+
+class ReviewFindings(unittest.TestCase):
+    def test_only_fixed_findings_are_listed(self):
+        _, _, spec = unit_repo()
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "review-findings.py"), spec],
+                           capture_output=True, text=True)
+        lines = r.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 2, r.stdout)
+        self.assertEqual(lines[0].split("\t")[:3], ["spec-u1", "medium", "blind"])
+        self.assertIn("Null from the API", lines[1])
+
+
+class PinnedChecks(unittest.TestCase):
+    """The bug and app rules reach the worker through the pinned facts."""
+
+    def test_bug_rule_always_and_app_rule_only_with_an_app(self):
+        _, toml = PrepareWorktree.pinned(self, with_api=False)
+        PrepareWorktree.tomllib_ok(self, toml)
+        self.assertIn("When the intent starts with `Kind: bug`", toml)
+        self.assertNotIn("running app", toml)
+        root, git = git_repo({"package.json": "{}", ".gitignore": ".env\n.claude/worktrees/\n",
+                              ".claude/bmad-batch-project.json": json.dumps(
+                                  {"base": "main", "app": {"dir": ".", "start": "npm run dev -- --port {port}"}}),
+                              "_bmad/custom/.keep": "", ".claude/skills/.keep": ""})
+        r = subprocess.run([bash_path(), os.path.join(SCRIPTS, "prepare-worktree.sh"), root, "u1", "b1",
+                            "--no-install", "--base", "HEAD"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        wt = r.stdout.strip().splitlines()[-1]
+        with open(os.path.join(wt, "_bmad", "custom", "bmad-build-auto.toml"), encoding="utf-8") as f:
+            toml = f.read()
+        PrepareWorktree.tomllib_ok(self, toml)
+        self.assertIn("Check the unit in the running app", toml)
+        with open(os.path.join(wt, ".env")) as f:
+            self.assertRegex(f.read(), r"APP_PORT=\d+")
+
+
 if __name__ == "__main__":
     unittest.main()

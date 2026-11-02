@@ -9,6 +9,8 @@ experimental:
 
 You are the synthesis agent of a BMAD batch build. Your dispatch prompt holds the
 integration worktree, the units, the tickets and the steps; follow it exactly.
+What you change yourself (conflict resolutions, `fix(merge)` commits) gets a
+fresh review before the PR opens; never skip it.
 
 Keep turns few and context small:
 

@@ -107,18 +107,26 @@ INTERFACES line, and the note that this unit builds on that code as it is.>
 Don't trust the reply text alone. Check every unit in **one** Bash call:
 
 ```bash
-for u in "<wt1>|<branch1>|<spec1>" "<wt2>|<branch2>|<spec2>"; do
-  IFS='|' read -r wt br spec <<< "$u"
-  printf '%s: ' "$br"; bash "<skill>/scripts/check-unit.sh" "$wt" "$br" "$spec"
+for u in "<wt1>|<branch1>|<spec1>|" "<wt2>|<branch2>|<spec2>|--bug"; do
+  IFS='|' read -r wt br spec kind <<< "$u"
+  printf '%s: ' "$br"; bash "<skill>/scripts/check-unit.sh" $kind "$wt" "$br" "$spec"
 done
 ```
+
+The fourth field is `--bug` for a unit whose intent starts with `Kind: bug`,
+and empty otherwise.
 
 The script prints `READY <commits>` or `NOT READY: <reasons>` for each unit.
 It checks the spec status (`done`, `built` or `in-review`), and the workflow's
 own traces in the spec: `baseline_revision`, `<intent-contract>` and at least
 one `### <date> — Review pass` entry under `## Review Triage Log`. It also
 checks for a clean tree, the right branch, and at least one commit ahead of
-`origin/<base>` (or of the base passed as a fourth argument). In a later wave,
+`origin/<base>` (or of the base passed as a fourth argument). With `--bug`
+it requires the spec's `## Reproduction` to hold a `RED:` and a `GREEN:`
+line: the bug reproduced before the fix and gone after it. When the project
+profile has an `app`, it requires the unit's check in the running app
+(`app-<spec name>`, `scripts/app-check.sh`) to have passed at the code the
+branch holds now. In a later wave,
 pass the wave's base revision as the fourth argument. Synthesis merges
 the branch ref, so a worker that moved to another branch leaves nothing to
 merge.
@@ -126,7 +134,7 @@ merge.
 | Result | Meaning |
 |---|---|
 | `READY` | Ready to merge. |
-| `NOT READY` | Record the unit, the reasons and the spec path. A missing workflow trace means the worker skipped plan or review: its code is unreviewed. SKILL.md section 6 decides what happens next. |
+| `NOT READY` | Record the unit, the reasons and the spec path. A missing workflow trace means the worker skipped plan or review: its code is unreviewed. A missing reproduction or app check means its code is unverified. SKILL.md section 6 decides what happens next. |
 
 ## Lane mode
 
@@ -166,6 +174,6 @@ parallel unit:
   earlier spec only when it needs more, instead of re-exploring that code.
 - Gate each unit as soon as its worker returns, with its base as the fourth
   argument:
-  `bash "<skill>/scripts/check-unit.sh" "<wt>" "<branch>" "<spec>" "<base>"`.
+  `bash "<skill>/scripts/check-unit.sh" [--bug] "<wt>" "<branch>" "<spec>" "<base>"`.
   A `NOT READY` unit stops the lane, because later units build on it. SKILL.md
   section 6 decides what happens next.

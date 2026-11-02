@@ -133,7 +133,11 @@ commands in the project profile, `<root>/.claude/bmad-batch-project.json`
   where they differ (they win: "use bun, never npm" changes every command)
   and fill in what the draft left empty. Every command runs from its `dir`
   without prompting; `targeted.test` keeps the `<files>` placeholder; leave
-  `database.per_worktree` false. Show `profile.py show "<root>"` in the
+  `database.per_worktree` false. When the project is a web app or an API
+  that a script can drive, and the docs say how to start it, set `app`
+  (`{"dir", "start", "url"}`, with `{port}` where the start command takes its
+  port; see the docstring of `profile.py`): every unit is then checked in the
+  running app, and the gate holds it to that. Show `profile.py show "<root>"` in the
   approval table under "Project commands (first run in this repository)",
   and after approval run `python "<skill>/scripts/profile.py" confirm "<root>"`.
   A correction from the user goes in with `profile.py set` before confirming.
@@ -281,6 +285,12 @@ For every unit, write:
 - a self-contained intent: the goal, the scope, what's out of scope, acceptance
   criteria in Given/When/Then, and the exact excerpt of the source material it
   came from
+- its kind: `bug` when it fixes behaviour that is wrong now, otherwise
+  `change`. A bug unit's intent starts with the line `Kind: bug`, says what
+  happens now and what should happen, and ends with an **Unchanged
+  behaviour** list: what nearby must keep working as it does. The worker
+  reproduces the bug before fixing it, and the gate (`--bug`) rejects the unit
+  without that reproduction.
 - its ticket
 
 The worker sees only its intent.
@@ -375,7 +385,7 @@ acceptance criteria in brief. Above the table, give the story or stories (`#id`
 reused, or `new User Story: <title>`). List the open ambiguities underneath.
 Approving the split also approves creating the new tickets.
 
-Add a size column and a **depends on** column (unit ids and the reason, or
+Mark bug units with `(bug)` after their title. Add a size column and a **depends on** column (unit ids and the reason, or
 `-`) to the table. Under it, paste the **Mode** line that `plan-waves.py`
 printed: the chosen mode, every estimate, the wave order and the
 dependencies, for example
@@ -556,7 +566,9 @@ Apply the gate in `references/worker.md` to every unit, in one Bash call with
   **Stop**, "End the run here; the branches stay as they are". When a unit failed only
   on workflow traces (no baseline, no intent contract, no review pass), its
   code exists but is unreviewed; also offer **Merge unreviewed**, "Keep its
-  code; the PR marks it unreviewed".
+  code; the PR marks it unreviewed". When it failed only on the reproduction
+  or the app check, offer **Merge unverified**, "Keep its code; the PR marks
+  it unverified", the same way.
   To re-dispatch, clear the unit first, because `prepare-worktree.sh` refuses an
   existing path and branch:
   `bash "<skill>/scripts/remove-worktree.sh" "<root>" "<name>" "<branch>"`, then
@@ -599,8 +611,9 @@ The units left out are kept across waves too.
   worktree, and `<installed>` is that unit's branch. Otherwise it is `no`, and
   `<installed>` is the `<ibranch>` revision `<iwt>`'s install came from: the
   wave's base, or `none` in a run that only had lanes.
-- `<state>` is `<runs>/<slug>-synthesis.md`, and
-  `<tickets json>` is `<runs>/<slug>-tickets.json`.
+- `<state>` is `<runs>/<slug>-synthesis.md`,
+  `<tickets json>` is `<runs>/<slug>-tickets.json`, and `<rules file>` is
+  `review-classes.md` in the parent folder of `<runs>`.
 
 Then:
 
@@ -651,8 +664,12 @@ Then end with a short summary:
   them when the PR completes
 - the units that were merged, and any that were left out. A left-out unit's
   Task stays open and isn't linked.
-- the repairs synthesis made
+- the repairs synthesis made, and its `REVIEW:` line: what the fresh review
+  of those repairs found, fixed and left open
 - the verification results
+- **Checks to add:** each `RULES:` proposal from synthesis, with the past
+  findings it would have caught. Offer to add the ones the user picks, as a
+  separate small change after this PR.
 - anything the user should look at first
 - the `recorded` line from the call above: cost, time, and whether the 1-hour
   cache took effect and any agent ran out of turns
