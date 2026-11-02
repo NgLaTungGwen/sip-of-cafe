@@ -7,8 +7,9 @@
 # release in a temporary worktree on top of origin/main, squashes the draft in
 # (its own version bump, if any, gives way to origin/main's), sets the next
 # patch version, runs the self-test against every installed project, pushes
-# main, installs into every project in install/installs.json, and notes it in
-# enhance-log.md. Stops before the push on any failure.
+# main, installs it (install-skill.py: with the plugin installed at user scope
+# it updates the plugin; otherwise it copies into every project in
+# install/installs.json), and notes it in enhance-log.md. Stops before the push on any failure.
 set -uo pipefail
 branch=${1:?usage: ship-enhancement.sh <enhance branch>}
 store="${BMAD_RUNS_DIR:-$HOME/.claude/bmad-batch-runs}"

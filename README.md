@@ -545,15 +545,25 @@ Everyone else skips it.
    - re-runs the self-test;
    - pushes;
    - installs the new version with `install-skill.py`.
-3. **Install:** `install-skill.py` installs into every project in
-   `installs.json`. It skips a project where a session ran the skill in the
-   last 15 minutes; `--force` overrides that. Projects marked `"legacy": true`
-   get no profile.
+3. **Install:** with the plugin installed at user scope, `install-skill.py`
+   runs `claude plugin marketplace update` and `claude plugin update`, and
+   copies nothing. The projects in `installs.json` are then only used by the
+   self-test's Vitest run and for the `"legacy": true` flag, which means the
+   project gets no profile. It warns about a project that still has an old
+   copy in `.claude/skills/`, because that copy loads alongside the plugin.
+   Without the plugin, it copies the skill into every listed project, skipping
+   one where a session ran the skill in the last 15 minutes (`--force`
+   overrides that); `--copy` forces copying even when the plugin is
+   installed. Start a new session after a ship to load the new version.
 
 The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.13.1:** shipping with the plugin installed updates the plugin
+  (`claude plugin update`) and no longer copies the skill back into the
+  projects in `installs.json`. Copies loaded alongside the plugin. A project
+  still holding an old copy gets a warning.
 - **0.13.0:** verification ideas from Lauren Tan's pstack, Stripe's Minions
   and Kiro (see "How it keeps quality up").
   - Check in the running app: the profile's optional `app`, `app-check.sh`,

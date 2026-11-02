@@ -1123,5 +1123,37 @@ class PinnedChecks(unittest.TestCase):
             self.assertRegex(f.read(), r"APP_PORT=\d+")
 
 
+class InstallWithPlugin(unittest.TestCase):
+    """With the plugin installed, a ship copied the skill back into every
+    project in installs.json, where the copy loaded beside the plugin."""
+
+    def run_install(self, plugins):
+        home, store, proj = (tempfile.mkdtemp() for _ in range(3))
+        os.makedirs(os.path.join(home, ".claude", "plugins"))
+        with open(os.path.join(home, ".claude", "plugins", "installed_plugins.json"), "w") as f:
+            json.dump({"version": 2, "plugins": plugins}, f)
+        os.makedirs(os.path.join(store, "install"))
+        with open(os.path.join(store, "install", "installs.json"), "w") as f:
+            json.dump({"targets": [{"root": proj.replace("\\", "/")}]}, f)
+        os.makedirs(os.path.join(proj, ".claude", "skills", "bmad-batch-build"))  # an old copy
+        env = dict(os.environ, HOME=home, USERPROFILE=home, BMAD_RUNS_DIR=store)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "install-skill.py"), "--dry-run"],
+                           capture_output=True, text=True, env=env)
+        return r.returncode, r.stdout
+
+    def test_the_plugin_is_updated_and_nothing_is_copied(self):
+        rc, out = self.run_install({"bmad-batch-build@sip-of-cafe": [{"scope": "user"}]})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("would run claude plugin marketplace update sip-of-cafe", out)
+        self.assertIn("would run claude plugin update bmad-batch-build@sip-of-cafe --scope user", out)
+        self.assertIn("WARNING, an old copy", out)
+        self.assertNotIn("would install", out)
+
+    def test_without_the_plugin_it_copies_as_before(self):
+        rc, out = self.run_install({"figma@x": [{"scope": "user"}]})
+        self.assertIn("would install into", out)
+        self.assertNotIn("plugin:", out)
+
+
 if __name__ == "__main__":
     unittest.main()

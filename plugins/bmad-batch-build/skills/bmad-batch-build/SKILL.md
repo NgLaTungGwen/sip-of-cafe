@@ -706,7 +706,10 @@ the user in a few lines:
 When the user says "ship it", run that command and report its output. Run
 the source clone's copy, not `<skill>`'s: it is the version being shipped.
 It rebases the branch onto the latest source, re-runs the self-test, pushes,
-and installs into every project in `~/.claude/bmad-batch-runs/install/installs.json`.
+and installs it: on a machine with the plugin installed it updates the
+plugin (`claude plugin update`), otherwise it copies the skill into every
+project in `~/.claude/bmad-batch-runs/install/installs.json`. Tell the user
+to start a new session to load it.
 Unshipped drafts are the `enhance/*` branches in
 `~/.claude/bmad-batch-runs/src/sip-of-cafe`; the decisions are in
 `~/.claude/bmad-batch-runs/enhance-log.md`.

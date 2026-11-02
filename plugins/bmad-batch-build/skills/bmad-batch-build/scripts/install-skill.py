@@ -2,7 +2,15 @@
 ~/.claude/bmad-batch-runs/install/installs.json (BMAD_RUNS_DIR overrides the
 folder).
 
-usage: python install-skill.py [--dry-run] [--force]
+usage: python install-skill.py [--dry-run] [--force] [--copy]
+
+When this machine has the plugin installed at user scope
+(bmad-batch-build@<marketplace> in ~/.claude/plugins/installed_plugins.json),
+every project already gets the skill from the plugin, so nothing is copied:
+the script updates the marketplace and the plugin with `claude plugin`
+instead, and only warns about a project that still holds a copy, which would
+load beside the plugin's. The targets then serve the self-test and the
+"legacy" flag only. --copy copies anyway.
 
 installs.json lists the projects on this machine that use the skill:
 
@@ -145,11 +153,53 @@ def install_dashboard(dry):
     return f"dashboard: installed into {dest} (/bmad-batch-dashboard)"
 
 
+def user_plugin():
+    """The user-scope plugin id (bmad-batch-build@<marketplace>), or None."""
+    path = os.path.join(os.path.expanduser("~"), ".claude", "plugins", "installed_plugins.json")
+    try:
+        plugins = json.load(open(path, encoding="utf-8")).get("plugins", {})
+    except (OSError, ValueError):
+        return None
+    return next((k for k, v in plugins.items() if k.startswith("bmad-batch-build@")
+                 and any(i.get("scope") == "user" for i in v or [])), None)
+
+
+def update_plugin(plugin, dry):
+    """Pull the pushed release into the installed plugin."""
+    market = plugin.split("@", 1)[1]
+    cmds = [["claude", "plugin", "marketplace", "update", market],
+            ["claude", "plugin", "update", plugin, "--scope", "user"]]
+    if dry:
+        return [f"plugin: would run {' '.join(c)}" for c in cmds], False
+    exe = shutil.which("claude")
+    if not exe:
+        return [f"plugin: FAILED, no claude command; run: {' / '.join(' '.join(c) for c in cmds)}"], True
+    out = []
+    for c in cmds:
+        r = subprocess.run([exe] + c[1:], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        last = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
+        if r.returncode != 0:
+            return out + [f"plugin: FAILED {' '.join(c)}: {last[0]}"], True
+        out.append(f"plugin: {last[0]}")
+    return out, False
+
+
 def main(args):
-    line = install_dashboard("--dry-run" in args)
+    dry = "--dry-run" in args
+    path = os.path.join(store(), "install", "installs.json")
+    plugin = None if "--copy" in args else user_plugin()
+    if plugin:
+        lines, failed = update_plugin(plugin, dry)
+        print("\n".join(lines))
+        targets = json.load(open(path, encoding="utf-8")).get("targets", []) if os.path.exists(path) else []
+        for t in targets:
+            copy = os.path.join(t["root"], ".claude", "skills", "bmad-batch-build")
+            if os.path.isdir(copy):
+                print(f"{t['root']}: WARNING, an old copy at {copy} loads beside the plugin; delete it")
+        return 1 if failed else 0
+    line = install_dashboard(dry)
     if line:
         print(line)
-    path = os.path.join(store(), "install", "installs.json")
     if not os.path.exists(path):
         print(f"install-skill: no {path}; create it (see this script's docstring) to install automatically")
         return 1
