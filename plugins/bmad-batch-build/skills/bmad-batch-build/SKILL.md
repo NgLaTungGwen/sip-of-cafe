@@ -411,6 +411,14 @@ adjust and cancel. Building directly means:
   `origin/<base>` (never from the local `<base>`, which may be stale);
 - build the units in this session, in dependency order, with `bmad-build`,
   passing the units' intents as one work list;
+- start every subagent prompt for this work (implementation, review) with
+  the shell rules this skill's own agents carry, since a general-purpose
+  agent has none of them: write and change files with the Write or Edit
+  tool, never through a heredoc in Bash (`cat > f <<'EOF'`,
+  `python - <<'EOF'`), which breaks with "unexpected EOF while looking for
+  matching"; never start a command with `sleep N`, which the harness
+  blocks, but run anything long with `bash "<skill>/scripts/bg.sh" run` and
+  `wait`;
 - open one PR as `<skill>/references/synthesis.md` section 4 describes, link
   the tickets as its section 5 does unless `TICKETS off`, and report as in
   section 8.
