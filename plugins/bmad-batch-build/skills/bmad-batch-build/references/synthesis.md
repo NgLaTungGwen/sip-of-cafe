@@ -29,6 +29,10 @@ reading small: it opens a spec or a file only where a check points at it.
 `<rules file>` is `review-classes.md` in the project's runs folder, the parent
 of `<runs>`: the kinds of mistake reviewers made units fix, across runs.
 
+`<ci ignore>` is the profile's `ci.ignore` joined with commas (`Acceptance`
+for hive-factory, which has no profile), or empty. `<ci timeout>` is its
+`ci.timeout` in minutes, 60 by default.
+
 ---
 
 You are the synthesis agent for a BMAD batch build.
@@ -157,7 +161,8 @@ Tests alone are not enough. In this repo vitest can pass while typecheck fails.
 
 When something fails, find the cause in the merged code and fix it, then commit
 the fix as `fix(merge): ...`. Don't weaken, skip or delete tests to get green.
-The pipeline's `Acceptance` stage fails by design, so ignore it.
+Checks that fail by design in this project, `<ci ignore>`, are ignored here and on
+the server (hive-factory's pipeline `Acceptance` stage, for example).
 
 **Stop and report if you're stuck.** If the same failure survives two serious
 fix attempts, or a fix would mean choosing between two units' requirements, do
@@ -283,6 +288,42 @@ out, so GitHub closes them when the PR merges, otherwise `Refs #n`. GitHub
 closes issues only on merges into the default branch; for a PR into another
 branch the script says close-on-complete is off.
 
+## 5b. Watch the PR's pipelines
+
+Only when a PR was opened. The PR's validation pipelines run on the server
+now; a red one would otherwise wait for the user to notice. One Bash call
+each:
+
+```bash
+python "<skill>/scripts/ci-status.py" pr <pr id> --root "<iwt>" --wait 240 [--ignore "<ci ignore>"]
+```
+
+Call it again while it prints `CI pending`, for at most `<ci timeout>`
+minutes in all. It prints one `CHECK` line per pipeline, and for each
+failure a `LOG` file with the error lines and the end of the failed step.
+
+- `CI green` or `CI none`: done.
+- `CI approval`: a pipeline waits for a person to approve it. Stop watching
+  and say which one in `CI:`.
+- Still `CI pending` at the time limit: stop and say so in `CI:`.
+- `CI red`: read the failing part of each `LOG` file and decide:
+  - **Not the code** (agent pool, quota, network, credentials, an expired
+    build, a test that passes here and is known to flake): re-queue it once,
+    `az repos pr policy queue --id <pr id> --evaluation-id <id>` (the id from
+    `az repos pr policy list --id <pr id>`) or `gh run rerun <run id>
+    --failed`, and watch again.
+  - **The code or the pipeline definition:** reproduce it in `<iwt>` (the
+    failing command or test file), fix it, commit `fix(ci): ...`, and have
+    the fix reviewed as in section 3b, with `<start>` set to the head the PR
+    had. Re-run the check that failed, `git push`, and watch again.
+
+  At most two fix rounds. If it is still red, stop: write the failure and
+  what you tried to `<state>`, and say so in `CI:` and `NOTES:`.
+
+Never merge or complete the PR, start a pipeline or a deploy, or approve
+one: that is the user's. The plugin's guard denies those commands; when it
+denies one, report what you needed instead of working around it.
+
 ## 6. Reply
 
 Reply with exactly these lines and nothing else:
@@ -296,6 +337,7 @@ REPAIRS: <one line per fix(merge) commit, or none>
 VERIFY: <each check and its pass or fail result>
 REVIEW: <rounds, findings fixed, findings left open; or none (no synthesis changes)>
 RULES: <each proposed check: the kind of mistake, how many times, the rule; or none>
+CI: <green | red after <n> fix rounds: <check>, <cause> | pending after <n> min | approval: <pipeline> | none (no PR or no pipelines)>
 NOTES: <anything the user must know, or none>
 SKILL ISSUES: <each time a skill script, its settings or these instructions
 got in the way and you worked around it (for example a test command that

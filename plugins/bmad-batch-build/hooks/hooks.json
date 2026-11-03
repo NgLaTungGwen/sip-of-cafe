@@ -1,0 +1,18 @@
+{
+  "description": "bmad-batch-build guard: blocks destructive actions by the batch build's own agents (main checkout changes, force pushes, PR merges, deploys, infrastructure changes). Other sessions are left alone.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/skills/bmad-batch-build/scripts/guard.py"],
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

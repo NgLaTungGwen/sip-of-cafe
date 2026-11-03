@@ -130,6 +130,27 @@ from running the code, not on an agent saying it is done:
   to the PR.
 - **Synthesis stops early.** It reports `stuck` after two failed fix attempts
   on the same failure, instead of grinding on.
+- **The PR's pipelines are watched.** After opening the PR, synthesis follows
+  its validation pipelines with `ci-status.py` (Azure DevOps build policies or
+  GitHub checks). When one fails, it reads the failed step's log. If the
+  failure isn't in the code (agent pool, quota, flaky test), it re-queues the
+  pipeline once. If it is, synthesis fixes it, has the fix reviewed and
+  pushes, for at most two rounds.
+- **Deploys are checked after the merge.** When you say the PR is merged,
+  `ci-status.py deploy` finds the pipelines that ran on the target branch for
+  its merge commit. A failed deploy shows you its error lines and offers a
+  follow-up fix PR. Re-running the deploy stays with you.
+- **A guard blocks destructive actions.** The plugin's hook
+  (`hooks/hooks.json` running `guard.py`) denies these to the run's agents:
+  - changing the main checkout;
+  - force pushes, and pushes to a protected branch;
+  - merging or completing a PR;
+  - starting or approving pipelines and deploys;
+  - infrastructure changes such as terraform, pulumi, kubectl and az deletes;
+  - dropping a database that isn't a test database.
+
+  The agent reports the denial instead of working around it. Your own
+  sessions aren't affected.
 
 Formerly `bmad-parallel-build` (renamed in 0.6.0). If you still have the old
 plugin, uninstall `bmad-parallel-build@sip-of-cafe` and install
@@ -277,9 +298,14 @@ The commands the skill runs live in a project profile,
   "after_merge": [],
   "database": null,
   "app": {"dir": "app", "start": "npm run dev -- --port {port}",
-          "url": "http://127.0.0.1:{port}/", "timeout": 180}
+          "url": "http://127.0.0.1:{port}/", "timeout": 180},
+  "ci": {"ignore": ["Acceptance"], "timeout": 60}
 }
 ```
+
+`ci` is optional. `ignore` names pipelines, stages, jobs or tasks that fail by
+design. `timeout` is how many minutes synthesis waits for the PR's pipelines
+(60 by default).
 
 `app` is optional, and `detect` never fills it in. Set it for a web app or an
 API that a script can drive, and every unit is then checked in the running app.
@@ -494,7 +520,9 @@ Any other command goes through your normal permission rules.
 
 ### Requirements
 
-- Git, bash (Git Bash on Windows), Python 3 and `uv`.
+- Git, bash (Git Bash on Windows), Python 3 and `uv`. The guard hook runs
+  `python` directly, so `python` must be on PATH. On a system that only has
+  `python3`, link it as `python`.
 - BMAD: the first run installs `bmad-method` 6.12.0 into the project if it
   isn't there. An existing install is left alone. Set `BMAD_VERSION` to pin
   another release.
@@ -560,6 +588,18 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.14.0:** safety guard and server pipelines.
+  - Plugin hook `guard.py` blocks destructive actions by the run's agents
+    (see "How it keeps quality up"). It also reads commands run through
+    PowerShell, and was tested live in Claude Code.
+  - `ci-status.py` reads the PR's validation pipelines and, after the merge,
+    the deploy pipelines (Azure DevOps or GitHub), with the failed step's log.
+  - Synthesis watches the PR's pipelines and fixes failures, re-queuing
+    infrastructure failures once and fixing code failures in at most two
+    rounds. The synthesis reply has a new `CI:` line.
+  - New section 9: check the deploys after the merge, and open a follow-up
+    fix PR for a failed one.
+  - The profile has an optional `ci` key (`ignore`, `timeout`).
 - **0.13.1:** shipping with the plugin installed updates the plugin
   (`claude plugin update`) and no longer copies the skill back into the
   projects in `installs.json`. Copies loaded alongside the plugin. A project

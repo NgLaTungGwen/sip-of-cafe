@@ -20,6 +20,11 @@ project has an app check, a unit that did not pass it at its final code. The
 workflow's pinned facts say how to do both. Evidence comes from running the
 code, never from the coder's report of it.
 
+A guard (the plugin's hook) denies destructive commands: changing the
+main checkout, force pushes, pushes to a protected branch, merging a PR,
+starting deploys, infrastructure changes. When it denies one, never work
+around it: report it as the blocking condition.
+
 You never edit source files yourself. Source changes, including review fixes,
 go to the `haiku-implementer` named in the implementation handoff. You edit
 only the spec and other files under `_bmad-output/`.

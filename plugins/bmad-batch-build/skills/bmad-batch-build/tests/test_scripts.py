@@ -1155,5 +1155,191 @@ class InstallWithPlugin(unittest.TestCase):
         self.assertNotIn("plugin:", out)
 
 
+class Guard(unittest.TestCase):
+    """The run's agents had only instructions between them and a force push,
+    a PR merge, a deploy or an edit of the main checkout."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root, git = git_repo({"a.txt": "a\n"})
+        cls.wt = os.path.join(cls.root, ".claude", "worktrees", "run-1").replace("\\", "/")
+        subprocess.run(git + ["worktree", "add", "-q", "-b", "feat/run-1", cls.wt], check=True)
+        os.makedirs(os.path.join(cls.wt, "_bmad", "custom"))
+        open(os.path.join(cls.wt, "_bmad", "custom", "bmad-build-auto.toml"), "w").close()
+
+    def hook(self, tool, inp, agent="bmad-batch-build:bmad-batch-worker", cwd=None, agent_id="a1"):
+        event = {"tool_name": tool, "tool_input": inp, "cwd": cwd or self.root, "agent_type": agent, "agent_id": agent_id}
+        if agent is None:
+            event.pop("agent_type")
+        if agent_id is None:
+            event.pop("agent_id")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "guard.py")], input=json.dumps(event),
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)["hookSpecificOutput"]["permissionDecisionReason"] if r.stdout.strip() else None
+
+    def bash(self, cmd, **kw):
+        return self.hook("Bash", {"command": cmd}, **kw)
+
+    def test_destructive_commands_are_denied(self):
+        for cmd in [
+            f"git -C {self.root} checkout -b x",
+            f"cd {self.root} && git reset --hard HEAD~1",
+            "git commit -am wip",                       # cwd is the main checkout
+            f"cd {self.wt} && git push --force origin HEAD",
+            f"cd {self.wt} && git push origin HEAD:main",
+            f"cd {self.wt} && git push origin +feat/run-1",
+            f"cd {self.wt} && git push origin :feat/old",
+            f"cd {self.wt} && git commit --no-verify -m x",
+            "gh pr merge 12 --squash",
+            "az repos pr update --id 5 --status completed",
+            "az repos pr update --id 5 --auto-complete true",
+            "az pipelines run --name 'BE Deployment' --branch main",
+            "gh workflow run deploy.yml",
+            "az devops invoke --area pipelines --resource approvals --http-method PATCH --in-file a.json",
+            "gh api -X POST repos/o/r/actions/runs/1/pending_deployments",
+            "terraform apply -auto-approve",
+            "pulumi up --yes --stack qa",
+            "kubectl delete pod x",
+            "az group delete -n rg --yes",
+            "psql -c 'DROP DATABASE hive_pb'",
+            "rm -rf /",
+            "rm -rf ~/projects",
+            f"rm -rf {self.root}/src",
+        ]:
+            self.assertIsNotNone(self.bash(cmd), cmd)
+
+    def test_the_work_of_a_unit_is_allowed(self):
+        for cmd in [
+            f"cd {self.wt} && git add -A && git commit -m 'feat: x'",
+            f"git -C {self.wt} merge --no-ff feat/run-1-2 -m 'merge: two'",
+            f"cd {self.wt} && git push -u origin HEAD",
+            f"git -C {self.root} fetch origin main --quiet",
+            f"git -C {self.root} status --porcelain",
+            "az repos pr create --title x --source-branch feat/run-1",
+            "az repos pr policy queue --id 5 --evaluation-id abc",
+            "az repos pr policy list --id 5",
+            "az pipelines runs list --branch refs/heads/main",
+            "az devops invoke --area build --resource timeline --route-parameters buildId=1 --http-method GET",
+            "gh run rerun 123 --failed",
+            "gh pr checks 12 --json name,state",
+            f"cd {self.wt} && rm -rf node_modules dist",
+            "psql -c 'DROP DATABASE IF EXISTS hive_pb_run_1_test'",
+        ]:
+            self.assertIsNone(self.bash(cmd), cmd)
+
+    def test_files_only_in_the_worktree(self):
+        self.assertIsNotNone(self.hook("Write", {"file_path": os.path.join(self.root, "src", "x.ts")}))
+        self.assertIsNotNone(self.hook("Edit", {"file_path": os.path.join(self.root, "AGENTS.md")}))
+        self.assertIsNone(self.hook("Write", {"file_path": os.path.join(self.wt, "src", "x.ts")}))
+        self.assertIsNone(self.hook("Write", {"file_path": os.path.join(tempfile.gettempdir(), "state.md")}))
+
+    def test_other_sessions_are_left_alone(self):
+        self.assertIsNone(self.bash("git push --force origin HEAD:main", agent=None, agent_id=None))
+        self.assertIsNone(self.bash("gh pr merge 12", agent="Explore"))
+        # A worker's reviewer (general-purpose) working inside a batch worktree is guarded.
+        self.assertIsNotNone(self.bash("gh pr merge 12", agent="general-purpose", cwd=self.wt))
+
+    def test_powershell_calls_are_read_like_bash(self):
+        cmd = "bash -c 'cd " + self.wt + " && git push --force origin HEAD'"
+        self.assertIsNotNone(self.hook("PowerShell", {"command": cmd}))
+        self.assertIsNone(self.hook("PowerShell", {"command": "bash -c 'cd " + self.wt + " && git status'"}))
+
+    def test_the_enhancer_never_pushes(self):
+        self.assertIsNotNone(self.bash("git push origin enhance/x", agent="bmad-batch-build:bmad-batch-enhancer"))
+        self.assertIsNone(self.bash("git push origin enhance/x", agent="bmad-batch-build:bmad-batch-synthesis"))
+
+
+class CiStatus(unittest.TestCase):
+    """After the PR opened, nothing watched its validation or the deploys:
+    a red pipeline waited for the user to notice."""
+
+    def setUp(self):
+        self.ci = load("ci_status", "ci-status.py")
+        self.root, git = git_repo({"a.txt": "a\n"})
+        self.merge = subprocess.run(["git", "-C", self.root, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        subprocess.run(git + ["remote", "add", "origin", "https://org@dev.azure.com/org/Proj/_git/Repo"], check=True)
+
+    def fake(self, replies):
+        def cli(*args, root):
+            for key, out in replies.items():
+                if " ".join(args).startswith(key):
+                    return json.dumps(out) if not isinstance(out, str) else out
+            raise AssertionError("unexpected call: " + " ".join(args))
+        self.ci.cli = cli
+
+    def run_main(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.ci.main([*args, "--root", self.root])
+        return rc, out.getvalue()
+
+    def timeline(self, stage, result="failed"):
+        return {"records": [
+            {"id": "s", "type": "Stage", "name": stage, "result": result},
+            {"id": "t", "parentId": "s", "type": "Task", "name": "Run tests", "result": result, "log": {"id": 7},
+             "issues": [{"message": "Bash exited with code '1'."}]}]}
+
+    def policy(self, status, build=11):
+        return [{"status": status, "evaluationId": "e1", "configuration": {"type": {"displayName": "Build"},
+                 "settings": {"displayName": "PR Validation"}}, "context": {"buildId": build}},
+                {"status": "approved", "configuration": {"type": {"displayName": "Minimum number of reviewers"}}}]
+
+    def test_a_red_pr_check_comes_with_its_log(self):
+        self.fake({"az repos pr policy list": self.policy("rejected"),
+                   "az devops invoke --org https://dev.azure.com/org --area build --resource timeline": self.timeline("Unit tests"),
+                   "az devops invoke --org https://dev.azure.com/org --area build --resource logs":
+                       {"value": ["step 1", "##[error]expected 2, got 3", "done"]}})
+        rc, out = self.run_main("pr", "5")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("CI red PR 5: 1 fail", out)
+        log = out.split("LOG PR Validation: ")[1].strip()
+        with open(log, encoding="utf-8") as f:
+            self.assertIn("##[error]expected 2, got 3", f.read())
+        self.assertTrue(log.replace("\\", "/").startswith(self.root + "/.git"), log)
+
+    def test_a_failure_under_an_ignored_stage_passes(self):
+        self.fake({"az repos pr policy list": self.policy("rejected"),
+                   "az devops invoke --org https://dev.azure.com/org --area build --resource timeline": self.timeline("Acceptance")})
+        rc, out = self.run_main("pr", "5", "--ignore", "Acceptance")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("CI green", out)
+
+    def test_pending_and_approval(self):
+        self.fake({"az repos pr policy list": self.policy("running")})
+        self.assertEqual(self.run_main("pr", "5")[0], 2)
+        self.fake({"az repos pr show": {"status": "completed", "lastMergeCommit": {"commitId": self.merge},
+                                        "targetRefName": "refs/heads/main"},
+                   "az pipelines runs list": [
+                       {"id": 3, "definition": {"name": "BE Deployment"}, "status": "inProgress", "reason": "manual",
+                        "sourceVersion": self.merge},
+                       {"id": 2, "definition": {"name": "PR Validation"}, "status": "completed", "result": "failed",
+                        "reason": "pullRequest", "sourceVersion": self.merge}],
+                   "az devops invoke --org https://dev.azure.com/org --area build --resource timeline":
+                       {"records": [{"id": "c", "type": "Checkpoint.Approval", "state": "inProgress"}]}})
+        rc, out = self.run_main("deploy", "5")
+        self.assertEqual(rc, 4, out)
+        self.assertIn("CHECK approval BE Deployment", out)
+        self.assertNotIn("PR Validation", out)  # PR runs are not deploys
+
+    def test_deploys_wait_for_the_merge(self):
+        self.fake({"az repos pr show": {"status": "active"}})
+        rc, out = self.run_main("deploy", "5")
+        self.assertEqual(rc, 0)
+        self.assertIn("CI none", out)
+        self.assertIn("not merged yet", out)
+
+    def test_github_checks(self):
+        subprocess.run(["git", "-C", self.root, "remote", "set-url", "origin", "https://github.com/o/r.git"], check=True)
+        self.fake({"gh pr checks": [{"name": "test", "workflow": "CI", "state": "FAILURE", "bucket": "fail",
+                                     "link": "https://github.com/o/r/actions/runs/42/job/7"},
+                                    {"name": "lint", "workflow": "CI", "state": "SUCCESS", "bucket": "pass", "link": ""}],
+                   "gh run view 42 --log-failed": "test\tError: expected true\n"})
+        rc, out = self.run_main("pr", "9")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("CHECK fail CI / test", out)
+        self.assertIn("LOG CI / test:", out)
+
+
 if __name__ == "__main__":
     unittest.main()

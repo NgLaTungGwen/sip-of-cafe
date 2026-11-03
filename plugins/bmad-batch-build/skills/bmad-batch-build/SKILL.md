@@ -622,6 +622,8 @@ The units left out are kept across waves too.
 - `<state>` is `<runs>/<slug>-synthesis.md`,
   `<tickets json>` is `<runs>/<slug>-tickets.json`, and `<rules file>` is
   `review-classes.md` in the parent folder of `<runs>`.
+- `<ci ignore>` and `<ci timeout>`: from the profile's `ci` (see
+  `references/synthesis.md`).
 
 Then:
 
@@ -674,7 +676,8 @@ Then end with a short summary:
   Task stays open and isn't linked.
 - the repairs synthesis made, and its `REVIEW:` line: what the fresh review
   of those repairs found, fixed and left open
-- the verification results
+- the verification results, and the `CI:` line: how the PR's pipelines
+  ended on the server, and any fix synthesis pushed for them
 - **Checks to add:** each `RULES:` proposal from synthesis, with the past
   findings it would have caught. Offer to add the ones the user picks, as a
   separate small change after this PR.
@@ -687,6 +690,51 @@ Then end with a short summary:
   every skill issue. Say plainly when nothing went wrong.
 
 Don't remove the worktrees. Offer to clean them up after the PR merges.
+
+### Safety guard
+
+The plugin's `hooks/hooks.json` runs `scripts/guard.py` before every shell
+command and file edit. For the run's agents (and any agent working inside a
+batch worktree) it denies what must stay with the user: changing the main
+checkout, force pushes or pushes to a protected branch, merging or
+completing a PR, starting or approving pipelines and deploys, infrastructure
+changes, dropping a non-test database. Your own session is not affected. A
+copied (non-plugin) install has no guard. An agent that reports a guard
+denial needs the user's decision: pass it on.
+
+## 9. After the merge: the deploys
+
+The deploy pipelines run on `<base>` after someone merges the PR, so they are
+checked when the user says the PR is merged or asks how the deploys went
+(`/loop 15m check the deploys of <slug>` keeps checking). In one Bash call:
+
+```bash
+python "<skill>/scripts/ci-status.py" deploy <pr id> --root "<iwt>" --wait 240 [--ignore "<ci ignore>"]
+```
+
+- `CI none`: the PR is not merged yet, or nothing ran for its merge commit.
+  Say so.
+- `CI pending`: call again, for up to an hour, or tell the user to ask later.
+- `CI approval`: name the pipeline that waits for approval; approving it is
+  the user's.
+- `CI green`: report it.
+- `CI red`: show the failing pipeline, the stage and the error lines from its
+  `LOG` file. Ask `Deploy <pipeline> failed. Fix it?`, with **Fix it
+  (Recommended)**, "A fresh agent fixes the cause on a new branch and opens a
+  follow-up PR", and **Leave it**, "Nothing changes; the failure stays for
+  you".
+
+To fix it: prepare a worktree from the latest base,
+`git -C "<root>" fetch origin <base> --quiet` then
+`bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<slug>-deploy-fix" "<run branch>-deploy-fix" --base origin/<base>`
+(one Bash call, 10-minute timeout), and launch a fresh synthesis agent
+(section 7) on it with Final `yes`, New branch `no`, nothing to merge, and
+this line at the top of its prompt:
+`Deploy fix: the deploy pipeline <name> failed after PR <pr id> merged. Its log is <LOG file>. There is nothing to merge: read AGENTS.md and the log, find the cause (code, infrastructure code or the pipeline definition), fix it on this branch, then go on from section 3. The PR title starts with "fix(deploy):" and links the same tickets.`
+Synthesis verifies, reviews its own change, opens the follow-up PR and
+watches its checks. It never re-runs the deploy: tell the user to run it
+again once the follow-up PR is merged. Two fix PRs at most per run; after
+that, hand the failure to the user.
 
 ### Enhance the skill
 

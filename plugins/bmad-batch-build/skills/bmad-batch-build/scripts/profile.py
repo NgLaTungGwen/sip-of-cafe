@@ -31,6 +31,13 @@ is the worktree's own port, so the command must take it. "url" answers once
 the app is up. detect leaves it out: set it for a project with a web app or
 an API a unit can drive, and every unit must then pass the check at the gate.
 
+An optional "ci" tunes the watch on the server's pipelines (ci-status.py):
+
+    "ci": {"ignore": ["Acceptance"], "timeout": 60}
+
+"ignore" names checks, stages, jobs or tasks that fail by design; "timeout"
+is how many minutes synthesis waits for the PR's pipelines.
+
 An optional "merge_message" (e.g. "chore(merge): {title}") replaces the
 "merge: {title}" message merge-units.sh gives each unit merge, for a
 repository whose commit-msg hook wants its own format.
@@ -245,6 +252,8 @@ def show(prof):
     out.append(f"targeted: {t.get('dir')}: test `{t.get('test')}`, typecheck `{t.get('typecheck')}`" if t else "targeted: none")
     out += [f"after merge: {c['dir']}: {c['cmd']}" for c in prof.get("after_merge") or []]
     out.append(f"database: {json.dumps(prof.get('database'))}")
+    c = prof.get("ci")
+    out.append(f"ci: ignore {', '.join(c.get('ignore') or []) or 'nothing'}, wait {c.get('timeout', 60)} min" if c else "ci: defaults")
     a = prof.get("app")
     out.append(f"app check: {a.get('dir')}: `{a.get('start')}` at {a.get('url')}" if a else "app check: none")
     if prof.get("notes"):
