@@ -14,12 +14,15 @@ and prints the ones that were fixed (`patch`), one per line:
 Rejected and deferred findings are left out: only a mistake that was really
 made and fixed says what a lint rule or a type could have caught. Final
 synthesis groups these lines into kinds of mistake (references/synthesis.md).
+
+Workers also write the action in brackets (`[patch]` in backticks), as the
+severity is; both forms are read.
 """
 import os
 import re
 import sys
 
-FINDING = re.compile(r"^\s*-\s*`\[([\w-]+)\]`\s*`([\w-]+)`\s*(?:\(([\w-]+)\))?\s*(.*)$")
+FINDING = re.compile(r"^\s*-\s*`\[([\w-]+)\]`\s*`\[?([\w-]+)\]?`\s*(?:\(([\w-]+)\))?\s*(.*)$")
 
 
 def findings(path):

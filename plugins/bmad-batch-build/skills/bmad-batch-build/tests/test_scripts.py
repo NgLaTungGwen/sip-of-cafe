@@ -1102,6 +1102,21 @@ class ReviewFindings(unittest.TestCase):
         self.assertEqual(lines[0].split("\t")[:3], ["spec-u1", "medium", "blind"])
         self.assertIn("Null from the API", lines[1])
 
+    def test_bracketed_action_is_read(self):
+        # dast-zap-gate: 4 of 5 specs wrote `[patch]`, so only 1 spec was listed.
+        d = tempfile.mkdtemp()
+        spec = os.path.join(d, "spec-u2.md")
+        with open(spec, "w", encoding="utf-8") as f:
+            f.write("# s\n\n## Review Triage Log\n\n### 2026-11-04 - Review pass\n- findings:\n"
+                    "  - `[medium]` `[patch]` (intent) Enqueue untested - tests added.\n"
+                    "  - `[low]` `[reject]` Cosmetic.\n"
+                    "  - `[medium]` `[defer]` Out of scope.\n")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "review-findings.py"), spec],
+                           capture_output=True, text=True)
+        lines = r.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 1, r.stdout)
+        self.assertEqual(lines[0].split("\t")[:3], ["spec-u2", "medium", "intent"])
+
 
 class PinnedChecks(unittest.TestCase):
     """The bug and app rules reach the worker through the pinned facts."""
