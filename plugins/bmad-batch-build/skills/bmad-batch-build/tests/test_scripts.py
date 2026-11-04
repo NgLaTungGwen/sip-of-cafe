@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
 sys.path.insert(0, SCRIPTS)
@@ -59,7 +60,8 @@ class Frontmatter(unittest.TestCase):
     def test_skill_and_agents_parse_strictly(self):
         files = [os.path.join(SKILL_DIR, "SKILL.md")] + [
             os.path.join(SKILL_DIR, "agents", f) for f in os.listdir(os.path.join(SKILL_DIR, "agents"))] + [
-            os.path.join(DASHBOARD_DIR, "SKILL.md")]
+            os.path.join(DASHBOARD_DIR, "SKILL.md"),
+            os.path.join(os.path.dirname(SKILL_DIR), "bmad-batch-build-split", "SKILL.md")]
         for f in files:
             self.assertEqual(frontmatter_errors(open(f, encoding="utf-8").read()), [], f)
 
@@ -762,6 +764,8 @@ class RunSkillName(unittest.TestCase):
         for mod in (load("cost_report", "cost-report.py"), load("install_skill", "install-skill.py")):
             self.assertTrue(mod.is_run_skill("bmad-batch-build"))
             self.assertTrue(mod.is_run_skill("bmad-batch-build:bmad-batch-build"))
+            self.assertTrue(mod.is_run_skill("bmad-batch-build-split"))
+            self.assertTrue(mod.is_run_skill("bmad-batch-build:bmad-batch-build-split"))
             self.assertFalse(mod.is_run_skill("bmad-batch-build:bmad-batch-dashboard"))
             self.assertFalse(mod.is_run_skill("bmad-batch-dashboard"))
             line = json.dumps({"type": "user", "message": {"content": "<command-name>/bmad-batch-build:bmad-batch-dashboard</command-name>"}})
@@ -1340,6 +1344,141 @@ class CiStatus(unittest.TestCase):
         self.assertIn("CHECK fail CI / test", out)
         self.assertIn("LOG CI / test:", out)
 
+
+class SplitPrs(unittest.TestCase):
+    """bmad-batch-build-split: the verified integration branch is cut into
+    one PR branch per unit, stacked by dependency, losing nothing."""
+
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+        self.env.start()
+        self.split = load("split_prs", "split-prs.py")
+
+    def tearDown(self):
+        self.env.stop()
+
+    def run_lane(self, unit2_touches_a=False):
+        root, git = git_repo({"a.txt": "a\n"})
+
+        def sha():
+            return subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+        def commit(files, msg):
+            for path, text in files.items():
+                with open(os.path.join(root, path), "w", newline="\n") as f:
+                    f.write(text)
+            subprocess.run(git + ["add", "-A"], check=True)
+            subprocess.run(git + ["commit", "-q", "-m", msg], check=True)
+
+        subprocess.run(git + ["checkout", "-q", "-b", "feat/x"], check=True)
+        r = {0: sha()}
+        commit({"u1.txt": "v1\n", "a.txt": "a1\n"}, "unit 1")
+        r[1] = sha()
+        commit({"u2.txt": "two\n", **({"a.txt": "a2\n"} if unit2_touches_a else {})}, "unit 2")
+        r[2] = sha()
+        commit({"u1.txt": "v2\n", "u3.txt": "three\n"}, "unit 3")
+        r[3] = sha()
+        commit({"u2.txt": "two fixed\n", "gen.txt": "generated\n"}, "fix(merge): repair")
+        units = [{"id": 1, "title": "one", "from": r[0], "to": r[1], "depends_on": []},
+                 {"id": 2, "title": "two", "from": r[1], "to": r[2], "depends_on": []},
+                 {"id": 3, "title": "three", "from": r[2], "to": r[3], "depends_on": [1]}]
+        path = os.path.join(root, ".git", "split.json")
+        with open(path, "w") as f:
+            json.dump({"worktree": root, "ibranch": "feat/x", "base": r[0], "base_branch": "main",
+                       "units": units}, f)
+        return root, git, path
+
+    def cut(self, path, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = self.split.main(["cut", path, *args])
+        return rc, out.getvalue()
+
+    def show(self, git, rev, path):
+        r = subprocess.run(git + ["show", f"{rev}:{path}"], capture_output=True, text=True)
+        return r.stdout if r.returncode == 0 else None
+
+    def test_independent_and_stacked_units(self):
+        root, git, path = self.run_lane()
+        rc, out = self.cut(path)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("UNOWNED gen.txt", out)
+        rc, out = self.cut(path, "--assign", "gen.txt=2", "--footer", "Co-Authored-By: t <t@t>")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("PR 1 feat/x-pr1 -> main", out)
+        self.assertIn("PR 3 feat/x-pr3 -> feat/x-pr1", out)
+        self.assertIn("PR 2 feat/x-pr2 -> main", out)
+        self.assertIn("STACKS: 1 -> 3 | 2", out)
+        self.assertIn("CHECK ok", out)
+        self.assertEqual(self.show(git, "feat/x-pr1", "u1.txt"), "v1\n")  # unit 1's own version
+        self.assertIsNone(self.show(git, "feat/x-pr1", "u2.txt"))
+        self.assertEqual(self.show(git, "feat/x-pr3", "u1.txt"), "v2\n")
+        self.assertEqual(self.show(git, "feat/x-pr2", "u2.txt"), "two fixed\n")  # the repair goes with its unit
+        self.assertEqual(self.show(git, "feat/x-pr2", "gen.txt"), "generated\n")
+        self.assertEqual(self.show(git, "feat/x-pr2", "a.txt"), "a\n")
+        head = subprocess.run(git + ["rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True).stdout
+        self.assertEqual(head.strip(), "feat/x")
+        msg = subprocess.run(git + ["log", "-1", "--format=%B", "feat/x-pr3"], capture_output=True, text=True).stdout
+        self.assertTrue(msg.startswith("feat: three"), msg)
+        self.assertIn("Co-Authored-By: t <t@t>", msg)
+        with open(path) as f:
+            saved = json.load(f)
+        self.assertEqual({u["id"]: u["target"] for u in saved["units"]}, {1: "main", 2: "main", 3: "feat/x-pr1"})
+        rc, out = self.cut(path, "--assign", "gen.txt=2")
+        self.assertEqual(rc, 3, out)  # never rebuilt silently
+        rc, out = self.cut(path, "--assign", "gen.txt=2", "--replace")
+        self.assertEqual(rc, 0, out)
+
+    def test_a_shared_file_joins_the_stacks(self):
+        root, git, path = self.run_lane(unit2_touches_a=True)
+        rc, out = self.cut(path, "--assign", "gen.txt=2")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("STACKS: 1 -> 2 -> 3", out)
+        self.assertIn("PR 2 feat/x-pr2 -> feat/x-pr1", out)
+        self.assertEqual(self.show(git, "feat/x-pr1", "a.txt"), "a1\n")
+        self.assertEqual(self.show(git, "feat/x-pr2", "a.txt"), "a2\n")
+
+    def test_a_dependent_of_a_left_out_unit_is_refused(self):
+        root, git, path = self.run_lane()
+        with open(path) as f:
+            data = json.load(f)
+        data["left_out"] = [1]
+        with open(path, "w") as f:
+            json.dump(data, f)
+        rc, _ = self.cut(path, "--assign", "gen.txt=2")
+        self.assertEqual(rc, 2)
+
+    def test_stacks_from_the_plan(self):
+        plan = os.path.join(tempfile.mkdtemp(), "plan.json")
+        with open(plan, "w") as f:
+            json.dump({"units": [unit(1), unit(2), unit(3, deps=[1, 2]), unit(4)]}, f)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.split.main(["stacks", plan])
+        self.assertIn("PR 3 -> on 2", out.getvalue())
+        self.assertIn("PRS: 4 PRs in 2 stacks: 1 -> 2 -> 3 | 4", out.getvalue())
+
+
+class TicketsUnitPr(unittest.TestCase):
+    """One PR per unit closes only its own task, and never the story."""
+
+    PLAN = {"stories": [{"key": "s1", "id": 10}],
+            "tasks": [{"unit": 1, "story": "s1", "id": 11}, {"unit": 2, "story": "s1", "id": 12}]}
+
+    def test_ado(self):
+        ado = load("ado_tickets", "ado_tickets.py")
+        self.assertEqual(ado.link_targets(self.PLAN, {"1"}, unit_pr=True), ([], [11], True))
+        self.assertEqual(ado.link_targets(self.PLAN, {"1"}), ([10], [11], False))
+        self.assertEqual(ado.link_targets(self.PLAN, {"1", "2"}), ([10], [11, 12], True))
+
+    def test_github(self):
+        gh = load("gh_tickets", "gh_tickets.py")
+        self.assertEqual(gh.work_items_line(self.PLAN, {"2"}, unit_pr=True),
+                         ("Work items: Closes #12, Refs #10", ["12"], True))
+        self.assertEqual(gh.work_items_line(self.PLAN, {"2"})[0], "Work items: Refs #10, Refs #12")
+        self.assertEqual(gh.work_items_line(self.PLAN, {"1", "2"})[0],
+                         "Work items: Closes #10, Closes #11, Closes #12")
 
 if __name__ == "__main__":
     unittest.main()

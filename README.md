@@ -174,8 +174,9 @@ npx skills add NgLaTungGwen/sip-of-cafe
 npx skills add NgLaTungGwen/sip-of-cafe -g
 ```
 
-The repository has three skills: `bmad-batch-build` and `bmad-batch-dashboard`
-(take both for batch builds), and `ado-eod-report` (see below).
+The repository has four skills: `bmad-batch-build`, `bmad-batch-build-split`
+and `bmad-batch-dashboard` (take all three for batch builds; the split one
+needs `bmad-batch-build` beside it), and `ado-eod-report` (see below).
 
 Nothing else to set up. The first step of every run, `scripts/setup.sh`,
 resolves the rest on its own:
@@ -247,6 +248,24 @@ Open Claude Code in the repository and run:
 ```
 
 (With the plugin install the command is `/bmad-batch-build:bmad-batch-build`.)
+
+**One PR per unit.** To end the run in one PR per unit instead of one PR
+for the whole run, use
+
+```
+/bmad-batch-build-split <paste the transcript or the work items>
+```
+
+(`/bmad-batch-build:bmad-batch-build-split` with the plugin install.) The run
+is the same up to a merged, reviewed and fully verified integration branch.
+Then `scripts/split-prs.py` cuts it into one branch per unit: independent
+units each get a PR into the base branch, and units that depend on each other
+(or touch the same file) form a stack, each PR targeting the branch of the PR
+below it so it shows only its own unit. Every PR branch is built and
+typechecked on its own, each PR links and closes its own task, and the story
+stays open until the last PR merges. The approval table shows where each PR
+will go. Merge a stack bottom-up; on Azure DevOps, retarget the next PR to the
+base branch by hand after the one below completes.
 
 ### Dashboard
 
@@ -588,6 +607,14 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.15.0:** `bmad-batch-build-split`, the same batch build ending in one
+  PR per unit (stacked where units depend on each other).
+  - `split-prs.py` cuts the verified integration branch into per-unit PR
+    branches and checks that together they hold exactly the integration
+    branch; `split-prs.py stacks` shows the PR shape at the approval.
+  - `ado_tickets.py` and `gh_tickets.py` take `--unit-pr`: the PR links and
+    closes only its unit's task.
+  - `references/split-prs.md` is the final synthesis's ending for this mode.
 - **0.14.0:** safety guard and server pipelines.
   - Plugin hook `guard.py` blocks destructive actions by the run's agents
     (see "How it keeps quality up"). It also reads commands run through

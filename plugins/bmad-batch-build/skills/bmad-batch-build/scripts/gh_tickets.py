@@ -34,6 +34,11 @@ units and their tasks, never a left-out unit's task. When every task in the
 plan was merged each one gets "Closes #n", so GitHub closes them when the PR
 merges (only into the default branch); otherwise "Refs #n", which links
 without closing. Prints the linked numbers and whether close-on-complete is on.
+
+usage: python gh_tickets.py <plan.json> --link-pr <pr> --merged <unit> --unit-pr
+
+One PR per unit (bmad-batch-build-split): "Closes #task" for the unit's task
+and "Refs #story" for its story, so each PR closes only its own task.
 """
 import json
 import os
@@ -131,21 +136,33 @@ def with_work_items(body: str, line: str) -> str:
     return body[:footer] + line + "\n\n" + body[footer:]
 
 
-def link(path: str, pr: str, merged: set) -> None:
+def work_items_line(plan: dict, merged: set, unit_pr: bool = False):
+    """(the Work items: line, the ids that should close or link, close-on-complete).
+    One PR for the run closes everything only when no unit was left out; a
+    unit's own PR (unit_pr) closes its task and only refers to its story."""
+    tasks = [t for t in plan["tasks"] if t.get("id") is not None and str(t["unit"]) in merged]
+    keys = {t["story"] for t in tasks}
+    stories = [s["id"] for s in plan["stories"] if s["key"] in keys and s.get("id") is not None]
+    # one keyword per issue: "Closes #1, #2" closes only #1
+    if unit_pr:
+        parts = [f"Closes #{t['id']}" for t in tasks] + [f"Refs #{i}" for i in stories]
+        return "Work items: " + ", ".join(parts), [str(t["id"]) for t in tasks], bool(tasks)
+    ids = [str(i) for i in stories + [t["id"] for t in tasks]]
+    close = len(tasks) == len(plan["tasks"])
+    keyword = "Closes" if close else "Refs"
+    return "Work items: " + ", ".join(f"{keyword} #{i}" for i in ids), ids, close
+
+
+def link(path: str, pr: str, merged: set, unit_pr: bool = False) -> None:
     if REPO is None:
         sys.exit("origin is not a GitHub repository")
     with open(path, encoding="utf-8") as f:
         plan = json.load(f)
-    tasks = [t for t in plan["tasks"] if t.get("id") is not None and str(t["unit"]) in merged]
-    keys = {t["story"] for t in tasks}
-    stories = [s["id"] for s in plan["stories"] if s["key"] in keys and s.get("id") is not None]
-    ids = [str(i) for i in stories + [t["id"] for t in tasks]]
+    line, ids, close = work_items_line(plan, merged, unit_pr)
     if not ids:
         sys.exit("no merged unit has a ticket id")
-    close = len(tasks) == len(plan["tasks"])
     info = json.loads(gh("pr", "view", pr, "--repo", REPO, "--json", "body,baseRefName"))
-    keyword = "Closes" if close else "Refs"  # one keyword per issue: "Closes #1, #2" closes only #1
-    body = with_work_items(info["body"], "Work items: " + ", ".join(f"{keyword} #{i}" for i in ids))
+    body = with_work_items(info["body"], line)
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8", newline="") as f:
         f.write(body)
     try:
@@ -177,6 +194,6 @@ if __name__ == "__main__":
     if "--link-pr" in sys.argv:
         args = sys.argv[1:]
         merged = args[args.index("--merged") + 1].split(",") if "--merged" in args else []
-        link(args[0], args[args.index("--link-pr") + 1], set(merged))
+        link(args[0], args[args.index("--link-pr") + 1], set(merged), "--unit-pr" in args)
     else:
         main(sys.argv[1])

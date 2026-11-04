@@ -294,6 +294,8 @@ def build(session, slug=None, root=None, store=None):
             for k in ("PR", "MERGED"):
                 if field(reply, k):
                     outcome[k.lower()] = field(reply, k)
+            if field(reply, "PRS"):  # one PR per unit (bmad-batch-build-split)
+                outcome["pr"] = field(reply, "PRS")
             for k in ("REPAIRS", "NOTES"):
                 v = field(reply, k)
                 if v and v.lower().strip(". ") != "none":

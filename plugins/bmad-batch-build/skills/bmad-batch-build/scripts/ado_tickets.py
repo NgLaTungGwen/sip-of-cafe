@@ -31,6 +31,13 @@ Links the PR to the stories of the merged units and to their tasks, never to a
 left-out unit's task. When every task in the plan was merged it also turns on
 close-on-complete. Prints the IDs ADO then reports as linked, and whether
 close-on-complete is on, in one call instead of three slow ones.
+
+usage: python ado_tickets.py <plan.json> --link-pr <pr id> --merged <unit> --unit-pr
+
+One PR per unit (bmad-batch-build-split): links only the unit's task and turns
+close-on-complete on, so the task closes when its own PR completes. The story
+is not linked: ADO transitions every work item linked to a completed PR, so
+the first unit PR to complete would close it. The PR description names it.
 """
 import json
 import re
@@ -139,17 +146,26 @@ def main(path: str) -> None:
         sys.exit(1)
 
 
-def link(path: str, pr: str, merged: set) -> None:
-    with open(path, encoding="utf-8") as f:
-        plan = json.load(f)
+def link_targets(plan: dict, merged: set, unit_pr: bool = False):
+    """(story ids, task ids, close-on-complete) for a PR holding the merged units.
+    One PR for the run links the stories too and closes only when no unit was
+    left out; a unit's own PR (unit_pr) links its task alone and closes it."""
     tasks = [t for t in plan["tasks"] if t.get("id") is not None and str(t["unit"]) in merged]
+    if unit_pr:
+        return [], [t["id"] for t in tasks], bool(tasks)
     keys = {t["story"] for t in tasks}
     stories = [s["id"] for s in plan["stories"] if s["key"] in keys and s.get("id") is not None]
-    ids = [str(i) for i in stories + [t["id"] for t in tasks]]
+    return stories, [t["id"] for t in tasks], len(tasks) == len(plan["tasks"])
+
+
+def link(path: str, pr: str, merged: set, unit_pr: bool = False) -> None:
+    with open(path, encoding="utf-8") as f:
+        plan = json.load(f)
+    stories, tasks, close = link_targets(plan, merged, unit_pr)
+    ids = [str(i) for i in stories + tasks]
     if not ids:
         sys.exit("no merged unit has a ticket id")
     az("repos", "pr", "work-item", "add", "--id", pr, "--work-items", *ids, "-o", "none")
-    close = len(tasks) == len(plan["tasks"])
     if close:
         az("repos", "pr", "update", "--id", pr, "--transition-work-items", "true", "-o", "none")
     linked = az("repos", "pr", "work-item", "list", "--id", pr, "--query", "[].id", "-o", "tsv").split()
@@ -168,6 +184,6 @@ if __name__ == "__main__":
     if "--link-pr" in sys.argv:
         args = sys.argv[1:]
         merged = args[args.index("--merged") + 1].split(",") if "--merged" in args else []
-        link(args[0], args[args.index("--link-pr") + 1], set(merged))
+        link(args[0], args[args.index("--link-pr") + 1], set(merged), "--unit-pr" in args)
     else:
         main(sys.argv[1])

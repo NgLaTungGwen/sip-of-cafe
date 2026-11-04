@@ -63,7 +63,7 @@ def load(path):
 def main_span(lines):
     """Index range from the skill invocation to the last synthesis result."""
     # The invocation is the slash command or a Skill tool call, not any mention.
-    marks = tuple(m for name in ("bmad-batch-build", "bmad-parallel-build")
+    marks = tuple(m for name in SKILL_NAMES
                   for m in (f"<command-name>/{name}</command-name>", f'"skill": "{name}"'))
     start = next((i for i, x in enumerate(lines) if x.get("type") in ("user", "assistant")
                   and any(k in json.dumps(x.get("message", "")) for k in marks)), 0)
@@ -490,7 +490,7 @@ def find_session(slug):
     return None
 
 
-SKILL_NAMES = ("bmad-batch-build", "bmad-parallel-build")
+SKILL_NAMES = ("bmad-batch-build", "bmad-batch-build-split", "bmad-parallel-build")
 
 
 def is_run_skill(name):

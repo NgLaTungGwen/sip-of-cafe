@@ -61,9 +61,10 @@ def invokes(line):
 
 
 def is_run_skill(name):
-    """bmad-batch-build itself, also as a plugin skill (bmad-batch-build:bmad-batch-build);
+    """bmad-batch-build itself or its one-PR-per-unit variant, also as a plugin
+    skill (bmad-batch-build:bmad-batch-build);
     viewing the dashboard (bmad-batch-build:bmad-batch-dashboard) is not a run."""
-    return str(name or "").split(":")[-1] == "bmad-batch-build"
+    return str(name or "").split(":")[-1] in ("bmad-batch-build", "bmad-batch-build-split")
 
 
 def active_minutes(root):
@@ -132,6 +133,14 @@ def install(target, dry, force=False):
         if not os.path.exists(dst) or open(src, "rb").read() != open(dst, "rb").read():
             shutil.copy2(src, dst)
             changed.append(f[:-3])
+    split = os.path.join(os.path.dirname(SKILL), "bmad-batch-build-split")
+    if os.path.isdir(split):
+        # The one-PR-per-unit variant only holds a SKILL.md and runs this skill
+        # from beside it (../bmad-batch-build), so it goes next to the copy.
+        sdest = os.path.join(root, ".claude", "skills", "bmad-batch-build-split")
+        if os.path.isdir(sdest):
+            shutil.rmtree(sdest)
+        shutil.copytree(split, sdest, ignore=ignore)
     version = open(os.path.join(dest, "VERSION")).read().split()[0]
     return f"{root}: installed {version}{note}; agents updated: {', '.join(changed) or 'none'}"
 
