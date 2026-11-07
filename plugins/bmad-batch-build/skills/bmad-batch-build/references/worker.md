@@ -78,7 +78,12 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
 2. Read the one absolute workflow.md path it prints, and follow it to its end
    with the intent below. Run every step, in order: plan, implement through
    the implementation handoff, review. Subagents you launch must run in the
-   foreground, as that workflow requires. A spec written after the code, or a
+   foreground, as that workflow requires: launch them without
+   `run_in_background`. If the Agent tool still answers "Async agent
+   launched", waiting for that agent's completion notification meets the
+   requirement: end your turn and wait. Until it arrives, don't start the
+   next workflow step, launch another agent on the same files, or write the
+   reply in step 3. A spec written after the code, or a
    skipped review, fails the gate and the unit is not merged.
 3. When the workflow halts, and only once every implementation subagent you
    launched has returned, reply with exactly these lines and nothing else:
