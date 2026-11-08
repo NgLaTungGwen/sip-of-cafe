@@ -1,6 +1,6 @@
 """Schedule a run's units by their dependencies, and estimate each mode.
 
-usage: python plan-waves.py <plan.json> [--busy] [--max-parallel N] [--no-tests]
+usage: python plan-waves.py <plan.json> [--busy] [--max-parallel N] [--no-tests] [--root <repo>]
 
 plan.json is written by the orchestrator at the split, next to the run file
 (<slug>-plan.json in the run folder, run_dir.py):
@@ -10,6 +10,10 @@ plan.json is written by the orchestrator at the split, next to the run file
       {"id": 3, "title": "cost chart", "size": "M", "depends_on": [1, 2],
        "reason": "imports the chart kit; uses the new contract fields"}
     ]}
+
+A unit may also carry "items", the number of separate things it must fix or
+build (findings, work items, acceptance criteria), and "files", the source
+files those items are in, relative to --root. They feed the split check below.
 
 Only compile- or test-time dependencies belong in depends_on: unit 3 cannot
 build or test without unit 1's code. A dependency that an agreed interface
@@ -57,6 +61,14 @@ building the work directly is the better choice, and why:
 
 On 2026-10-27 a 7-unit POC in 3 waves of up to 3, in a repo that bans tests,
 was estimated at 618 min; one session built it directly in far less.
+
+A unit that is too big for one worker is split before the run, not during it.
+The script prints a **Split** line for every unit with more than 50 items, or
+that owns a file of more than 2500 lines among other files, and writes them to
+plan.json ("split"). sonar-zero-5 (2026-11-07): unit 7, 64 findings including
+a 6500-line route file, took 315 min and about 12 coder rounds, more than any
+other unit and the end of its wave; units of 21 to 46 findings took 85 to
+140 min.
 
 Prints the waves, every estimate, the chosen mode, the Mode line for the
 approval table and, when one applies, an Advice line. Writes the schedule back
@@ -214,6 +226,38 @@ def advise(units, result, no_tests=False):
     return reasons
 
 
+MAX_ITEMS = 50
+MAX_LINES = 2500
+
+
+def file_lines(root, path):
+    try:
+        with open(os.path.join(root, path), "rb") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return 0
+
+
+def too_big(units, root=None):
+    """One line per unit a single worker should not get, with how to split it."""
+    out = []
+    for u in units:
+        why = []
+        items = u.get("items") or 0
+        if items > MAX_ITEMS:
+            parts = -(-items // 40)
+            why.append(f"{items} items, over {MAX_ITEMS}: split into {parts} units of at most 40")
+        files = u.get("files") or []
+        if root and len(files) > 1:
+            for f in files:
+                n = file_lines(root, f)
+                if n > MAX_LINES:
+                    why.append(f"{f} has {n} lines, over {MAX_LINES}: give it a unit of its own")
+        if why:
+            out.append(f"unit {u['id']} ({u.get('title', '')}): " + "; ".join(why))
+    return out
+
+
 def mode_line(units, result):
     deps = [f"{u['id']}←{','.join(map(str, u['depends_on']))} ({u.get('reason') or 'no reason given'})"
             for u in units if u.get("depends_on")]
@@ -246,11 +290,15 @@ def main(args):
         print(f"wave {i}: units {', '.join(map(str, w['units']))} — {w['run']}, ≈{w['minutes']} min")
     print("unit minutes: " + ", ".join(f"{s} {minutes[s]} ({source[s]})" for s in DEFAULT))
     print(mode_line(units, result))
+    root = args[args.index("--root") + 1] if "--root" in args else None
+    split = too_big(units, root)
+    for s in split:
+        print("Split: " + s + ".")
     advice = advise(units, result, no_tests="--no-tests" in args)
     if advice:
         print("Advice: build directly in one session; " + "; ".join(advice) + ".")
     data.update({"waves": result["waves"], "mode": result["mode"], "estimate": result["estimate"],
-                 "unit_minutes_used": minutes, "advice": advice})
+                 "unit_minutes_used": minutes, "advice": advice, "split": split})
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
     return 0

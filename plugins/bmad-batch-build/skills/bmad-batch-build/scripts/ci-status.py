@@ -29,8 +29,9 @@ failure:
     LOG <name>: <file>
 
 `approval` means a pipeline waits for a person to approve it (a deploy to a
-protected environment): stop waiting and tell the user. The log files (the
-error lines and the last lines of each failed step) go to the worktree's git
+protected environment): stop waiting and tell the user. The log files (on
+Azure DevOps the failed tests the build published, with their messages and
+stacks, then the error lines and the last lines of each failed step) go to the worktree's git
 dir, <git dir>/bmad/ci-<name>.log, out of the tree. Exits 0 green or none,
 1 red, 2 pending, 4 approval, 3 when the provider can't be read.
 """
@@ -107,6 +108,49 @@ def az_invoke(root, ctx, resource, **params):
     return json.loads(out or "{}")
 
 
+def az_failed_tests(root, ctx, build_id, records, failed, fetched):
+    """The failed test results a build published: file, test name, message and
+    the top of the stack. A step's log shows only the end of vitest's junit
+    output, which names no failing test (sonar-zero-5 synthesis fetched these by
+    hand). The test run ids come from the Publish Test Results tasks' logs
+    ("Test run id:1177"): listing a build's runs through `az devops invoke
+    --area test --resource runs` resolves to Runs/Statistics and 404s. Only the
+    publish tasks in a job that has a failed task are read, reusing the logs
+    already fetched (<fetched>: log id -> lines), because each az devops invoke
+    call takes about two minutes. Best effort: a failure to read them never
+    hides the build's own log."""
+    out = []
+    jobs = {r.get("parentId") for r in failed}
+    try:
+        run_ids = []
+        for r in records:
+            if r.get("type") != "Task" or "test result" not in (r.get("name") or "").lower():
+                continue
+            log_id = (r.get("log") or {}).get("id")
+            if not log_id or r.get("parentId") not in jobs:
+                continue
+            if log_id not in fetched:
+                fetched[log_id] = az_invoke(root, ctx, "logs", buildId=build_id, logId=log_id).get("value", [])
+            for line in fetched[log_id]:
+                m = re.search(r"[Tt]est run id:\s*(\d+)|test run '(\d+)'", line)
+                if m and (m.group(1) or m.group(2)) not in run_ids:
+                    run_ids.append(m.group(1) or m.group(2))
+        for run_id in run_ids[:5]:
+            res = json.loads(cli("az", "devops", "invoke", "--org", ctx["org"], "--area", "test", "--resource", "results",
+                                 "--route-parameters", f"project={ctx['project']}", f"runId={run_id}",
+                                 "--query-parameters", "outcomes=Failed", "$top=30",
+                                 "--api-version", "7.1", "-o", "json", root=root) or "{}").get("value") or []
+            for r in res:
+                name = r.get("automatedTestName") or r.get("testCaseTitle") or "?"
+                where = r.get("automatedTestStorage") or ""
+                msg = (r.get("errorMessage") or "").strip()[:800]
+                stack = "\n".join((r.get("stackTrace") or "").strip().splitlines()[:8])
+                out.append(f"FAILED {where}: {name}\n{msg}\n{stack}".rstrip())
+    except Exception:  # noqa: BLE001 - best effort, see above
+        pass
+    return "\n\n".join(out)
+
+
 def az_build(root, ctx, build_id, name, url, ignore):
     """One build as a check: its state, and the log of each failed task that
     is not under an ignored stage, job or task."""
@@ -128,12 +172,17 @@ def az_build(root, ctx, build_id, name, url, ignore):
         return "pass", None
     if not real:
         return None, None
-    parts = []
+    parts, fetched = [], {}
     for r in real[:3]:
         log_id = (r.get("log") or {}).get("id")
         lines = az_invoke(root, ctx, "logs", buildId=build_id, logId=log_id).get("value", []) if log_id else []
+        if log_id:
+            fetched[log_id] = lines
         issues = [i.get("message", "") for i in r.get("issues") or []]
         parts.append(f"=== {' / '.join(reversed(path(r)))}\n" + "\n".join(issues) + "\n" + excerpt(lines))
+    tests = az_failed_tests(root, ctx, build_id, recs.values(), real, fetched)
+    if tests:
+        parts.insert(0, "=== failed tests (published test results)\n" + tests)
     return "fail", "\n\n".join(parts)
 
 

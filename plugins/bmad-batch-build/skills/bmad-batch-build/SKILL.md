@@ -276,6 +276,12 @@ For every unit, write:
   - **S:** up to 3 files, with no migration and no new module;
   - **M:** 4 to 10 files;
   - **L:** more than 10 files, a new module, or a migration plus API plus UI.
+- `items`: how many separate things it must fix or build (findings, work
+  items, acceptance criteria), and `files`: the source files they are in.
+  **Keep a unit to at most 50 items, and give a file of more than 2500 lines
+  its own unit** when it carries real work. One worker's coder cannot hold
+  more: in sonar-zero-5 a 64-finding unit with a 6500-line route file took
+  315 min and about 12 coder rounds, and held its whole wave.
 - `depends_on`: the units whose code it needs to build or test, each with the
   reason (for example "imports the chart kit types"), or none
 - a branch, `<run branch>-<n>`, used when the unit runs in a parallel
@@ -300,14 +306,23 @@ The worker sees only its intent.
 Decide it yourself from the units; don't ask. Write the plan file
 `<runs>/<slug>-plan.json`, in the format documented in
 `<skill>/scripts/plan-waves.py`, with each unit's id, title, size,
-`depends_on` and reason. Then run it, adding `--busy` when the machine is busy
+`depends_on`, reason, `items` and `files`. Then run it, adding `--busy` when the machine is busy
 and `--no-tests` when the profile has no `suite` or the repository's
 instructions ban tests:
 
 ```bash
 n=$(ls ~/.cache/bmad-heavy/run.* 2>/dev/null | wc -l); [ "$n" -ge $(( $(nproc) / 3 )) ] && b=--busy || b=
-python "<skill>/scripts/plan-waves.py" "<runs>/<slug>-plan.json" $b [--no-tests]
+python "<skill>/scripts/plan-waves.py" "<runs>/<slug>-plan.json" $b [--no-tests] --root "<root>"
 ```
+
+When it prints a **Split** line, split that unit as the line says (by file or
+by area, each part with its own intent and ticket), rewrite the plan file and
+run the script again, before you show the split for approval. Parts that edit
+the same file never run side by side, because they would conflict at the
+merge: give each later part a `depends_on` on the one before, so they run as a
+lane. A unit that is only one big file and cannot be cut further stays one
+unit: show its Split line in the approval table with the reason, instead of
+splitting it.
 
 It sorts the units into waves: a wave holds the units whose dependencies are
 all in earlier waves. Each wave then runs as a lane or in parallel, whichever
@@ -558,6 +573,18 @@ finished. A budget stops a stuck agent; it isn't meant to be hit. A worker
 reply without its `SPEC:`/`STATUS:` lines means the worker ran out. Gate the
 unit anyway, because its branch may hold usable commits, and record "turn
 budget" as the reason. Section 6 then decides what happens next.
+
+**Early hand-backs.** Claude Code can return an `Agent` call as "Async agent
+launched" even in the foreground, and can hand a worker or synthesis back
+before it has finished: its reply says `blocked` or `in progress` because a
+coder or reviewer it launched is still running, or a synthesis reply has no
+`RESULT:` line. That is not a failed unit (sonar-zero-5: 14 resumes, two
+synthesis replies without `RESULT:`). Don't gate it and don't ask the user:
+wait for the notifications of the agents it says are still running (they
+arrive as their own task notifications or hand-back messages), then continue it
+with `SendMessage`, giving it their reports word for word and what it still has
+to do, and wait again. Gate only a reply that says `done` or `ready`, or one
+that names a real blocking condition. Note each resume in the run file.
 
 ## 6. Gate
 

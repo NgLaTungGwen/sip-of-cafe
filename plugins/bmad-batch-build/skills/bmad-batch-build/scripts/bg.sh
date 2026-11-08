@@ -8,8 +8,12 @@
 # command and writes <name>.log and then <name>.rc into the worktree's private
 # git dir (<git dir>/bmad/), so the working tree stays clean for the gate.
 #
-# `wait` returns as soon as <name>.rc exists, or after <seconds> (default 240).
-# Four minutes keeps every wait under the default 5-minute prompt-cache TTL,
+# `wait` returns as soon as <name>.rc exists, or after <seconds> of real time
+# (default and maximum 100). The Bash tool moves a foreground call to the
+# background when it runs past its timeout: 120 s when the call passes no
+# timeout (sonar-zero-5: synthesis waits, 12 times), and about 180 s even with
+# a longer one. 100 s returns "still running" in the foreground in both cases,
+# with room for a slow start. It also keeps every wait under the default 5-minute prompt-cache TTL,
 # which the Haiku coder and the reviewers use, and which every agent falls
 # back to when the 1-hour TTL does not apply. Calling again is cheap. It prints one line, and exits:
 #   0  "<name>: ok"
@@ -43,8 +47,13 @@ case $mode in
     exit "$code"
     ;;
   wait)
-    limit=${4:-240} waited=0
+    max_wait=100
+    limit=${4:-$max_wait}
+    [ "$limit" -gt "$max_wait" ] && limit=$max_wait
+    t0=$SECONDS
     until [ -f "$rc" ]; do
+      # Real time, not loop steps: on a loaded machine each step takes longer.
+      waited=$((SECONDS - t0))
       # Give a run that was launched just now 30 s to write its pid.
       if [ ! -f "$dir/$name.pid" ] && [ "$waited" -ge 30 ]; then
         echo "$name: not started"
@@ -55,7 +64,6 @@ case $mode in
         exit 2
       fi
       sleep 5
-      waited=$((waited + 5))
     done
     code=$(cat "$rc")
     if [ "$code" -eq 0 ]; then

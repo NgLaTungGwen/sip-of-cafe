@@ -46,7 +46,7 @@ Keep turns few and context small:
   `bash <skill>/scripts/bg.sh run <worktree> <name> "<command>"` as a Bash call
   with `run_in_background: true`, then wait with one
   `bash <skill>/scripts/bg.sh wait <worktree> <name>` per Bash call (it
-  returns within 4 minutes), repeated while it prints still running. Never
+  returns within 100 s), repeated while it prints still running. Never
   wrap a wait in a loop, `timeout` or `sleep`, and never start a command with
   `sleep N`: the harness blocks it.
 - Write and change files with the Write or Edit tool. Never write a file or a

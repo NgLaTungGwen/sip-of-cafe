@@ -243,14 +243,20 @@ class CheckTestEnv(unittest.TestCase):
 
 
 class HeavyShell(unittest.TestCase):
-    def run_heavy(self, cmd):
+    def run_heavy(self, *cmd):
         env = dict(os.environ, BMAD_RUNS_DIR=tempfile.mkdtemp(), BMAD_HEAVY_DIR=tempfile.mkdtemp())
         # self-test.sh passes its own bash: on Windows a bare "bash" can be WSL's.
         bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
-        return subprocess.run([bash, os.path.join(SCRIPTS, "heavy.sh"), cmd], capture_output=True, text=True, env=env)
+        return subprocess.run([bash, os.path.join(SCRIPTS, "heavy.sh"), *cmd], capture_output=True, text=True, env=env)
 
     def test_exit_code_passes_through(self):
         self.assertEqual(self.run_heavy("exit 3").returncode, 3)
+
+    def test_separate_words_all_run(self):
+        # `heavy.sh npm ci --no-audit` once ran a bare `npm` (batch-parallelism).
+        r = self.run_heavy("--weight", "1", "printf", "%s|", "a b", "c")
+        self.assertEqual((r.returncode, r.stdout), (0, "a b|c|"))
+        self.assertEqual(self.run_heavy("echo x | tr x y").stdout, "y\n")
 
     def test_vitest_minimum_not_above_maximum(self):
         out = self.run_heavy("echo $VITEST_MIN_THREADS $VITEST_MAX_THREADS $VITEST_MIN_FORKS $VITEST_MAX_FORKS").stdout
@@ -298,8 +304,37 @@ class VerifyLogFolder(unittest.TestCase):
         self.assertTrue(out.rstrip().endswith("slow.rc:0"), out)
 
 
+class BgWait(unittest.TestCase):
+    # The Bash tool moves a foreground call to the background at its 120 s
+    # default timeout (sonar-zero-5: 12 synthesis waits) and at about 180 s
+    # with a longer one, so `bg.sh wait` must give up before 120 s and print
+    # "still running" (run empty-repo-default-branch: every agent's 240 s wait was moved).
+    def test_default_and_maximum_wait_end_before_the_tool_backgrounds_the_call(self):
+        import re
+        with open(os.path.join(SCRIPTS, "bg.sh"), encoding="utf-8") as f:
+            src = f.read()
+        m = re.search(r"^\s*max_wait=(\d+)\s*$", src, re.M)
+        self.assertIsNotNone(m, "bg.sh wait has no max_wait")
+        self.assertLessEqual(int(m.group(1)), 100)
+        self.assertIn('limit=${4:-$max_wait}', src)
+        self.assertIn('[ "$limit" -gt "$max_wait" ] && limit=$max_wait', src)
+
+    def test_wait_on_a_running_job_reports_still_running(self):
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        wt = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", wt], check=True)
+        gd = os.path.join(wt, ".git", "bmad")
+        os.makedirs(gd, exist_ok=True)
+        with open(os.path.join(gd, "job.pid"), "w") as f:
+            f.write("1\n")
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "bg.sh"), "wait", wt.replace("\\", "/"), "job", "6"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("job: still running", r.stdout)
+
+
 class PrepareWorktree(unittest.TestCase):
-    def pinned(self, with_api, extra=()):
+    def pinned(self, with_api, extra=(), with_apps=False, graph=False):
         bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
         root = tempfile.mkdtemp().replace("\\", "/")
         os.makedirs(os.path.join(root, "_bmad", "custom"))
@@ -307,11 +342,20 @@ class PrepareWorktree(unittest.TestCase):
         if with_api:
             os.makedirs(os.path.join(root, "api"))
             open(os.path.join(root, "api", "package.json"), "w").close()
+        if with_apps:
+            os.makedirs(os.path.join(root, "apps"))
+            open(os.path.join(root, "apps", "package.json"), "w").close()
+            open(os.path.join(root, "apps", "bun.lock"), "w").close()
         open(os.path.join(root, "package.json"), "w").close()
         git = ["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t"]
         subprocess.run(["git", "init", "-q", root], check=True)
-        subprocess.run(git + ["add", "package.json"] + (["api"] if with_api else []), check=True)
+        subprocess.run(git + ["add", "package.json"] + (["api"] if with_api else [])
+                       + (["apps"] if with_apps else []), check=True)
         subprocess.run(git + ["commit", "-q", "-m", "init"], check=True)
+        if graph:
+            os.makedirs(os.path.join(root, "graphify-out", "cache"))
+            for f in ("graph.json", "GRAPH_REPORT.md", os.path.join("cache", "big.bin")):
+                open(os.path.join(root, "graphify-out", f), "w").close()
         r = subprocess.run([bash, os.path.join(SCRIPTS, "prepare-worktree.sh"), root, "u1", "b1",
                             "--no-install", "--base", "HEAD", *extra], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -327,6 +371,53 @@ class PrepareWorktree(unittest.TestCase):
     def test_handoff_uses_api_dir_when_the_repo_has_one(self):
         wt, toml = self.pinned(with_api=True)
         self.assertIn("cd " + wt + "/api && npx vitest run", toml)
+
+    def test_handoff_checks_apps_files_with_bun_inside_apps(self):
+        # The handoff named only api/ and npx vitest, so apps units had to
+        # rewrite it (sonar-zero-4 unit 2, intake-toolchain-ux u1).
+        wt, toml = self.pinned(with_api=True, with_apps=True)
+        self.assertIn("cd " + wt + "/apps && bun test <files>", toml)
+        self.assertIn("cd " + wt + "/apps && bun run typecheck", toml)
+        self.assertIn("cd " + wt + "/api && npx vitest run", toml)  # api files keep theirs
+        # The root suite never reaches apps/ (sonar-zero-5 units 6 and 7).
+        self.assertIn("cd " + wt + "/apps && bun test'", toml)
+        self.assertIn(" apps-suite", toml)
+        self.tomllib_ok(toml)
+        wt, toml = self.pinned(with_api=True)
+        self.assertNotIn(wt + "/apps", toml)
+
+    def test_every_subagent_gets_the_current_scripts_and_the_run_rules(self):
+        # sonar-zero-5: coders used another project's or an old version's
+        # heavy.sh, called TaskStop, committed with their own trailer, parsed
+        # lcov by hand, and large fix rounds came back partial.
+        _, toml = self.pinned(with_api=True)
+        self.tomllib_ok(toml)
+        import tomllib
+        doc = tomllib.loads(toml)["workflow"]
+        mine = SCRIPTS.replace(chr(92), "/")
+        handoff = doc["implementation_handoff"]
+        import re
+        posix = re.sub(r"^([A-Za-z]):", lambda m: "/" + m.group(1).lower(), mine)
+        for text in (handoff, " ".join(doc["persistent_facts"])):
+            text = text.replace(chr(92), "/")
+            self.assertTrue(mine + "/heavy.sh" in text or posix + "/heavy.sh" in text, text[-400:])
+            # Windows Python cannot open /c/..., so the reader needs C:/...
+            self.assertIn("python " + mine + "/lcov-gaps.py", text)
+            self.assertIn("TaskStop", text)
+        self.assertIn("Do not commit", handoff)
+        facts = " ".join(doc["persistent_facts"])
+        self.assertIn("You commit the implementation subagent's work yourself", facts)
+        self.assertIn("at most about 15 findings or 3 files per round", facts)
+
+    def test_the_code_graph_is_copied_in_and_kept_out_of_git_status(self):
+        # CLAUDE.md says to query graphify-out/graph.json when it exists; an
+        # untracked graph never reached the worktrees (sonar-zero-5).
+        wt, _ = self.pinned(with_api=False, graph=True)
+        self.assertTrue(os.path.isfile(os.path.join(wt, "graphify-out", "graph.json")))
+        self.assertTrue(os.path.isfile(os.path.join(wt, "graphify-out", "GRAPH_REPORT.md")))
+        self.assertFalse(os.path.exists(os.path.join(wt, "graphify-out", "cache")))
+        st = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True).stdout
+        self.assertNotIn("graphify-out", st)
 
     def test_fallback_agents_launch_the_coder_as_general_purpose(self):
         # A copied install's first run: the session has not loaded the run's
@@ -475,6 +566,41 @@ class Setup(unittest.TestCase):
         self.assertIn("AGENTS plugin" if plugin else "AGENTS project", r.stdout)
         self.assertIn("TICKETS gh", r.stdout)  # gh signed in: GitHub issues
         self.assertIn("PR gh", r.stdout)
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(stub, ignore_errors=True)
+
+    def test_lapsed_az_sign_in_turns_ado_tickets_off(self):
+        # `az account show` passes on a cached profile after the sign-in lapsed;
+        # only a token request shows it, so a stub az answers that one per test.
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        root = tempfile.mkdtemp().replace("\\", "/")
+        os.makedirs(os.path.join(root, "_bmad", "scripts"))
+        open(os.path.join(root, "_bmad", "scripts", "render_skill.py"), "w").close()
+        os.makedirs(os.path.join(root, ".claude", "skills", "bmad-build-auto"))
+        open(os.path.join(root, ".claude", "skills", "bmad-build-auto", "SKILL.md"), "w").close()
+        subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+        subprocess.run(["git", "-C", root, "remote", "add", "origin",
+                        "https://dev.azure.com/acme/proj/_git/app"], check=True)
+        subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                        "--allow-empty", "-m", "init"], check=True)
+        stub = tempfile.mkdtemp()
+        az = os.path.join(stub, "az")
+
+        def with_az(token_code):
+            with open(az, "w", newline="\n") as f:
+                f.write('#!/bin/sh\ncase "$*" in *get-access-token*) exit %d ;; esac\nexit 0\n' % token_code)
+            os.chmod(az, 0o755)
+            return dict(os.environ, PATH=stub + os.pathsep + os.environ["PATH"])
+
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "setup.sh"), root], capture_output=True, text=True,
+                           env=with_az(1))
+        self.assertIn("REMOTE ado", r.stdout, r.stdout + r.stderr)
+        self.assertIn("TICKETS off (Azure DevOps remote", r.stdout)
+        self.assertIn("PR none", r.stdout)
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "setup.sh"), root], capture_output=True, text=True,
+                           env=with_az(0))
+        self.assertIn("TICKETS ado", r.stdout, r.stdout + r.stderr)
+        self.assertIn("PR az", r.stdout)
         shutil.rmtree(root, ignore_errors=True)
         shutil.rmtree(stub, ignore_errors=True)
 
@@ -907,6 +1033,80 @@ class MergeRejected(unittest.TestCase):
         self.assertEqual(msg.strip(), "chore(merge): unit one (u1)")
 
 
+class UnitTooBig(unittest.TestCase):
+    """sonar-zero-5: unit 7 had 64 findings, one of them in a 6500-line route
+    file, and took 315 min and about 12 coder rounds; the split never said so."""
+
+    def test_more_than_50_items_or_a_huge_file_among_others_is_flagged(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "big.tsx"), "w") as f:
+            f.write(("x" + chr(10)) * 2600)
+        with open(os.path.join(d, "small.ts"), "w") as f:
+            f.write(("x" + chr(10)) * 10)
+        units = [dict(unit(7, "L"), title="apps", items=64, files=["big.tsx", "small.ts"]),
+                 dict(unit(6, "L"), items=45, files=["small.ts"]),
+                 dict(unit(5), items=20, files=["big.tsx"])]  # a big file alone is its own unit already
+        lines = waves.too_big(units, d)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("unit 7 (apps): 64 items, over 50: split into 2 units", lines[0])
+        self.assertIn("big.tsx has 2600 lines, over 2500: give it a unit of its own", lines[0])
+
+    def test_the_split_line_is_printed_and_saved(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "plan.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"units": [dict(unit(1), items=51), unit(2)]}, f)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "plan-waves.py"), path, "--root", d],
+                           capture_output=True, text=True, encoding="utf-8", env=dict(os.environ, BMAD_RUNS_DIR=d))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Split: unit 1", r.stdout)
+        self.assertEqual(len(json.load(open(path, encoding="utf-8"))["split"]), 1)
+
+
+class LcovGaps(unittest.TestCase):
+    """sonar-zero-5: every coder wrote its own lcov parser, and each one first
+    matched nothing: CRLF endings, backslash SF paths, an empty lcov from an
+    include glob that matched nothing, and bun's lcov without BRDA or FN names."""
+
+    def run_gaps(self, text, *parts):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "lcov.info")
+        with open(p, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        return subprocess.run([sys.executable, os.path.join(SCRIPTS, "lcov-gaps.py"), p, *parts],
+                              capture_output=True, text=True)
+
+    def test_vitest_lcov_with_crlf_and_backslashes(self):
+        crlf = chr(13) + chr(10)
+        text = crlf.join(["TN:", "SF:src" + chr(92) + "eval" + chr(92) + "a.ts", "FN:3,run", "FN:9,idle",
+                          "FNDA:2,run", "FNDA:0,idle", "FNF:2", "FNH:1", "DA:3,2", "DA:4,0", "DA:5,0", "DA:9,0",
+                          "BRDA:3,0,0,2", "BRDA:3,0,1,0", "BRDA:4,1,0,-", "end_of_record",
+                          "SF:src/other.ts", "DA:1,1", "end_of_record", ""])
+        r = self.run_gaps(text, "src/eval/")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("src/eval/a.ts  lines 1/4  branches 1/3  functions 1/2", r.stdout)
+        self.assertIn("lines: 4-5, 9", r.stdout)
+        self.assertIn("3 (block 0, branch 1)", r.stdout)
+        self.assertIn("idle (line 9)", r.stdout)
+        self.assertNotIn("other.ts", r.stdout)
+
+    def test_bun_lcov_without_names_or_branches(self):
+        text = chr(10).join(["SF:src/b.tsx", "FNF:3", "FNH:2", "DA:1,1", "DA:2,1", "end_of_record", ""])
+        r = self.run_gaps(text)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("functions 2/3 (no branch data in this lcov)", r.stdout)
+        self.assertIn("1 unnamed", r.stdout)
+
+    def test_an_empty_lcov_says_the_include_matched_nothing(self):
+        r = self.run_gaps("TN:" + chr(10))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("include matched nothing", r.stdout)
+
+    def test_full_coverage_exits_0(self):
+        r = self.run_gaps(chr(10).join(["SF:a.ts", "DA:1,1", "BRDA:1,0,0,1", "FNF:1", "FNH:1", "end_of_record", ""]))
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+
 class Encoding(unittest.TestCase):
     """A Windows console (cp1252) has no '≈': plan-waves.py stopped with
     UnicodeEncodeError while printing the schedule (2026-10-30)."""
@@ -1228,6 +1428,68 @@ class Guard(unittest.TestCase):
         ]:
             self.assertIsNotNone(self.bash(cmd), cmd)
 
+    def test_scripts_of_another_copy_of_the_skill_are_denied(self):
+        # sonar-zero-5: implementers ran heavy.sh from the 0.12.12 plugin cache
+        # and from a .claude/backups copy on a 0.15.1 run.
+        own = open(os.path.join(os.path.dirname(SCRIPTS), "VERSION")).read().split()[0]
+        old = tempfile.mkdtemp().replace("\\", "/") + "/bmad-batch-build/0.12.12/skills/bmad-batch-build"
+        same = tempfile.mkdtemp().replace("\\", "/") + "/bmad-batch-build/" + own + "/skills/bmad-batch-build"
+        for d, v in ((old, "0.12.12"), (same, own)):
+            os.makedirs(d + "/scripts")
+            with open(d + "/VERSION", "w") as fh:
+                fh.write(v + "\n")
+        why = self.bash(f"cd {self.wt} && bash {old}/scripts/heavy.sh 'npm test'")
+        self.assertIsNotNone(why)
+        self.assertIn("0.12.12", why)
+        self.assertIn(SCRIPTS.replace("\\", "/") + "/heavy.sh", why)
+        self.assertIsNotNone(self.bash(f"bash /x/.claude/backups/bmad-batch-build-20261025-v070/skill/scripts/bg.sh wait . v"))
+        self.assertIsNone(self.bash(f"bash {same}/scripts/heavy.sh 'npm test'"))
+        self.assertIsNone(self.bash(f"bash '{SCRIPTS}/heavy.sh' 'npm test'"))
+        # The enhancer self-tests its draft, whose VERSION may differ from the
+        # loaded plugin's, and the source worktrees live under the store's src/.
+        self.assertIsNone(self.bash(f"bash {old}/scripts/self-test.sh", agent="bmad-batch-build:bmad-batch-enhancer"))
+        from unittest import mock
+        store = tempfile.mkdtemp().replace("\\", "/")
+        src = store + "/src/wt-2026-11-08-x/plugins/bmad-batch-build/skills/bmad-batch-build"
+        os.makedirs(src + "/scripts")
+        with open(src + "/VERSION", "w") as fh:
+            fh.write("0.0.1\n")
+        with mock.patch.dict(os.environ, {"BMAD_RUNS_DIR": store}):
+            self.assertIsNone(self.bash(f"bash {src}/scripts/self-test.sh"))
+
+    def test_redirects_outside_the_worktree_are_denied(self):
+        # sonar-zero-5: an implementer's log landed two levels above its worktree.
+        # This test's repository sits in the temp folder, which is allowed, so
+        # the guard is given another one.
+        from unittest import mock
+        other = tempfile.mkdtemp(dir=os.path.dirname(SCRIPTS))
+        self.addCleanup(shutil.rmtree, other, True)
+        patch = mock.patch.dict(os.environ, {"TEMP": other, "TMP": other, "TMPDIR": other})
+        patch.start()
+        self.addCleanup(patch.stop)
+        api = f"{self.wt}/api"
+        self.assertIsNotNone(self.bash("npx vitest run > ../../scratchpad-s5-a.log 2>&1", cwd=api))
+        self.assertIsNotNone(self.bash(f"echo x | tee {self.root}/out.log", cwd=api))
+        for cmd in ["npx vitest run > ../_bmad-output/run.log 2>&1", "echo x > /tmp/a.log",
+                    "npm test 2>/dev/null", "echo x | tee coverage.txt", "awk '{if ($3>0) print}' f"]:
+            self.assertIsNone(self.bash(cmd, cwd=api), cmd)
+
+    def test_relative_rm_is_allowed_only_while_it_stays_in_the_worktree(self):
+        # sonar-zero-5: `cd api && rm -rf ../_bmad-output/cov-u3c` was denied,
+        # although the folder is inside the worktree.
+        api = f"{self.wt}/api"
+        self.assertIsNone(self.bash(f"cd {api} && rm -rf ../_bmad-output/cov-u3c", cwd=self.wt))
+        self.assertIsNone(self.bash("rm -rf ../_bmad-output/cov", cwd=api))
+        for cmd, cwd in [
+            ("rm -rf ../../worktrees", api),       # leaves the worktree
+            ("rm -rf ../..", api),
+            ("rm -rf ..", api),                    # the worktree itself
+            ("rm -rf ../*", api),
+            ("rm -rf ../src", self.wt),            # from the worktree's top into .claude/worktrees
+            ("rm -rf ../a.txt", f"{self.root}/sub"),  # the main checkout, not a worktree
+        ]:
+            self.assertIsNotNone(self.bash(cmd, cwd=cwd), (cmd, cwd))
+
     def test_the_work_of_a_unit_is_allowed(self):
         for cmd in [
             f"cd {self.wt} && git add -A && git commit -m 'feat: x'",
@@ -1316,6 +1578,29 @@ class CiStatus(unittest.TestCase):
         with open(log, encoding="utf-8") as f:
             self.assertIn("##[error]expected 2, got 3", f.read())
         self.assertTrue(log.replace("\\", "/").startswith(self.root + "/.git"), log)
+
+    def test_a_red_check_names_the_failed_tests(self):
+        # sonar-zero-5: the step log ended in vitest's junit tail, which names
+        # no failing test; synthesis fetched the results with az devops invoke.
+        tl = self.timeline("Unit tests")
+        tl["records"].append({"id": "p", "parentId": "s", "type": "Task", "name": "Publish API test results",
+                              "result": "succeeded", "log": {"id": 9}})
+        logs = {"7": {"value": ["junit tail"]}, "9": {"value": ["Publishing test results to test run '77'.",
+                                                                "TestResults To Publish 10, Test run id:77"]}}
+        self.fake({"az repos pr policy list": self.policy("rejected", build=1564),
+                   "az devops invoke --org https://dev.azure.com/org --area build --resource timeline": tl,
+                   "az devops invoke --org https://dev.azure.com/org --area build --resource logs --route-parameters project=Proj buildId=1564 logId=7": logs["7"],
+                   "az devops invoke --org https://dev.azure.com/org --area build --resource logs --route-parameters project=Proj buildId=1564 logId=9": logs["9"],
+                   "az devops invoke --org https://dev.azure.com/org --area test --resource results --route-parameters project=Proj runId=77": {"value": [
+                       {"automatedTestName": "kills the step after its timeout", "automatedTestStorage": "test/verifier-runner.spec.ts",
+                        "errorMessage": "expected 3 to be 2", "stackTrace": "at verifier-runner.spec.ts:88"}]}})
+        rc, out = self.run_main("pr", "5")
+        self.assertEqual(rc, 1, out)
+        with open(out.split("LOG PR Validation: ")[1].strip(), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("FAILED test/verifier-runner.spec.ts: kills the step after its timeout", text)
+        self.assertIn("expected 3 to be 2", text)
+        self.assertLess(text.index("failed tests"), text.index("junit tail"))
 
     def test_a_failure_under_an_ignored_stage_passes(self):
         self.fake({"az repos pr policy list": self.policy("rejected"),

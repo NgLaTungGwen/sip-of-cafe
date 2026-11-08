@@ -34,7 +34,14 @@ Blocked:
 - dropping a database that is not a test database;
 - rm -r of /, ~, .., or an absolute path outside the worktrees and the temp
   folders;
-- the enhancer pushing anything (it only drafts on a branch).
+- the enhancer pushing anything (it only drafts on a branch);
+- running a script of another copy of this skill (an older plugin version in
+  the cache, a backup, another project's copy) when its version differs from
+  this one's: sonar-zero-5 implementers ran heavy.sh from 0.12.12 and from a
+  .claude/backups copy on a 0.15.1 run;
+- a shell redirect (`> file`, `>> file`, `tee file`) to a file outside the
+  worktrees, the temp folders and the run store: one implementer wrote a log
+  two levels above its worktree, which nobody could clean up.
 """
 import json
 import os
@@ -180,7 +187,7 @@ def check_git(seg, where, root, kind, bases):
     return None
 
 
-def check_rm(seg, root):
+def check_rm(seg, root, where=None):
     m = re.match(r"^(?:sudo\s+)?rm\s+(.*)$", seg)
     if not m:
         return None
@@ -188,6 +195,14 @@ def check_rm(seg, root):
     if not any(w.startswith("-") and ("r" in w.lower() or w == "--recursive") for w in words):
         return None
     for w in (unquote(x) for x in words if not x.startswith("-")):
+        if w.startswith("..") and where and w not in ("..", "../", "../*"):
+            # A relative path that climbs out of the current folder is fine
+            # while it stays inside the same batch worktree, below its top
+            # (sonar-zero-5: `cd api && rm -rf ../_bmad-output/cov-u3c`).
+            p = norm(os.path.join(where, w))
+            wt = batch_worktree(where)
+            if wt and p.startswith(norm(wt) + "/") and "*" not in w:
+                continue
         if w in ("/", "/*", "~", "~/", "$HOME", "${HOME}", ".", "..", "*") or w.startswith(".."):
             return f"rm -r {w} is not allowed"
         if w.startswith(("/", "~", "$HOME")) or re.match(r"^[A-Za-z]:[\\/]", w):
@@ -201,6 +216,77 @@ def check_rm(seg, root):
     return None
 
 
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+SKILL_SCRIPT = re.compile(r"""(?P<p>[^\s"';|&()<>]*?(?:bmad-batch-build|bmad-parallel-build)[^\s"';|&()<>]*?)[\\/]scripts[\\/](?P<n>[\w.-]+\.(?:sh|py))""")
+
+
+def posix_drive(p):
+    """Git Bash's /c/Users/... as C:/Users/... (abspath would make it C:/c/Users)."""
+    m = re.match(r"^/([a-zA-Z])/(.*)$", p)
+    return f"{m.group(1).upper()}:/{m.group(2)}" if m and os.name == "nt" else p
+
+
+def version_of(scripts_dir):
+    try:
+        with open(os.path.join(os.path.dirname(scripts_dir), "VERSION"), encoding="utf-8") as fh:
+            return fh.read().split()[0]
+    except (OSError, IndexError):
+        return None
+
+
+def check_skill_copy(cmd, kind=None):
+    """Deny a script run from another copy of this skill with another version.
+    The enhancer and the ship work on the skill's source, in worktrees under
+    the run store's src/, which are allowed whatever their version."""
+    if kind == "bmad-batch-enhancer":
+        return None
+    mine = norm(SCRIPTS)
+    own = version_of(SCRIPTS)
+    store_src = norm(os.environ.get("BMAD_RUNS_DIR") or os.path.join(os.path.expanduser("~"), ".claude", "bmad-batch-runs")) + "/src/"
+    for m in SKILL_SCRIPT.finditer(cmd):
+        d = m.group("p")
+        if "$" in d or not d:
+            continue
+        theirs = norm(posix_drive(d.rstrip("/\\")) + "/scripts")
+        if theirs.startswith(store_src):
+            continue
+        if theirs == mine or (own and version_of(theirs) == own):
+            continue
+        return (f"{m.group(0)} is another copy of this skill's scripts (version {version_of(theirs) or 'unknown'}, "
+                f"this run uses {own or 'this copy'}); run {SCRIPTS.replace(chr(92), '/')}/{m.group('n')} instead")
+    return None
+
+
+def allowed_write(p):
+    tmp = [norm(os.environ.get(k, "")) for k in ("TEMP", "TMP", "TMPDIR") if os.environ.get(k)]
+    store = norm(os.environ.get("BMAD_RUNS_DIR") or os.path.join(os.path.expanduser("~"), ".claude", "bmad-batch-runs"))
+    # Inside one worktree, not merely under .claude/worktrees/.
+    inside = re.search(r"/\.claude/worktrees/[^/]+/.", p) is not None
+    # A worktree's private git dir (<repo>/.git/worktrees/<name>/), where bg.sh
+    # and synthesis-diff.sh keep their files.
+    gitdir = re.search(r"/\.git/worktrees/[^/]+/.", p) is not None
+    return inside or gitdir or p.startswith(store) or any(t and p.startswith(t) for t in tmp)
+
+
+def check_redirect(seg, where):
+    for m in re.finditer(r"(?:\d?>>?|\btee(?:\s+-a)?)\s*(\"[^\"]+\"|'[^']+'|[^\s;&|]+)", seg):
+        target = unquote(m.group(1))
+        if not target or target.startswith(("&", "$")) or target in ("/dev/null", "nul", "NUL"):
+            continue
+        if target == "/tmp" or target.startswith(("/tmp/", "/dev/")):
+            continue  # Git Bash's /tmp is the user's temp folder
+        absolute = target.startswith(("/", "~")) or re.match(r"^[A-Za-z]:[\\/]", target)
+        if not absolute and ".." not in re.split(r"[\\/]", target):
+            continue
+        if not absolute and not where:
+            continue
+        p = norm(posix_drive(target) if target.startswith("/") else os.path.join(where or "", target))
+        if not allowed_write(p):
+            return (f"writing {target} puts a file outside the worktrees, the temp folders and the run store; "
+                    "write it inside your worktree (under _bmad-output/) or the temp folder")
+    return None
+
+
 def check_bash(cmd, cwd, root, kind):
     bases = protected(root) if root else set(PROTECTED)
     for pattern, why in PIPELINES + INFRA:
@@ -209,13 +295,16 @@ def check_bash(cmd, cwd, root, kind):
     if re.search(r"\bdrop\s+(database|schema)\b(?![^;]*_test\b)", cmd, re.I) or \
             re.search(r"\bdropdb\b(?![^;]*_test\b)", cmd):
         return "dropping a database that is not a test database is not allowed"
+    why = check_skill_copy(cmd, kind)
+    if why:
+        return why
     where = cwd
     for seg in segments(cmd):
         mc = re.match(r"^cd\s+(\"[^\"]*\"|'[^']*'|\S+)$", seg)
         if mc:
-            where = unquote(mc.group(1))
+            where = os.path.join(where, unquote(mc.group(1))) if where else unquote(mc.group(1))
             continue
-        why = check_git(seg, where, root, kind, bases) or check_rm(seg, root)
+        why = check_git(seg, where, root, kind, bases) or check_rm(seg, root, where) or check_redirect(seg, where)
         if why:
             return why
     return None

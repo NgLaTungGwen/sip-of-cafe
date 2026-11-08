@@ -45,7 +45,15 @@ and again after every review fix you are sent, and report each result:
   per Bash call while it prints still running. Never wrap a wait in a loop,
   `timeout` or `sleep`, and never start a command with `sleep N`: the harness
   blocks it.
-- Write logs and scratch files only inside the worktree.
+- Write logs and scratch files only inside the worktree, under `_bmad-output/`.
+  Never redirect output to a path outside it (`> ../../x.log`): the guard
+  refuses it, and nobody can clean such a file up.
+- Use only the `heavy.sh`, `bg.sh` and `lcov-gaps.py` paths your prompt names.
+  Never search the disk for another copy or use one from another project, an
+  older plugin version or a backup: the guard refuses those too.
+- You have no TaskStop or Monitor tool; don't call them. A command that hangs
+  stops at heavy.sh's time limit; wait for it with `bg.sh wait`.
+- Do not commit. The worker commits your changes after you report.
 
 When you finish, report what you changed, how you verified it, and anything left
 incomplete or risky.

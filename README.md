@@ -457,7 +457,7 @@ states one, and `<type>/<slug>` otherwise.
 - **Bounded waits:** Claude Code stops any single command after 10 minutes. So
   everything that can take longer, such as a suite, a build or the final
   verify, runs through `bg.sh run` in the background. Agents wait with one
-  `bg.sh wait` per call, which returns within 4 minutes, never with loops,
+  `bg.sh wait` per call, which returns within 100 s (before the Bash tool moves a call to the background), never with loops,
   `timeout` or `sleep`.
 - **Review fixes:** each fix round goes to a fresh coder in the foreground,
   so a worker never hands back while fixes are still landing.
@@ -486,6 +486,11 @@ capped at a quarter of the CPUs per suite.
 Each command reserves memory by kind unless `--mem` is given: about 1 GB for a
 typecheck or lint, 1.5 GB for an install, and 2.5 GB for anything else.
 Waiting commands check the queue every 10–14 seconds.
+
+Inside one worktree, test commands (vitest, `bun test`, `npm test`, anything
+with `--coverage`) also run one at a time. Parallel coders in a worktree share
+its coverage folder and its private test database, so they used to overwrite
+each other's lcov and trip over each other's rows.
 
 An optional hook routes heavy commands that agents type without `heavy.sh`
 through the queue. The skill never turns it on. To enable it, add this to
@@ -628,6 +633,35 @@ The decisions are logged in `~/.claude/bmad-batch-runs/enhance-log.md`.
 
 ### Recent changes
 
+- **0.15.2:** fixes from the sonar-zero-5 run (13.4 h for an estimated 6).
+  - `plan-waves.py` prints a **Split** line for a unit with more than 50 items
+    or a file over 2500 lines among others; the orchestrator splits it before
+    approval. The run's slowest unit had 64 findings and a 6500-line file.
+  - `verify.sh` exits 1 when a check fails (it printed `ok` with `apps.rc:2`),
+    installs `apps/` when it has no `node_modules`, lints `apps/`, and runs the
+    PR pipeline's count ratchets with their caps (`ci-ratchets.py`:
+    `--max-warnings $(API_MAX_WARNINGS)` and the like).
+  - Synthesis runs the changed Linux-only tests in a node container on a
+    Windows host (`linux-tests.sh`), and waits for its reviewer.
+  - `ci-status.py` puts the failed tests a build published (file, name,
+    message, stack) at the top of the failure log.
+  - `heavy.sh` runs one test command per worktree at a time.
+  - The guard refuses another copy's scripts (an old plugin version, a
+    backup, another project), a redirect to a file outside the worktree, and
+    no longer refuses `rm -r ../x` that stays inside the worktree.
+  - Every subagent prompt names the current `heavy.sh`, `bg.sh` and the new
+    `lcov-gaps.py`, which reads vitest's and bun's lcov (CRLF, backslash
+    paths, no branch data) and exits 2 on an empty one. Coders don't commit
+    or call TaskStop; fix rounds hold at most about 15 findings.
+  - Worktrees get the main checkout's untracked code graph
+    (`graphify-out/graph.json`).
+  - `bg.sh wait` returns within 100 s, under the Bash tool's 120 s default.
+  - The orchestrator resumes a worker or synthesis that was handed back early
+    instead of gating it.
+  - Earlier drafts shipped with it: setup.sh checks the az sign-in with a
+    token; heavy.sh runs every word of a command given as separate
+    arguments; the handoff checks `apps/` files with bun inside `apps/`;
+    `verify.sh --apps` runs the apps test suite.
 - **0.15.0:** `bmad-batch-build-split`, the same batch build ending in one
   PR per unit (stacked where units depend on each other).
   - `split-prs.py` cuts the verified integration branch into per-unit PR

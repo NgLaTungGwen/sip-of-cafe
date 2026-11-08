@@ -127,10 +127,14 @@ Commit each repair as its own `fix(merge): ...` commit.
 
 ## 3. Verify
 
-`verify.sh` runs build + typecheck, the test suite, and the `apps/` and
-`infra/` typechecks at the same time; in a project with a profile
+`verify.sh` runs build + typecheck, the test suite, the `apps/` typecheck, lint and
+`bun test` suite (installing `apps/` first when it has no `node_modules`), and the
+`infra/` typecheck at the same time; in a project with a profile
 (`.claude/bmad-batch-project.json`) it runs the profile's checks instead and
-ignores `--apps` and `--infra`. `heavy.sh` holds it until the machine has
+ignores `--apps` and `--infra`. Either way it also runs the count ratchets the
+PR pipeline enforces, with the pipeline's caps (`ratchet-<variable>.rc`, from
+`ci-ratchets.py`), and exits 1 when any check fails, so `bg.sh wait` prints
+`failed` and the rc lines. `heavy.sh` holds it until the machine has
 room, shared with every other session, so a busy machine slows the verify
 instead of crashing it. It often takes longer than the 10 minutes one Bash
 call may run, so start it in the background, adding `--apps` if `apps/`
@@ -158,6 +162,19 @@ before the PR. Anything that may take over 10 minutes goes through `bg.sh`
 the same way; never wrap a wait in a loop, `timeout` or `sleep`.
 
 Tests alone are not enough. In this repo vitest can pass while typecheck fails.
+
+**Linux-only tests.** On a Windows host, tests guarded by
+`skipIf(process.platform === "win32")` never run here, so their failures first
+show on CI (sonar-zero-5: two verifier tests, one CI fix round). Once verify
+is green, run them in a Linux container, one Bash call with `timeout: 600000`:
+
+```bash
+bash "<skill>/scripts/linux-tests.sh" "<iwt>"
+```
+
+`ok` and `none` are green. `failed` is a failure like any other: fix it.
+`skipped` (not Windows, docker not running, no npm lockfile) goes into
+`VERIFY:` as `linux-tests skipped (<why>)`.
 
 When something fails, find the cause in the merged code and fix it, then commit
 the fix as `fix(merge): ...`. Don't weaken, skip or delete tests to get green.
@@ -187,7 +204,9 @@ It writes the diff into the worktree's git dir and prints its path.
 means you changed nothing beyond clean merges: note `REVIEW: none (no
 synthesis changes)` and go on. Otherwise launch one reviewer with `Agent`
 (`subagent_type: general-purpose`, `model: opus`, foreground), with this
-prompt:
+prompt. If the call answers "Async agent launched", end your turn and wait for
+its completion notification; never write the section 6 reply while it runs
+(two synthesis agents ended without `RESULT:` that way in sonar-zero-5):
 
 ```text
 Review the changes a merge agent made while combining independently built

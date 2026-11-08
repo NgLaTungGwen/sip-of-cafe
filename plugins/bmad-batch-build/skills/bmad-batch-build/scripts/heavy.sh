@@ -3,6 +3,7 @@
 # machine-wide admission check shared by every session and every run.
 #
 # usage: heavy.sh [--weight N] [--mem MB] <command string>
+#        (separate words, as in heavy.sh npm ci --no-audit, are joined into one)
 #
 # The goal is that every parallel run finishes without crashing, not that the
 # machine stays idle: CPU and RAM may run high. A command starts when, counting
@@ -33,7 +34,16 @@ while [ $# -gt 1 ]; do
     *) break ;;
   esac
 done
-cmd=${1:?usage: heavy.sh [--weight N] [--mem MB] <command string>}
+: "${1:?usage: heavy.sh [--weight N] [--mem MB] <command string>}"
+# One string runs as given (pipes, && and globs inside it keep working). Separate
+# words are quoted and joined: taking only the first one ran a bare `npm` for
+# `heavy.sh npm ci --no-audit --no-fund` (batch-parallelism, 2026-11-02).
+if [ $# -eq 1 ]; then
+  cmd=$1
+else
+  printf -v cmd '%q ' "$@"
+  cmd=${cmd% }
+fi
 # Memory to reserve, by kind of command, unless --mem says: a typecheck or lint
 # needs far less than a test suite, and reserving 2.5 GB for each held
 # typechecks behind installs for over 20 minutes on 2026-10-26.
@@ -89,12 +99,59 @@ survey() {
   echo "$used $recent"
 }
 
+# One test run per worktree at a time. Parallel coders in one worktree share
+# its coverage folder (apps/bunfig.toml fixes coverageDir, so --coverage-dir
+# is ignored) and its private test database, so their runs overwrote each
+# other's lcov and failed on each other's rows; four of them also queued four
+# 2.5 GB suites at once on a machine with 4 GB free, and the queue held them
+# for 10 minutes (sonar-zero-5). A test command takes the worktree's lock
+# first, before it queues for the machine, and waits for the run ahead of it.
+is_test() {
+  case $1 in
+    *vitest*|*"bun test"*|*"npm test"*|*"npm run test"*|*"npm t "*|*jest*|*pytest*|*--coverage*|*"go test"*|*"cargo test"*) return 0 ;;
+  esac
+  return 1
+}
+wt_lock=""
+if is_test "$cmd"; then
+  # The worktree: a leading `cd <path>` in the command, else the current folder.
+  where=$PWD
+  if [[ $cmd =~ ^[[:space:]]*cd[[:space:]]+(\"[^\"]+\"|\'[^\']+\'|[^[:space:]\;\&]+) ]]; then
+    where=${BASH_REMATCH[1]}; where=${where//\"/}; where=${where//\'/}
+  fi
+  gd=$(git -C "$where" rev-parse --absolute-git-dir 2>/dev/null)
+  if [ -n "$gd" ]; then
+    mkdir -p "$gd/bmad"
+    wt_lock="$gd/bmad/test.lock"
+    t_lock=$SECONDS t_said=$((SECONDS - 60))
+    until mkdir "$wt_lock" 2>/dev/null; do
+      holder=$(cat "$wt_lock/pid" 2>/dev/null)
+      # A holder that died, or that never wrote its pid within a minute, leaves it behind.
+      if { [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; } ||
+         { [ -z "$holder" ] && [ -n "$(find "$wt_lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; }; then
+        rm -rf "$wt_lock"; continue
+      fi
+      if [ $((SECONDS - t_lock)) -ge "$max_wait" ]; then
+        echo "heavy.sh: waited $((SECONDS - t_lock))s for the test run ahead in this worktree; starting anyway" >&2
+        wt_lock=""; break
+      fi
+      if [ $((SECONDS - t_said)) -ge 60 ]; then
+        echo "heavy.sh: waiting for another test run in this worktree (pid ${holder:-?}) to end" >&2
+        t_said=$SECONDS
+      fi
+      sleep 5
+    done
+    [ -n "$wt_lock" ] && echo $$ > "$wt_lock/pid"
+    trap '[ -n "$wt_lock" ] && rm -rf "$wt_lock"' EXIT
+  fi
+fi
+
 # First come, first served: every command takes a ticket named by its arrival
 # time, and only the oldest live ticket may start. A later, smaller command
 # never overtakes an earlier one, even when it would fit.
 ticket="$dir/wait.$(date +%s%N).$$"
 echo "$$" > "$ticket"
-trap 'rm -f "$entry" "$ticket"' EXIT
+trap 'rm -f "$entry" "$ticket"; [ -n "$wt_lock" ] && rm -rf "$wt_lock"' EXIT
 
 # Prints how many live tickets are older than this one, dropping dead ones.
 ahead() {

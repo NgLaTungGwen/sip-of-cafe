@@ -84,6 +84,17 @@ mkdir -p "$wt/.claude"
 # A plugin install may leave the project without .claude/skills of its own.
 copy_in .claude/skills
 copy_in .claude/agents
+# The code graph, when the main checkout has one that git doesn't track:
+# CLAUDE.md tells every agent to query graphify-out/graph.json "when it
+# exists", and in a fresh worktree it never did, so the agents fell back to
+# grep (sonar-zero-5). Only the graph and its report; the build cache stays.
+if [ -f "$root/graphify-out/graph.json" ] && [ ! -e "$wt/graphify-out/graph.json" ]; then
+  mkdir -p "$wt/graphify-out"
+  for f in graph.json GRAPH_REPORT.md manifest.json; do
+    [ -f "$root/graphify-out/$f" ] && cp "$root/graphify-out/$f" "$wt/graphify-out/$f" && hide "graphify-out/$f"
+  done
+  [ -d "$root/graphify-out/wiki" ] && cp -r "$root/graphify-out/wiki" "$wt/graphify-out/wiki" && hide graphify-out/wiki
+fi
 
 # A private test database per worktree. Without one every run shares
 # <dev db>_test, and each run's teardown deletes rows the other created
@@ -116,6 +127,9 @@ printf '\nVITEST_MAX_FORKS=%s\nVITEST_MAX_THREADS=%s\nVITEST_MIN_FORKS=1\nVITEST
 
 scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 heavy="$scripts/heavy.sh" bg="$scripts/bg.sh" app="$scripts/app-check.sh"
+# Python on Windows cannot open Git Bash's /c/... form, so the coverage reader
+# gets the mixed C:/... form.
+lcov=$(cygpath -m "$scripts/lcov-gaps.py" 2>/dev/null || echo "$scripts/lcov-gaps.py")
 
 # A project whose profile names an app gets each unit checked in the running
 # app (app-check.sh). Every worktree gets its own port, so parallel units
@@ -179,6 +193,21 @@ else
   t_run=${t_test:-"the project test command, limited to those files"}
   t_clause="Run the test files you added or changed, with a compact reporter (\`cd $checks && $t_run\`), and"
 fi
+# An apps/ package on bun (hive-factory) is checked inside apps/ with bun: the
+# api/root commands above sent apps units to api/ and npx vitest
+# (sonar-zero-4, intake-toolchain-ux). Added to them, since a unit can touch both.
+apps_clause=""
+if [ -f "$wt/apps/package.json" ] && { [ -f "$wt/apps/bun.lock" ] || [ -f "$wt/apps/bun.lockb" ]; }; then
+  if [ -z "$suite_cmd" ] && [ -z "$t_test" ]; then
+    apps_clause=" Files under apps/ get their typecheck inside apps/ with bun, never npm: \`bash $heavy 'cd $wt/apps && bun run typecheck'\`."
+  else
+    apps_clause=" Files under apps/ are checked inside apps/ with bun, never npm or npx: test files with \`cd $wt/apps && bun test <files>\`, and the typecheck through the queue with \`bash $heavy 'cd $wt/apps && bun run typecheck'\`."
+  fi
+fi
+# The root suite never reaches apps/ (sonar-zero-5 units 6 and 7 ran it by hand).
+if [ -n "$apps_clause" ] && [ -n "$suite_cmd" ]; then
+  suite_fact="$suite_fact If this unit changed files under apps/, run the apps/ suite the same way beside it: \`bash $bg run $wt apps-suite \\\"bash $heavy 'cd $wt/apps && bun test'\\\"\` and \`bash $bg wait $wt apps-suite\`; it is a full suite too, and the root one does not reach apps/."
+fi
 [ -n "$t_test" ] || t_test="the project's test command, limited to those files"
 [ -n "$t_tc" ] || t_tc="the project's typecheck or build check"
 
@@ -192,6 +221,7 @@ persistent_facts = [
   "Run shell commands as \`cd $wt && ...\`, or use \`git -C $wt\`. Every command here is bash: with no Bash tool (PowerShell only, on Windows), run each one as bash -c '<command>' through PowerShell, writing a single quote inside it as two, and never translate it into PowerShell.",
   "Source files change only through the implementation subagent, review fixes included. For every fix round, launch a new \`${impl_type}\`${impl_fix} with the Agent tool in the foreground, giving it the spec path and the fixes. Never resume an earlier one with SendMessage: that runs in the background, and you would end your turn before the fixes land. This replaces step-04's instruction to re-engage the same implementation subagent. Never end your turn or hand back while a fix round is running. The parent edits only the spec and files under _bmad-output/.",
   "No single Bash call may run longer than 10 minutes; Claude Code moves a longer one to the background. Start anything that can take longer (the full suite, a build, an install) with \`bash $bg run $wt <name> \"<command>\"\` as a Bash call with run_in_background: true, and wait for it with one \`bash $bg wait $wt <name>\` per Bash call, repeated while it prints still running. Never wrap a wait in a loop, \`timeout\` or \`sleep\`. Logs and scratch files stay inside $wt. The one exception is {diff_file}, which steps 03 and 04 write to the system temp directory: keep it there, because inside $wt it would end up in the next diff.",
+  "Every subagent prompt you write yourself (a fix round, a reviewer, a helper) must say, in its own words: the skill's scripts are \`$heavy\`, \`$bg\` and \`$lcov\`, and no other copy (another copy's are refused); never call TaskStop or Monitor, which they cannot use (a stuck command ends at its time limit; wait for it with bg.sh); write files only inside $wt; do not commit. You commit the implementation subagent's work yourself, after it returns, so every commit carries your own trailer. Give one implementation subagent at most about 15 findings or 3 files per round, and run rounds one after another: parallel ones in one worktree share its test database and coverage folder (heavy.sh runs their tests one at a time anyway), and in sonar-zero-5 large rounds came back partial. To read coverage, run \`python $lcov <lcov file> <path part>\` instead of parsing lcov by hand: it handles CRLF, backslash paths and bun's lcov, and exits 2 when the lcov is empty.",
   "Write and change files with the Write or Edit tool. Never write a file or a script through a heredoc in Bash (\`cat > f <<'EOF'\`, \`python - <<'EOF'\`): quotes and backticks inside it break the shell, and the harness blocks the python one. Write the script to a file under $wt/_bmad-output/ with the Write tool, then run it.",
   "Workflow gaps: if the spec template has no baseline_revision, set it to the output of \`git -C $wt rev-parse HEAD\` before the first change. If _bmad-output/ is gitignored, commit the spec with \`git add -f\`. Exclude _bmad-output from git pathspecs with ':(exclude)_bmad-output'; the short form ':!_bmad-output' fails with 'Unimplemented pathspec magic'.",
   "Dependencies install in the background while you plan; planning needs only the checkout. Before any command that needs node_modules (tests, typecheck, build, lint), run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, halt with its output as the blocking condition.",
@@ -210,7 +240,9 @@ Launch a subagent with no prior conversation context, using the \`${impl_type}\`
 >
 > Read {spec_file} fully and implement it. The spec is the sole source of truth. Load every file listed in its frontmatter \`context:\` before you start.
 >
-> You own the targeted checks; the parent does not repeat them. $t_clause the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $checks && $t_tc'\`). Run them again after every review fix you are sent. Report each result.
+> You own the targeted checks; the parent does not repeat them. $t_clause the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $checks && $t_tc'\`).$apps_clause Run them again after every review fix you are sent. Report each result.
+>
+> Use only these copies of the skill's scripts: \`$heavy\`, \`$bg\` and, to read coverage, \`python $lcov <lcov file> <path part>\`. Never call TaskStop or Monitor; you cannot use them. Write logs and scratch files only inside $wt (under _bmad-output/). Do not commit: the parent commits your work.
 >
 > When you're done, report what you changed, how you verified it, and anything left incomplete or risky.
 """

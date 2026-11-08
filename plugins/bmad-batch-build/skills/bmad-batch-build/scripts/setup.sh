@@ -143,7 +143,10 @@ esac
 echo "REMOTE $remote"
 az_ok=0
 if command -v az >/dev/null 2>&1 || command -v az.cmd >/dev/null 2>&1; then
-  az account show --only-show-errors >/dev/null 2>&1 && az_ok=1
+  # `az account show` reads the cached profile and still passes after the
+  # sign-in has lapsed; a token for Azure DevOps fails then, as az boards will.
+  az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+    --query accessToken -o tsv --only-show-errors >/dev/null 2>&1 && az_ok=1
 fi
 if [ "$remote" = ado ] && [ "$az_ok" = 1 ]; then
   echo "TICKETS ado"
