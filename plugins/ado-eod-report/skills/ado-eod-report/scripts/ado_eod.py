@@ -1,8 +1,9 @@
-"""Collect one person's Azure DevOps work for a day, for the EOD report.
+"""Collect one person's Azure DevOps work for a day or a week, for the EOD and weekly reports.
 
 usage:
     python ado_eod.py check
-    python ado_eod.py collect [--date today|yesterday|YYYY-MM-DD] [--org URL]
+    python ado_eod.py collect [--date today|yesterday|YYYY-MM-DD] [--days N] [--org URL]
+    python ado_eod.py collect --week this|last|YYYY-MM-DD [--org URL]
     python ado_eod.py config [--org URL] [--sections JSON] [--timezone IANA] [--pat-stdin] [--show]
 
 check    signs in and prints `OK <name> <email> <org> (via <PAT|az login>)`.
@@ -10,6 +11,8 @@ collect  prints one JSON document: every work item the PAT's owner changed that
          day (or that is assigned to them and changed state that day), what
          changed and when, its parent, linked PRs and their status, the report
          section it belongs to, and the open items still assigned to them.
+         --days N widens the window to N days from --date; --week takes the
+         Monday-to-Sunday week holding that date.
 config   saves settings to <config dir>/config.json (the PAT to <config dir>/pat).
 
 Sign-in: a PAT from AZURE_DEVOPS_EXT_PAT, then ADO_PAT, then <config dir>/pat.
@@ -204,6 +207,22 @@ def parse_day(text: str, tz) -> dt.date:
         raise Fail("BAD_ARGS", f"--date must be today, yesterday or YYYY-MM-DD, got {text!r}")
 
 
+def parse_week(text: str, tz) -> dt.date:
+    """The Monday of the week named by this, last or a YYYY-MM-DD inside it."""
+    text = (text or "this").strip().lower()
+    today = dt.datetime.now(tz).date()
+    if text == "this":
+        day = today
+    elif text == "last":
+        day = today - dt.timedelta(days=7)
+    else:
+        try:
+            day = dt.date.fromisoformat(text)
+        except ValueError:
+            raise Fail("BAD_ARGS", f"--week must be this, last or YYYY-MM-DD, got {text!r}")
+    return day - dt.timedelta(days=day.weekday())
+
+
 def parse_time(value: str) -> dt.datetime:
     """ADO timestamps: 2026-10-28T09:12:33.1234567Z, with 0-7 fraction digits.
     fromisoformat only takes 'Z' and long fractions from Python 3.11."""
@@ -368,7 +387,8 @@ def summarize(updates: list, me: dict, start: dt.datetime, end: dt.datetime, tz)
         if not started:
             state_start, started = state, True
         by = u.get("revisedBy", {}) or {}
-        event = {"time": when.astimezone(tz).strftime("%H:%M"), "by_me": by.get("id") == me["id"],
+        local = when.astimezone(tz)
+        event = {"date": local.date().isoformat(), "time": local.strftime("%H:%M"), "by_me": by.get("id") == me["id"],
                  "by": by.get("displayName", "")}
         if u.get("rev") == 1:
             event["created"] = True
@@ -448,6 +468,26 @@ def parent_id(item: dict):
     return None
 
 
+def child_ids(item: dict) -> list:
+    return [int(r["url"].rstrip("/").rsplit("/", 1)[-1]) for r in item.get("relations") or []
+            if r.get("rel") == "System.LinkTypes.Hierarchy-Forward"]
+
+
+def children_of(item: dict, known: dict, merged_ids: set):
+    """How far a story's tasks are, counting the ones nobody touched in the
+    window: a merged PR (merged_ids) counts its task as done. Removed and cut
+    tasks don't count."""
+    kids = [known[c] for c in child_ids(item) if c in known]
+    if not kids:
+        return None
+    kids = [k for k in kids if k["fields"].get("System.State") not in ("Removed", "Cut")]
+    done = lambda k: k["id"] in merged_ids or k["fields"].get("System.State") in CLOSED_STATES
+    return {"total": len(kids), "done": sum(map(done, kids)),
+            "open": [{"id": k["id"], "type": k["fields"].get("System.WorkItemType"),
+                      "title": k["fields"].get("System.Title"), "state": k["fields"].get("System.State")}
+                     for k in kids if not done(k)]}
+
+
 def fetch_pr(client: Client, project: str, repo: str, pr: int) -> dict:
     try:
         data = client.call("GET", f"{urllib.parse.quote(project)}/_apis/git/repositories/{repo}/pullrequests/{pr}")
@@ -487,10 +527,11 @@ def web_url(org: str, fields: dict, wid: int) -> str:
     return f"{org}/{urllib.parse.quote(fields.get('System.TeamProject', ''))}/_workitems/edit/{wid}"
 
 
-def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None) -> dict:
+def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None, days: int = 1) -> dict:
+    """The work of [day, day + days); merged_today means merged inside that window."""
     me = me or whoami(client)
     start = dt.datetime.combine(day, dt.time.min, tzinfo=tz)
-    end = start + dt.timedelta(days=1)
+    end = start + dt.timedelta(days=days)
     warnings = []
 
     try:
@@ -514,13 +555,18 @@ def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None) -
             worked[wid] = (item, summary)
 
     parents = {parent_id(item) for item, _ in worked.values()} - {None}
-    parent_items = fetch_items(client, sorted(parents), relations=False) if parents else {}
+    parent_items = fetch_items(client, sorted(parents - set(items)), relations=True) if parents else {}
+    parent_items.update({pid: items[pid] for pid in parents if pid in items})
+    kids = {c for i in list(parent_items.values()) + [i for i, _ in worked.values()] for c in child_ids(i)}
+    known = dict(items)
+    known.update(fetch_items(client, sorted(kids - set(items)), relations=False) if kids - set(items) else {})
     pr_jobs = [(wid, ref) for wid, (item, _) in worked.items() for ref in pr_refs(item)]
     with ThreadPoolExecutor(max_workers=8) as pool:
         prs = dict(zip(pr_jobs, pool.map(lambda job: fetch_pr(client, *job[1]), pr_jobs)))
     if any(p.get("error") == "FORBIDDEN" for p in prs.values()):
         warnings.append("PR status unknown: the sign-in can't read code (a PAT needs the Code (Read) scope)")
 
+    merged_ids |= {wid for (wid, _), pr in prs.items() if pr.get("status") == "completed"}
     out_items = []
     for wid, (item, summary) in worked.items():
         f = item["fields"]
@@ -544,8 +590,11 @@ def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None) -
             "priority": f.get("Microsoft.VSTS.Common.Priority"),
             "remaining_work": f.get("Microsoft.VSTS.Scheduling.RemainingWork"),
             "blocked": is_blocked(f),
-            "parent": {"id": pid, "type": parent.get("System.WorkItemType"), "title": parent.get("System.Title")}
+            "parent": {"id": pid, "type": parent.get("System.WorkItemType"), "title": parent.get("System.Title"),
+                       "state": parent.get("System.State"),
+                       "children": children_of(parent_items.get(pid, {}), known, merged_ids)}
             if pid else None,
+            "children": children_of(item, known, merged_ids),
             "prs": [prs[(wid, ref)] for ref in pr_refs(item)],
             "merged_today": [p["id"] for p in merged if wid in p["work_items"]],
             "events": summary["events"],
@@ -563,7 +612,8 @@ def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None) -
                              "state": f.get("System.State"), "section": section_for(f, sections),
                              "priority": f.get("Microsoft.VSTS.Common.Priority"), "blocked": is_blocked(f)})
 
-    return {"date": day.isoformat(), "timezone": str(tz), "org": client.org, "me": me,
+    return {"date": day.isoformat(), "to": (day + dt.timedelta(days=days - 1)).isoformat(), "days": days,
+            "timezone": str(tz), "org": client.org, "me": me,
             "sections": [s["name"] for s in sections], "items": out_items, "merged_prs": merged,
             "open_assigned": open_out, "warnings": warnings}
 
@@ -613,6 +663,8 @@ def main(argv=None) -> int:
     p_check.add_argument("--org", default="")
     p_collect = sub.add_parser("collect")
     p_collect.add_argument("--date", default="today")
+    p_collect.add_argument("--days", type=int, default=1, help="window length in days, from --date")
+    p_collect.add_argument("--week", help="this, last or YYYY-MM-DD: the Monday-to-Sunday week holding it")
     p_collect.add_argument("--org", default="")
     p_config = sub.add_parser("config")
     p_config.add_argument("--org")
@@ -655,12 +707,17 @@ def main(argv=None) -> int:
             return 0
 
         tz = timezone(cfg)
-        day = parse_day(args.date, tz)
+        if args.week:
+            day, days = parse_week(args.week, tz), 7
+        else:
+            day, days = parse_day(args.date, tz), args.days
+        if not 1 <= days <= 31:
+            raise Fail("BAD_ARGS", f"--days must be 1 to 31, got {days}")
         first_run = "sections" not in cfg
         if first_run:
             cfg["sections"] = DEFAULT_SECTIONS
             save_config(cfg)
-        result = collect(client, day, tz, cfg["sections"], me)
+        result = collect(client, day, tz, cfg["sections"], me, days)
         result["first_run"] = first_run
         print(json.dumps(result, ensure_ascii=False, indent=1))
         return 0

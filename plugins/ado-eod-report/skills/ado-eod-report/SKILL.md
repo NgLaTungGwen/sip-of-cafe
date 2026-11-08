@@ -1,14 +1,20 @@
 ---
 name: ado-eod-report
-description: "Write the user's end-of-day (EOD) report from their Azure DevOps board. Reads every work item they changed that day, groups the work into PXP, SXP, Timetable and Others, infers the upcoming tasks from what was done, lists blockers, and prints the report as plain text to copy. Signs in with an Azure DevOps PAT, or with the Azure CLI sign-in (az login) when there is no PAT. Use when the user types /ado-eod-report, or asks for their EOD report, end-of-day report, daily report or daily status from ADO."
+description: "Write the user's end-of-day (EOD) report from their Azure DevOps board. Reads every work item they changed that day, groups the work into PXP, SXP, Timetable and Others, summarises it by user story for leadership (every story, task and PR kept with its status), infers the upcoming tasks, lists blockers, and puts the report on the clipboard for Teams. Signs in with an Azure DevOps PAT, or with the Azure CLI sign-in (az login) when there is no PAT. Use when the user types /ado-eod-report, or asks for their EOD report, end-of-day report, daily report or daily status from ADO."
 ---
 
 # ADO EOD report
 
 Builds the user's end-of-day report from Azure DevOps. The script reads the
 board with the user's PAT, or with their `az login` session when there is no
-PAT or the PAT is rejected. You turn what it returns into a short report a
-senior engineering manager can read in under a minute.
+PAT or the PAT is rejected. You turn what it returns into a short,
+summarised report for leadership — Senior Engineering Manager, Engineering
+Director, Sr. Engineering Director and Client Partner — that reads in under a
+minute. It summarises the day by user story, yet still names every story,
+task and PR with its status.
+
+For the weekly report, use the `ado-weekly-report` skill; it runs this
+skill's script.
 
 `<skill>` below is this skill's folder. Run Python as `python3` (`python` on
 Windows).
@@ -71,15 +77,25 @@ on. If you get an error line, handle it and run `check` again:
 python3 "<skill>/scripts/ado_eod.py" collect --date <date>
 ```
 
+(`--days N` widens the window to N days from `--date`, and `--week
+this|last|YYYY-MM-DD` takes a Monday-to-Sunday week; the weekly report uses
+them. The JSON has `date`, `to` and `days` for the window.)
+
 It prints JSON:
 
 - `items`: every work item the user changed that day. It also includes items
   assigned to them that someone else moved, such as QA closing a bug. Each
   item has:
-  - `section`, `type`, `title` and `parent`;
+  - `section`, `type` and `title`;
+  - `parent`: its `id`, `type`, `title`, `state` and `children`;
+  - `children`: for an item that has child items (a story), how far they are,
+    counting the ones nobody touched that day: `total`, `done`, and `open`
+    with each open child's `id`, `title` and `state`. A child whose PR merged
+    counts as done; removed and cut ones aren't counted. `parent.children` is
+    the same for the parent. Null when there are no children;
   - `state_start` and `state_end`: the state at the start and end of the day
     (`state_start` is null when the item was created that day);
-  - `events`: what changed and when. `by_me` says who made the change. Events
+  - `events`: what changed and when (`date`, `time`). `by_me` says who made the change. Events
     also carry comments, completed hours, board columns, linked PRs and other
     changed fields;
   - `prs`: linked pull requests, with status `active`, `draft`, `completed`
@@ -103,15 +119,25 @@ an empty report.
 
 ## 3. Write the report
 
-Use exactly this layout. Keep every section heading, even when it's empty.
+A busy day can hold many items. Don't write one long line per item: summarise
+**by user story**. Each story gets one outcome line, and its tasks and PRs are
+listed compactly under it, each with its status. Use exactly this layout; keep
+every heading, even when it's empty.
 
 ```
-# EOD Report
+# EOD Report – <Day DD Mon YYYY>
+
+## Summary
+<2-3 sentences in business terms: what was delivered, what is in review,
+any risk. Lead with the outcome that matters most.>
 
 ## Today Accomplished
 
 ### PXP
-- **[<Type> #<id>]:** <what was done> -> <status>
+- **[User Story #100] <short story name>:** <what it delivers, as an outcome> -> **<status>**
+  - Tasks: #101 <2-4 word label> **Done** · #102 <label> **In progress**
+  - PRs: #45 **Merged** · #46 **In review**
+- **[Bug #210] <short name>:** <what was fixed> -> **<status>**
 
 ### SXP
 - ...
@@ -120,7 +146,7 @@ Use exactly this layout. Keep every section heading, even when it's empty.
 - <what was done>
 
 ### Others
-- **[<Type> #<id>]:** <what was done> -> <status>
+- ...
 
 ## Upcoming Task(s)
 - ...
@@ -129,37 +155,60 @@ Use exactly this layout. Keep every section heading, even when it's empty.
 - None
 ```
 
-### Accomplished lines
+### Grouping
 
-- **List every task.** When tasks under the same parent were worked on,
-  write one line for the parent, then one indented line per task under it:
-  ```
-  - **[User Story #100]:** <what the story delivered> -> <status>
-    - **[Task #101]:** <what was done> -> <status>
-    - **[Task #102]:** <what was done> -> <status>
-  ```
-  A task line doesn't repeat the PR its parent line already names.
-- **Say what was done, not what the ticket is called.** Use the title,
-  today's comments and the changes. For example:
+- **A story line**: one line per user story (or other parent: Bug, Feature,
+  Product Backlog Item) that had work that day, on itself or on one of its
+  tasks. Each item's `parent` says which story it belongs to. A story whose
+  own parent is a Feature or Epic is still its own top-level line; it may
+  name the feature in a few words.
+- **Tasks line**: every task worked on under that story, as
+  `#id <label> **<status>**`, separated by ` · `. The label is 2-4 plain
+  words. With more than 6 tasks, group them by status instead:
+  `Tasks: 5 **Done** (#101, #102, #103, #104, #105) · 1 **In progress** (#106)`.
+  Leave the line out when the story has no tasks in the data.
+- **PRs line**: every PR linked to the story or its tasks, once each, with its
+  status. Leave it out when there are none.
+- **Items with no parent** (a standalone task, bug or story) get one line
+  each. One PR goes in the status (`-> **In review (PR #46)**`); a `PRs:`
+  sub-line only when there are several.
+- **The story's status** is its own, from `state_end` and its PRs, by the rules
+  below. When the story itself wasn't touched, use `parent.state` and
+  `parent.children`: when the story is still open and every child is done,
+  **Tasks done, story open**; when some are open, **In progress (2/4 tasks
+  done)**, from `done` and `total`. A story that is an item itself has the
+  same counts in its own `children`; add "(2/4 tasks done)" to an In progress
+  status there too.
+
+### What to write
+
+- **Outcomes, not activity, not ticket titles.** Use the title, the day's
+  comments and the changes. For example:
   - title "Retry logic for payment webhook";
   - comment "added exp. backoff, deployed to QA".
-  - Write: "Added retry with backoff for failed payment webhooks; deployed to
-    QA".
+  - Write: "Failed payment webhooks now retry with backoff; on QA".
 
   Don't invent work the data doesn't show. When there is only a title, keep
   the line close to it.
-- **Status words, from `state_end` and `prs`:**
+- **The Summary** is written last, from the lines below it, for a reader who
+  reads nothing else: 2-3 sentences, no task IDs, at most one story ID for the
+  headline item. Add counts when they help, such as "2 stories completed,
+  3 PRs merged"; they must match the lines below.
+- **Status words**, from `state_end` and `prs`:
   - A merged PR wins over the board: an item with `merged_today`, or a
     `completed` PR, is **Done, PR #n merged** whatever its state says. The
-    board often still shows New after a merge.
-  - Done, Closed or Completed: **Done**. A merged PR adds "PR #n merged".
+    board often still shows New after a merge. With several merged PRs it is
+    **Done, n PRs merged**, and the PRs line names them. In a Tasks or PRs
+    line this is just **Done** or **Merged**.
+  - Done, Closed or Completed: **Done**.
   - Resolved: **Resolved, awaiting verification**.
   - Active, In Progress or Committed with an active PR: **In review (PR #n)**.
   - Active, In Progress or Committed without a PR: **In progress**. Add
     remaining hours when they're set, for example "In progress (~4h left)".
   - Created that day and still New: **Created and scoped**.
   - Blocked: **Blocked**. The reason goes under Blocker(s).
-- **Timetable** uses plain lines without the ID prefix, like the template:
+  - PRs: **Merged**, **In review**, **Draft**, **Abandoned**.
+- **Timetable** uses plain lines without the ID prefix:
   `- Supported <who> with <what>`. Add the ID at the end in brackets when
   there is one.
 - **Drop noise.** Items where the only changes were the iteration, area,
@@ -168,11 +217,12 @@ Use exactly this layout. Keep every section heading, even when it's empty.
   items". Otherwise leave them out.
 - **Order** each section by importance: Done first, then In review, then In
   progress.
-- **A merged PR with no linked work item** still gets a line, in the section
-  its project matches: `**[PR #<n>]:** <what it did> -> Merged`.
+- **Merged PRs with no linked work item** still appear, in the section their
+  project matches. Group them by theme, one line per theme:
+  `**[PR #716, #717, #718] Build and pipeline fixes:** <what they achieved> -> **Merged**`.
+  One PR alone is `**[PR #<n>] <short name>:** ...`.
 - **Section headings** are the configured sections, in their order; the
-  template's names are the defaults.
-- **An empty section** gets `- No updates`.
+  template's names are the defaults. **An empty section** gets `- No updates`.
 
 ### Upcoming Task(s)
 
@@ -185,8 +235,8 @@ Write 2 to 5 lines, inferred from today's work. Most important first:
 3. In review: "Address review comments on PR #n" or "Merge PR #n once
    approved".
 4. Resolved: "Support QA verification of #id".
-5. Done items with open sibling tasks under the same parent: start the next
-   sibling.
+5. Done items whose story still has open tasks (in `children.open` or
+   `parent.children.open`): "Start <task> (#id)" for the next one.
 6. Fill any free lines from `open_assigned`, highest priority first: "Start
    <title> (#id)".
 
@@ -196,16 +246,18 @@ Don't list follow-ups for work that is finished and has nothing left.
 
 List items with `blocked: true`, and comments that say blocked, "waiting
 on", "pending from" or "depends on". Write one line each: what is blocked, on
-whom or what, and since when if it's known. If there are none, write
-`- None`.
+whom or what, the impact, and since when if it's known. If there are none,
+write `- None`.
 
-### Style, for a senior engineering manager
+### Style, for engineering and client leadership
 
-- Plain words. Write outcomes, not activity. No ADO field names, no internal
-  jargon, no times of day.
-- At most about 20 words per line. Never more than one line per item.
-- No item gets a second mention: if it's in Accomplished, Upcoming only says
-  what's next for it.
+- Plain business words. Outcomes and impact, not activity. No ADO field
+  names, board columns, internal jargon, times of day, or file and function
+  names.
+- A story line is at most about 20 words before the status. Tasks and PRs
+  lines carry only IDs, short labels and statuses.
+- No item gets a second mention: a task listed under its story never gets its
+  own line; if it's in Accomplished, Upcoming only says what's next for it.
 
 ## 4. Print
 
@@ -213,12 +265,13 @@ The user pastes the report into Teams, which shows markdown as raw `#` and
 `**`. So also put it on the clipboard as rich text:
 
 1. Write the same report as an HTML fragment to a file in the scratchpad:
-   `<p><b>EOD Report</b></p>`, then `<p><b>Today Accomplished:</b></p>` with
-   one `<ul>` whose items are the sections in bold, each holding a nested
-   `<ul>` of the lines (stories hold a further `<ul>` of their tasks); then
-   `<p><b>Upcoming task(s):</b></p>` and `<p><b>Blocker(s):</b></p>`, each with
-   a `<ul>`. Bold the `[Type #id]:` prefix and the status word. Escape `&`,
-   `<`, `>` and write `->` as `-&gt;`.
+   `<p><b>EOD Report – <date></b></p>`; `<p><b>Summary:</b></p>` and the
+   summary in a `<p>`; `<p><b>Today Accomplished:</b></p>` with one `<ul>`
+   whose items are the sections in bold, each holding a nested `<ul>` of the
+   story lines, and each story a further `<ul>` with its Tasks and PRs lines;
+   then `<p><b>Upcoming task(s):</b></p>` and `<p><b>Blocker(s):</b></p>`,
+   each with a `<ul>`. Bold the `[Type #id] name:` prefix and every status
+   word. Escape `&`, `<`, `>` and write `->` as `-&gt;`.
 2. On Windows, copy it:
    `powershell -NoProfile -STA -File "<skill>/scripts/copy_html.ps1" <file.html>`.
    Elsewhere, skip this step.
@@ -227,15 +280,16 @@ Then print the report in one fenced `text` block too, as a fallback:
 
 ````
 ```text
-# EOD Report
+# EOD Report – ...
 ...
 ```
 ````
 
 Below the block, say first that the report is on the clipboard and pastes
 into Teams with Ctrl+V. Then write at most three short lines:
-- how many work items were read, and anything left out on purpose (planning
-  noise, items only someone else touched);
+- how many work items were read, how many story lines they rolled up into,
+  and anything left out on purpose (planning noise, items only someone else
+  touched);
 - any `warnings`, such as PR status being unknown;
 - on `first_run` only: the section mapping, as
   `PXP ← project/area "PXP"; Others ← "Internal Tools"`, and that they can

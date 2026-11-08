@@ -57,6 +57,14 @@ class Parsing(unittest.TestCase):
         with self.assertRaises(eod.Fail):
             eod.parse_day("last friday", UTC)
 
+    def test_parse_week_gives_the_monday(self):
+        self.assertEqual(eod.parse_week("2026-10-30", UTC), dt.date(2026, 10, 26))
+        self.assertEqual(eod.parse_week("2026-10-26", UTC), dt.date(2026, 10, 26))
+        self.assertEqual(eod.parse_week("this", UTC).weekday(), 0)
+        self.assertEqual(eod.parse_week("this", UTC) - eod.parse_week("last", UTC), dt.timedelta(days=7))
+        with self.assertRaises(eod.Fail):
+            eod.parse_week("next", UTC)
+
     def test_strip_html(self):
         self.assertEqual(eod.strip_html("<div>Fixed &amp; deployed</div><div>QA next</div>"),
                          "Fixed & deployed / QA next")
@@ -172,6 +180,44 @@ class Collect(unittest.TestCase):
         self.assertEqual(out["open_assigned"][0]["section"], "Timetable")
         self.assertEqual(out["merged_prs"], [])
         self.assertEqual(item["merged_today"], [])
+
+    def test_story_progress_counts_untouched_tasks(self):
+        client = FakeClient()
+        kid = lambda i: {"rel": "System.LinkTypes.Hierarchy-Forward", "url": f"https://dev.azure.com/acme/_apis/wit/workItems/{i}"}
+        client.items[100]["relations"] = [kid(101), kid(150), kid(151)]
+        client.items[150] = {"id": 150, "fields": {"System.Title": "Untouched task", "System.WorkItemType": "Task",
+                                                   "System.State": "New"}}
+        client.items[151] = {"id": 151, "fields": {"System.Title": "Dropped", "System.WorkItemType": "Task",
+                                                   "System.State": "Removed"}}
+        client.items[101]["fields"]["System.State"] = "Active"  # still open on the board, but its PR is completed
+        out = eod.collect(client, DAY, UTC, eod.DEFAULT_SECTIONS)
+        children = out["items"][0]["parent"]["children"]
+        self.assertEqual((children["total"], children["done"]), (2, 1))
+        self.assertEqual([o["id"] for o in children["open"]], [150])
+        self.assertIsNone(out["items"][0]["children"])
+
+    def test_week_window_takes_every_day_of_it(self):
+        client = FakeClient()
+        client.updates[101].append(update(3, "2026-10-31T09:00:00Z", System_History={"newValue": "Deployed to QA"}))
+        day_only = eod.collect(client, DAY, UTC, eod.DEFAULT_SECTIONS)
+        self.assertEqual(len(day_only["items"][0]["events"]), 1)
+        week = eod.collect(client, dt.date(2026, 10, 26), UTC, eod.DEFAULT_SECTIONS, days=7)
+        events = week["items"][0]["events"]
+        self.assertEqual([e["date"] for e in events], ["2026-10-27", "2026-10-28", "2026-10-31"])
+        self.assertEqual((week["items"][0]["state_start"], week["to"], week["days"]), (None, "2026-11-01", 7))
+        self.assertIn("searchCriteria.maxTime=2026-11-02T00%3A00%3A00Z", client.pr_query)
+
+    def test_cli_week_and_days_bounds(self):
+        with mock.patch.object(eod, "connect", return_value=(FakeClient(), ME)),                 mock.patch.object(eod, "load_config", return_value={"sections": eod.DEFAULT_SECTIONS}):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(eod.main(["collect", "--week", "2026-10-29"]), 0)
+            out = json.loads(buf.getvalue())
+            self.assertEqual((out["date"], out["to"]), ("2026-10-26", "2026-11-01"))
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(eod.main(["collect", "--days", "0"]), 2)
+            self.assertIn("BAD_ARGS", buf.getvalue())
 
     def test_items_of_a_merged_pr_are_listed_though_untouched(self):
         client = FakeClient()

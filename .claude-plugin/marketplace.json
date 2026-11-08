@@ -15,7 +15,7 @@
     {
       "name": "ado-eod-report",
       "source": "./plugins/ado-eod-report",
-      "description": "End-of-day report from your Azure DevOps board: the day's work items grouped by section, upcoming tasks inferred from them, and blockers, copied as rich text that pastes into Teams with its formatting."
+      "description": "Azure DevOps status reports for leadership: the end-of-day report and the weekly report (Monday to Sunday), summarised by user story with every story, task and PR and its status, upcoming work inferred from it, and blockers, copied as rich text that pastes into Teams with its formatting."
     }
   ]
 }

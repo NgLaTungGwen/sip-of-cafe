@@ -4,7 +4,9 @@ Claude Code skills.
 
 ## ado-eod-report
 
-Writes your end-of-day report from your Azure DevOps board. It reads every
+Writes your end-of-day report, and your weekly report, from your Azure DevOps
+board, for leadership: each summarised by user story, yet naming every story,
+task and PR with its status. The end-of-day report: It reads every
 work item you changed that day, plus items assigned to you that someone else
 moved, such as QA closing a bug, and the work items of every PR of yours that
 merged that day, even when the board still shows them as New. It sorts the
@@ -20,7 +22,9 @@ claude plugin marketplace add NgLaTungGwen/sip-of-cafe
 claude plugin install ado-eod-report@sip-of-cafe
 ```
 
-or `npx skills add NgLaTungGwen/sip-of-cafe` and pick `ado-eod-report`.
+or `npx skills add NgLaTungGwen/sip-of-cafe` and pick `ado-eod-report` and
+`ado-weekly-report` (the weekly report runs the EOD skill's script, so install
+both).
 
 ### Set up once
 
@@ -55,6 +59,18 @@ or `npx skills add NgLaTungGwen/sip-of-cafe` and pick `ado-eod-report`.
 (With the plugin install: `/ado-eod-report:ado-eod-report`.) Notes after the
 date go into the report for work that ADO doesn't show.
 
+The weekly report covers Monday to Sunday. It splits what was delivered from
+what is in progress, and infers a plan for next week from what was
+implemented:
+
+```
+/ado-weekly-report                  # this week (last week on a Monday)
+/ado-weekly-report last
+/ado-weekly-report 2026-10-28 also ran the PXP demo for the client
+```
+
+(With the plugin install: `/ado-eod-report:ado-weekly-report`.)
+
 On Windows the report lands on your clipboard as rich text: click into the
 Teams message box and press Ctrl+V. The headings stay bold and the tasks nest
 under their stories. The same report is also printed as plain text, for other
@@ -78,6 +94,11 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.4.0:** the weekly report (`ado-weekly-report`), Monday to Sunday, from
+  the same script: `collect --week this|last|YYYY-MM-DD`, and `--days N` for
+  any window. Both reports are summarised by user story for leadership, and
+  each story shows how many of its tasks are done, counting tasks nobody
+  touched in the window.
 - **0.3.0:** the work items of your PRs merged that day are listed and count
   as done, even when the board still shows them as New; merged PRs with no
   work item get their own line. Each task gets its own line under its story.
