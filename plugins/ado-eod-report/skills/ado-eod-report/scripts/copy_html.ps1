@@ -17,7 +17,7 @@ $endFrag = $startFrag + $utf8.GetByteCount($fragment)
 $endHtml = $endFrag + $utf8.GetByteCount($post)
 $cfHtml = ($header -f $startHtml, $endHtml, $startFrag, $endFrag) + $pre + $fragment + $post
 
-$plain = [Net.WebUtility]::HtmlDecode(($fragment -replace '<li>', '- ' -replace '</(p|li)>', "`r`n" -replace '<[^>]+>', ''))
+$plain = [Net.WebUtility]::HtmlDecode(($fragment -replace '<li>', '- ' -replace '<br[^>]*>', "`r`n" -replace '</td>', "`t" -replace '</(p|li|tr)>', "`r`n" -replace '<[^>]+>', ''))
 $data = New-Object Windows.Forms.DataObject
 # A MemoryStream keeps the UTF-8 bytes exact; a string would be re-encoded.
 $data.SetData([Windows.Forms.DataFormats]::Html, (New-Object IO.MemoryStream(, $utf8.GetBytes($cfHtml))))

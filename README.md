@@ -123,7 +123,10 @@ the PAT comes from, never the PAT itself.
 - **0.6.0:** reports name who they are for: the first run confirms the
   signed-in account and asks your name and role (`config --name/--role`).
   Tasks are written as plain sentences saying what was done, with the IDs
-  after them, instead of ID and label lists.
+  after them, instead of ID and label lists. The weekly report follows the
+  team template: a two-column table (Planned and Accomplished, Plan for Next
+  Week, People Manager's comments left empty) with plain activity lines per
+  project and theme, and it asks for personal learning and other notes.
 - **0.5.0:** GitHub as a second source: your issues (with sub-issues as
   tasks) and PRs for the window, through the `gh` CLI's sign-in, in the same
   sections and counts. `github.exclude` and `github.sections` in the config.
