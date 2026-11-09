@@ -44,7 +44,12 @@ from pathlib import Path
 API = "7.1"
 # The Azure DevOps application ID: `az` issues tokens for this resource.
 ADO_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"
-DEFAULT_SECTIONS = [
+# With no sections configured, each item goes to a section named after its own
+# Azure DevOps project, so nothing about any one team is built in.
+OTHERS = "Others"
+# Older versions saved these fixed sections on the first run. A config holding
+# exactly them was never chosen by the user, so it is treated as unset.
+LEGACY_SECTIONS = [
     {"name": "PXP", "match": ["PXP"]},
     {"name": "SXP", "match": ["SXP"]},
     {"name": "Timetable", "match": ["Timetable"], "style": "plain"},
@@ -431,6 +436,8 @@ def relevant(item_fields: dict, summary: dict, me: dict) -> bool:
 
 
 def section_for(fields: dict, sections: list) -> str:
+    if not sections:
+        return fields.get("System.TeamProject") or OTHERS
     hay = [fields.get("System.TeamProject", ""), fields.get("System.AreaPath", ""),
            fields.get("System.IterationPath", "")] + split_tags(fields.get("System.Tags"))
     for s in sections:
@@ -439,7 +446,20 @@ def section_for(fields: dict, sections: list) -> str:
             if any(re.search(pattern, h or "", re.I) for h in hay):
                 return s["name"]
     fallback = [s["name"] for s in sections if not s.get("match")]
-    return fallback[-1] if fallback else "Others"
+    return fallback[-1] if fallback else OTHERS
+
+
+def section_list(sections: list, used: list) -> list:
+    """The report's sections in order, with their style. Configured sections keep
+    their order; by-project sections are sorted, with Others last."""
+    if sections:
+        names = [s["name"] for s in sections]
+        out = [{"name": s["name"], "style": s.get("style", "stories")} for s in sections]
+        if OTHERS in used and OTHERS not in names:
+            out.append({"name": OTHERS, "style": "stories"})
+        return out
+    names = sorted({u for u in used if u != OTHERS}, key=str.lower) + ([OTHERS] if OTHERS in used else [])
+    return [{"name": n, "style": "stories"} for n in names]
 
 
 def split_tags(tags) -> list:
@@ -614,7 +634,8 @@ def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None, d
 
     return {"date": day.isoformat(), "to": (day + dt.timedelta(days=days - 1)).isoformat(), "days": days,
             "timezone": str(tz), "org": client.org, "me": me,
-            "sections": [s["name"] for s in sections], "items": out_items, "merged_prs": merged,
+            "sections": section_list(sections, [i["section"] for i in out_items + open_out]),
+            "sections_from": "config" if sections else "project", "items": out_items, "merged_prs": merged,
             "open_assigned": open_out, "warnings": warnings}
 
 
@@ -668,7 +689,7 @@ def main(argv=None) -> int:
     p_collect.add_argument("--org", default="")
     p_config = sub.add_parser("config")
     p_config.add_argument("--org")
-    p_config.add_argument("--sections", help='JSON list: [{"name": "PXP", "match": ["PXP"]}, ...]')
+    p_config.add_argument("--sections", help='JSON list: [{"name": "Team A", "match": ["ProjectA"]}, ...]; [] groups by project')
     p_config.add_argument("--timezone")
     p_config.add_argument("--pat-stdin", action="store_true", help="read the PAT from stdin and save it")
     p_config.add_argument("--show", action="store_true")
@@ -696,7 +717,7 @@ def main(argv=None) -> int:
                 print(f"PAT saved to {save_pat(pat)}")
             save_config(cfg)
             _, source = load_pat()
-            shown = dict(cfg, sections=cfg.get("sections", DEFAULT_SECTIONS),
+            shown = dict(cfg, sections=cfg.get("sections") or "one per Azure DevOps project",
                          pat=source or "none (az login is used if signed in)")
             print(json.dumps(shown, indent=2))
             return 0
@@ -713,9 +734,9 @@ def main(argv=None) -> int:
             day, days = parse_day(args.date, tz), args.days
         if not 1 <= days <= 31:
             raise Fail("BAD_ARGS", f"--days must be 1 to 31, got {days}")
-        first_run = "sections" not in cfg
+        first_run = "sections" not in cfg or cfg["sections"] == LEGACY_SECTIONS
         if first_run:
-            cfg["sections"] = DEFAULT_SECTIONS
+            cfg["sections"] = []
             save_config(cfg)
         result = collect(client, day, tz, cfg["sections"], me, days)
         result["first_run"] = first_run
