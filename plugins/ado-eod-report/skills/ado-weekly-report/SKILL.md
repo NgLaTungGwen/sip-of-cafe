@@ -29,7 +29,8 @@ as `python3` (`python` on Windows).
 
 ## 1. Check access
 
-Read `<eod>/references/access.md` and follow it:
+Read `<eod>/references/access.md` and follow it, including "Who the report
+is for": on `PROFILE NONE`, ask the user who they are before collecting.
 
 ```bash
 python3 "<eod>/scripts/ado_eod.py" check
@@ -60,6 +61,7 @@ Progress, leave out a section with nothing in it.
 
 ```
 # Weekly Report – <DD Mon> to <DD Mon YYYY>
+**<profile name>** · <profile role>
 
 ## Summary
 - <3-5 bullets for a reader who reads nothing else: the headline outcomes,
@@ -70,8 +72,8 @@ Progress, leave out a section with nothing in it.
 
 ### <section name, from `sections`>
 - **[User Story #100] <short story name>:** <what it delivers, as an outcome> -> **Done, PR #45 merged**
-  - Tasks: #101 <2-4 word label> **Done** · #102 <label> **Done**
-  - PRs: #45 **Merged** · #48 **Merged**
+  - <what this task did, in plain words> (#101, PR #45) **Done**
+  - <what this task did, in plain words> (#102, PR #48) **Done**
 
 ### <next section>
 - ...
@@ -80,8 +82,8 @@ Progress, leave out a section with nothing in it.
 
 ### <section name>
 - **[User Story #120] <short story name>:** <where it stands> -> **In progress (2/4 tasks done)**
-  - Tasks: #121 <label> **Done** · #122 <label> **In review (PR #50)**
-  - PRs: #50 **In review**
+  - <what this task did, in plain words> (#121) **Done**
+  - <what this task is doing, in plain words> (#122, PR #50) **In review**
 
 ## Plan for Next Week
 - ...
@@ -101,8 +103,8 @@ On top of `report-rules.md`:
   task done (status **Tasks done, story open**).
 - **In Progress (carrying over)** holds everything else: in review, in
   progress, created and scoped, blocked. A story with any open task in
-  `children.open` goes here, once, with all its worked tasks on its Tasks
-  line and its status as **In progress (done/total tasks done)**, even when
+  `children.open` goes here, once, with all its worked tasks as its bullets
+  and its status as **In progress (done/total tasks done)**, even when
   every task worked this week is done.
 - Every story, task and PR from the week appears exactly once.
 - **Outcome lines** describe what the week delivered, from the titles, all the
@@ -117,7 +119,8 @@ Write it last, from the lines below it. 3-5 bullets, business words, no task
 IDs; at most one story ID per bullet for a headline item. The delivery-count
 bullet is required, and its numbers must match the Delivered lines: count
 user stories (and other parents) and bugs from their own lines, tasks from
-the Tasks lines, and PRs merged from `merged_prs`.
+the task bullets (a merged bullet counts each ID), and PRs merged from
+`merged_prs`.
 
 ### Plan for Next Week
 
@@ -125,7 +128,7 @@ Write 4 to 8 lines, inferred from what was implemented this week and what is
 left. Each line names its item(s) with an ID. Most important first:
 
 1. Blocked items: what has to happen to unblock them, and who.
-2. Carry-over in progress: "Complete <work> (#id): <next concrete step>",
+2. Carry-over in progress: "Complete <work, in plain words> (#id): <next concrete step>",
    from the comments, the story's open tasks, or "finish and raise PR".
 3. In review: "Get PR #n reviewed and merged".
 4. Resolved: "Support QA verification of #id".

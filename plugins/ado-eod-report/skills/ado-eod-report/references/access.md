@@ -8,7 +8,8 @@ python3 "<eod>/scripts/ado_eod.py" check
 ```
 
 `OK <name> <email> <org> (via PAT)` or `(via az login)` means you can go
-on. If you get an error line, handle it and run `check` again:
+on, after the `PROFILE` line below. If you get an error line, handle it and
+run `check` again:
 
 - **`ERROR NO_AUTH`**: no PAT, and no Azure CLI sign-in that works for this
   organization. Offer the two ways, Azure CLI first when the message names
@@ -45,3 +46,22 @@ on. If you get an error line, handle it and run `check` again:
   account has no access to the project. Ask the user to fix the PAT's scopes,
   or to get access to the project.
 - **`ERROR NETWORK`**: say that Azure DevOps can't be reached, and stop.
+
+## Who the report is for
+
+The second line of `check` says whose report this is:
+
+- **`PROFILE <name> | <role>`** (the role may be missing): go on. The report
+  header uses this name and role.
+- **`PROFILE NONE`**: nobody has said yet. Before collecting, ask the user
+  with one question (AskUserQuestion when you have it):
+  1. Is the signed-in account, `<name> <email>` from the `OK` line, theirs?
+     The report covers only that account's work. If it isn't theirs (a
+     shared, service or teammate's account), stop and have them sign in as
+     themselves (`access` steps above), then run `check` again.
+  2. Their name as it should appear on the report (offer the signed-in name),
+     and their role or team, such as "Backend Engineer, Payments" (optional).
+
+  Save the answer, then run `check` again:
+  `python3 "<eod>/scripts/ado_eod.py" config --name "<name>" --role "<role>"`.
+  It is asked once; `config --name/--role` changes it later.

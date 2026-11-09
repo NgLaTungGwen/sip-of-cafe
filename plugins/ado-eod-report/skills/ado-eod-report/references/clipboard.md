@@ -7,13 +7,14 @@ The user pastes the report into Teams, which shows markdown as raw `#` and
 `**`. So also put it on the clipboard as rich text:
 
 1. Write the same report as an HTML fragment to a file in the scratchpad:
-   - The title as `<p><b>... Report – <date></b></p>`.
+   - The title as `<p><b>... Report – <date></b></p>`, then the header line
+     `<p><b><name></b> · <role></p>` (no ` · <role>` when there is none).
    - Each top heading as `<p><b><Heading>:</b></p>`, followed by its content:
      a `<p>` for prose, a `<ul>` for bullets.
    - A sectioned heading (the accomplished or delivered work) gets one `<ul>`
      whose items are the sections in bold, each holding a nested `<ul>` of
-     the story lines, and each story a further `<ul>` with its Tasks and PRs
-     lines.
+     the story lines, and each story a further `<ul>` with its task and PR
+     bullets.
    - Bold the `[Type #id] name:` prefix and every status word. Escape `&`,
      `<`, `>` and write `->` as `-&gt;`.
 2. On Windows, copy it:
