@@ -624,7 +624,8 @@ def add_journal(row, session, slug, root, run_copy=False):
 
 def unit_minutes(row, slug, root):
     """Each unit's size and worker minutes, from the run's plan file, so
-    plan-waves.py can calibrate S/M/L from real runs. A worker is matched to
+    plan-waves.py can calibrate its model from real runs
+    (items and its own estimate ride along, for the accuracy check). A worker is matched to
     its unit by the `Unit: <n>` line of its prompt, or else by its worktree
     name, <slug>-<n>; a lane worker without the line can't be matched. When a
     unit was dispatched twice, the last worker counts. Returns None without a
@@ -637,6 +638,8 @@ def unit_minutes(row, slug, root):
     except ValueError:
         return None
     size = {u["id"]: u.get("size") for u in plan.get("units", [])}
+    items = {u["id"]: u.get("items") for u in plan.get("units", [])}
+    est = plan.get("unit_estimates") or {}
     by_unit = {}
     for s in sorted(row.get("worker_spans", []), key=lambda s: s["start"]):
         unit = s.get("unit")
@@ -645,6 +648,11 @@ def unit_minutes(row, slug, root):
             unit = int(m.group(1)) if m else None
         if unit in size:
             by_unit[unit] = {"id": unit, "size": size[unit], "min": s["min"]}
+            # What plan-waves.py expected, so --accuracy can compare it.
+            if items.get(unit):
+                by_unit[unit]["items"] = items[unit]
+            if (est.get(str(unit)) or {}).get("p50"):
+                by_unit[unit]["est"] = est[str(unit)]["p50"]
     return [by_unit[k] for k in sorted(by_unit)] or None
 
 

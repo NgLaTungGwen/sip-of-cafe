@@ -120,6 +120,27 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.15.4:** the plan's time estimate (sonar-zero-5 was estimated at 6 h and
+  took 13.4 h).
+  - A unit with `items` takes 40 min plus 2.2 per item plus 30 per 1000 lines
+    of a file over 2500; recorded runs correct every number from the first
+    one on, per project, not only after five per size.
+  - Every estimate comes with a p80 and a **Critical path**; a **Straggler
+    risk** line names a unit that would dominate the run; a **Long run** line
+    suggests shipping the first wave on its own.
+  - Units are scheduled in rounds, longest chain first, so similar units share
+    a wave; a parallel wave is stretched when its suites would queue for the
+    CPUs (`heavy.sh`).
+  - Units that share a file are chained (`Chained` line), not run side by side.
+  - Every unit has a budget (twice its estimate). Workers get it, start no new
+    fix round past it and list what is left under `REMAINING:`;
+    `straggler.py` compares a running unit with it. The orchestrator builds
+    the remaining items as a later unit. This part is instructions to the
+    agents and has not been run in a real build.
+  - Advice also compares a 4 h or longer batch with building directly (an
+    assumed 35% per-unit overhead, not yet measured).
+  - `plan-waves.py --accuracy` compares recorded units and runs with their
+    estimates; `cost-report.py` now records each unit's items and estimate.
 - **0.15.3:** `heavy.sh` admits by measured load as well as declared slots.
   - A test suite weighs as many slots as its Vitest workers (it weighed 1, so a
     12-CPU machine admitted twelve suites of three workers).

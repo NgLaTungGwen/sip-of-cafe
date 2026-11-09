@@ -45,6 +45,8 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 - `<agents>`: the agent name prefix from SKILL.md (`bmad-batch-build:` or empty),
   or `general-purpose` in fallback mode
 - `<name>`: `<slug>-<n>`
+- `<budget>` and `<estimate>`: the unit's `budget` and `p50` under `unit_estimates` in the
+  plan file, in minutes
 - `<wt>`: `<root>/.claude/worktrees/<name>`
 - `<branch>`: the unit's branch
 - `<base>`: the wave's base. For wave 1 that is `origin/<base>` (SKILL.md), and the
@@ -54,6 +56,7 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 ```text
 You are a Build Auto worker for one unit of a BMAD batch build.
 Unit: <n>
+Budget: <budget> min (about <estimate> expected). Run `date +%s` first and keep the number.
 
 Project root: <wt>   (a git worktree on branch <branch>, which you create in step 0)
 Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the main checkout) or in another worktree.
@@ -85,6 +88,13 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
    next workflow step, launch another agent on the same files, or write the
    reply in step 3. A spec written after the code, or a
    skipped review, fails the gate and the unit is not merged.
+   Budget: before you start any further fix round, compare `date +%s` with the
+   number you kept. Once the budget is used up, start no new round: finish the
+   one you are in, record the findings still open in the spec's review log as
+   deferred, and list them under REMAINING in your reply. The orchestrator
+   builds them as a unit of their own; a unit that runs on past its budget
+   holds up everything behind it (sonar-zero-5: 315 min, about 12 coder
+   rounds).
 3. When the workflow halts, and only once every implementation subagent you
    launched has returned, reply with exactly these lines and nothing else:
    SPEC: <absolute path of the spec or result file the workflow wrote>
@@ -94,6 +104,8 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
    INTERFACES: <each interface this unit provides or consumes, as built:
    route and payload, type, or method signature, one per `;`. Mark any that
    differ from the intent's agreed shape with "CHANGED". Or "none".>
+   REMAINING: <the findings or acceptance criteria you did not finish because the
+   budget ran out, one per `;`, or "none">
    SKILL ISSUES: <each time a skill script, its settings or these
    instructions got in the way and you worked around it: the command, the
    error line and the workaround, separated by ` | `. Not faults in the project's

@@ -331,12 +331,22 @@ lane. A unit that is only one big file and cannot be cut further stays one
 unit: show its Split line in the approval table with the reason, instead of
 splitting it.
 
-It sorts the units into waves: a wave holds the units whose dependencies are
-all in earlier waves. Each wave then runs as a lane or in parallel, whichever
-is faster for that wave by more than a margin. The margin is 20 min, or 40 min
-on a busy machine, and a tie goes to lane, because lane costs less and merges
-nothing. The script estimates whole-run times for lane, parallel (only when no
-unit depends on another) and waves, and picks the mode:
+It also reads each unit's `files` and chains units that share one: the later
+gets a `depends_on` on the earlier (a **Chained** line says so), because two
+units editing one file cannot be merged side by side.
+
+It schedules the units in rounds. A round holds up to 4 ready units (all their
+dependencies are in earlier rounds), the unit with the longest chain of work
+behind it first and then the longest unit, so units of similar length share a
+wave and a short unit does not wait behind a long one. A wave's `Agent` calls
+return together, so a unit cannot join a wave that is already running. Each
+wave then runs as a lane or in parallel, whichever is faster for that wave by
+more than a margin. The margin is 20 min, or 40 min on a busy machine, and a
+tie goes to lane, because lane costs less and merges nothing. A parallel wave
+is stretched by the queue for the machine: its suites wait for `heavy.sh` when
+the workers together want more CPUs than there are. The script estimates
+whole-run times for lane, parallel (only when no unit depends on another) and
+waves, and picks the mode:
 
 - **parallel:** one wave, run in parallel. No unit depends on another.
 - **lane:** every wave runs as a lane: one unit, small units, or a chain.
@@ -349,11 +359,23 @@ and Claude Code allows 20 subagents at once per session; on 2026-10-26 runs of
 12, 9 and 5 parallel workers at the same time got launches refused and
 stalled the build queue for hours. The script prints the cap it used.
 
-Unit times come from measured runs once a size has five measurements, and
-until then from the first calibration: S 50 min, M 100 min, L 160 min. The
-script writes the schedule back into the plan file and prints the **Mode**
-line for the approval table. Recording the run later matches each unit's
-measured time to its size, so the estimates calibrate themselves.
+A unit with `items` takes 40 min plus 2.2 min per item, plus 30 min per 1000
+lines of every file over 2500 lines it owns (sonar-zero-5: 21 findings took 85
+min, 46 took 140, 64 with a 6500-line file took 315). A unit without `items`
+takes its size's minutes: S 50, M 100, L 160. Recorded runs correct every
+number from the first one on (three prior runs' worth of weight), first over
+all projects and then over this project's own, so give every unit `items` and
+`files`. The script also prints a p80, from the measured spread of recorded
+units (1.6 times the estimate until there are five), and a **Critical path**:
+the least the run can take however many workers it has. Show the p80 with the
+estimate: sonar-zero-5 was estimated at 6 h and took 13.4 h. A **Straggler
+risk** line names a unit that would dominate the run. Every unit gets a budget,
+twice its estimate (at least 60 min over it), in the plan file under
+`unit_estimates`. The script writes the schedule back into the plan file and
+prints the **Mode** line for the approval table. Recording the run later keeps
+each unit's measured time, items and the estimate, so the estimates calibrate
+themselves, and `python "<skill>/scripts/plan-waves.py" --accuracy` says how far
+off they were.
 
 A worked example: units 1 (chart kit) and 2 (contract fields) are
 independent, and units 3, 4 and 5 import both. That makes two parallel waves,
@@ -364,8 +386,10 @@ spec, plan, coder, reviewers, gate), and every parallel wave pays a merge and a
 verify. That only pays off when units really run side by side. When the work
 is a chain, runs at most 2 units at once over 3 or more waves, or has no tests
 to verify and runs at most 3 at once, one session that keeps the whole design
-in view builds it faster. `plan-waves.py` then prints an **Advice** line with
-the reasons. Units that share hotspot files (navigation, store, registries,
+in view builds it faster, as does a run of 4 h or more whose units, built one
+after another in one session, would take about as long. `plan-waves.py` then
+prints an **Advice** line with the reasons. A run whose p80 is 6 h or more also
+gets a **Long run** line: offer to run the first wave as a run of its own. Units that share hotspot files (navigation, store, registries,
 generated route trees) and so all hang off one foundation unit are the usual
 sign.
 
@@ -409,9 +433,11 @@ Approving the split also approves creating the new tickets.
 
 Mark bug units with `(bug)` after their title. Add a size column and a **depends on** column (unit ids and the reason, or
 `-`) to the table. Under it, paste the **Mode** line that `plan-waves.py`
-printed: the chosen mode, every estimate, the wave order and the
+printed: the chosen mode, every estimate with its p80, the wave order and the
 dependencies, for example
-`Mode: waves (≈450 min; lane ≈670 min, parallel not possible, waves ≈450 min). Order: {1,2} → {3,4,5}.`
+`Mode: waves (≈450 min, p80 ≈720 min; lane ≈670 min, parallel not possible, waves ≈450 min). Order: {1,2} → {3,4,5}.`
+Paste its **Critical path**, **Straggler risk**, **Chained** and **Long run**
+lines with it, when it printed them.
 This is information, not a question. The user can still change the schedule,
 or a dependency, by choosing "adjust". Re-run the script after any change.
 
@@ -573,6 +599,23 @@ ask as section 7 describes before starting the next wave.
 
 After the last wave, run the final synthesis (`<final>` = `yes`), which opens
 the PR.
+
+**Stragglers.** Every unit has a budget in the plan file (`unit_estimates`). Write
+the UTC time each worker is sent into the run file. A wave's `Agent` calls return
+together, so the orchestrator cannot look in on a parallel wave; there the
+worker's own rule applies (`references/worker.md`: past its budget it starts no
+new fix round and lists what is left under `REMAINING:`). In a lane, and
+whenever you resume a handed-back worker, run
+`python "<skill>/scripts/straggler.py" "<runs>/<slug>-plan.json" <unit>=<minutes
+since it was sent>`. A **Slow** line is only a note in the run file. After a
+**Straggler** line (exit 1), tell that worker with `SendMessage`: "Budget
+reached: finish the round you are in, start no other, and reply with what is
+left under REMAINING." A reply whose `REMAINING:` is not `none` is not a failed
+unit: gate it as usual, then add the remaining items to the plan file as a new
+unit (`items`, `files`, `depends_on` the finished unit), run `plan-waves.py`
+again, and build it in a later wave. It is inside the scope the user approved;
+list it in the final message. sonar-zero-5 had nothing like this: its slowest
+unit ran 315 min and held its wave.
 
 **Turn budgets.** Each agent has a `maxTurns` budget in its agent file: worker
 300, Haiku coder 300, synthesis 400, about twice the longest run that

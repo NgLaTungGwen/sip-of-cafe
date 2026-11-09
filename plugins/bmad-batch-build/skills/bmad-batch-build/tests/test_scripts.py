@@ -26,6 +26,7 @@ def load(name, file):
 
 
 waves = load("plan_waves", "plan-waves.py")
+straggler = load("straggler", "straggler.py")
 journal = load("journal", "journal.py")
 log_event = load("log_event", "log-event.py")
 
@@ -125,6 +126,208 @@ class PlanWaves(unittest.TestCase):
     def test_a_cycle_is_rejected(self):
         with self.assertRaises(SystemExit):
             waves.plan([unit(1, deps=[2]), unit(2, deps=[1])])
+
+
+class PlanEstimates(unittest.TestCase):
+    """sonar-zero-5 (2026-11-07) was estimated at 6 h and took 13.4 h: a unit
+    took 315 min, and nothing in the plan could say so."""
+
+    def model(self, rows=()):
+        return waves.calibration(rows=list(rows))
+
+    def test_items_drive_the_minutes_and_size_is_the_fallback(self):
+        m = self.model()
+        self.assertEqual(waves.unit_minutes(unit(1, "S"), m), 50)
+        self.assertEqual(waves.unit_minutes(dict(unit(1, "S"), items=21), m), 86)   # 21 findings: 85 min
+        self.assertEqual(waves.unit_minutes(dict(unit(1, "S"), items=46), m), 141)  # 46 findings: 140 min
+
+    def test_a_huge_file_adds_minutes(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "route.ts"), "w") as f:
+            f.write("x\n" * 6500)
+        u = dict(unit(7, "L"), items=64, files=["route.ts"])
+        self.assertAlmostEqual(waves.unit_minutes(u, self.model(), d), 315, delta=20)  # measured: 315
+
+    def test_one_measurement_already_moves_the_estimate(self):
+        rows = [{"project": "a", "unit_minutes": [{"id": 1, "size": "M", "min": 300}]}]
+        m = self.model(rows)
+        self.assertEqual(m["size"]["M"], 150)        # (1 x 300 + 3 x 100) / 4
+        self.assertEqual(m["size"]["S"], 50)
+        self.assertIn("measured n=1", m["source"]["M"])
+
+    def test_a_projects_own_runs_count_on_top_of_all_runs(self):
+        rows = [{"project": "big", "unit_minutes": [{"id": i, "size": "M", "min": 300}]} for i in range(3)] + \
+               [{"project": "small", "unit_minutes": [{"id": 9, "size": "M", "min": 40}]}]
+        a, b = waves.calibration("big", rows), waves.calibration("small", rows)
+        self.assertGreater(a["size"]["M"], b["size"]["M"])
+
+    def test_minutes_per_item_are_learned(self):
+        rows = [{"project": "a", "unit_minutes": [{"id": i, "size": "L", "min": 40 + 5 * 20, "items": 20}
+                                                   for i in range(1, 6)]}]
+        self.assertGreater(self.model(rows)["per_item"], waves.PER_ITEM)
+
+    def test_the_spread_is_a_default_until_there_are_measurements(self):
+        self.assertEqual(self.model()["spread"], waves.SPREAD)
+        rows = [{"project": "a", "unit_minutes": [{"id": i, "size": "M", "min": m} for i, m in
+                                                   enumerate([100, 100, 100, 100, 100, 400, 400, 400], 1)]}]
+        self.assertGreater(self.model(rows)["spread"], waves.SPREAD)
+
+    def test_a_budget_is_twice_the_estimate_and_at_least_an_hour_over(self):
+        self.assertEqual((waves.budget(200), waves.budget(20)), (400, 80))
+
+    def test_the_critical_path_unit_goes_first_when_a_wave_is_full(self):
+        # 1 (small) holds up 3 (large); 2 and 4 are large and independent. With
+        # two workers the first wave must hold 1, not a second large unit.
+        units = [unit(1, "S"), unit(2, "L"), unit(3, "L", deps=[1]), unit(4, "L")]
+        r = waves.plan(units, max_par=2)
+        self.assertEqual([w["units"] for w in r["waves"]], [[1, 2], [3, 4]])
+
+    def test_similar_units_share_a_wave(self):
+        units = [unit(1, "S"), unit(2, "L"), unit(3, "S"), unit(4, "L")]
+        r = waves.plan(units, max_par=2)
+        self.assertEqual([w["units"] for w in r["waves"]], [[2, 4], [1, 3]])
+        in_order = waves.plan([unit(1, "L"), unit(2, "S"), unit(3, "L"), unit(4, "S")], max_par=2)["waves_total"]
+        self.assertEqual(r["waves_total"], in_order)
+
+    def test_a_ready_unit_fills_a_wave_that_a_level_would_leave_short(self):
+        # 3 needs only 1: it joins 2 and 4 in the second wave, so three waves become two.
+        units = [unit(1), unit(2), unit(3, deps=[1]), unit(4)]
+        self.assertEqual(len(waves.plan(units, max_par=2)["waves"]), 2)
+
+    def test_critical_path_and_stragglers(self):
+        units = [unit(1, "S"), unit(2, "L", deps=[1]), unit(3, "S"), unit(4, "S")]
+        t = {1: 50, 2: 300, 3: 50, 4: 50}
+        self.assertEqual(waves.critical_path(units, t), ([1, 2], 350))
+        self.assertEqual(len(waves.stragglers(units, t)), 1)
+        self.assertEqual(waves.stragglers([unit(1), unit(2)], {1: 300, 2: 100}), [])
+
+    def test_queued_suites_stretch_a_parallel_wave(self):
+        units = [unit(i) for i in range(1, 5)]
+        free = waves.plan(units)["estimate"]
+        busy = waves.plan(units, queue=waves.contention(0, ncpu=4, slots=4))["estimate"]
+        self.assertGreater(busy, free)
+        self.assertEqual(waves.contention(0, ncpu=12, slots=12)(4), 1.0)   # 4 suites of 3 workers fit 12 CPUs
+        self.assertGreater(waves.contention(2, ncpu=12, slots=12)(4), 1.0)
+
+    def test_units_sharing_a_file_are_chained(self):
+        units = [dict(unit(1), files=["a.ts", "r.ts"]), dict(unit(2), files=["r.ts"]), dict(unit(3), files=["b.ts"])]
+        added = waves.chain_same_file(units)
+        self.assertEqual(added, [(2, 1, "r.ts")])
+        self.assertEqual(units[1]["depends_on"], [1])
+        self.assertIn("r.ts", units[1]["reason"])
+        self.assertEqual(units[2]["depends_on"], [])
+        self.assertEqual(waves.chain_same_file(units), [])  # nothing left to chain
+
+    def test_a_dependency_through_another_unit_already_orders_two_units(self):
+        units = [dict(unit(1), files=["r.ts"]), unit(2, deps=[1]), dict(unit(3, deps=[2]), files=["r.ts"])]
+        self.assertEqual(waves.chain_same_file(units), [])
+
+    def test_the_split_line_says_how_a_one_file_unit_is_cut(self):
+        line = waves.too_big([dict(unit(7), items=64, files=["route.ts"])])[0]
+        self.assertIn("run in turn", line)
+        self.assertIn("route.ts", line)
+
+    def test_a_long_run_is_compared_with_building_directly(self):
+        result = {"waves": [{"units": [1], "run": "lane", "minutes": 300}], "mode": "waves", "estimate": 300}
+        self.assertIn("long", waves.advise([unit(1)], result, t={1: 300})[0])
+        self.assertEqual(waves.advise([unit(1)], dict(result, estimate=100), t={1: 100}), [])
+        self.assertEqual(waves.advise([unit(1)], dict(result, estimate=100), t={1: 900}), [])
+
+    def test_a_long_p80_suggests_shipping_the_first_wave(self):
+        two = {"waves": [{"units": [1, 2], "run": "parallel"}, {"units": [3], "run": "lane"}]}
+        self.assertIn("unit 1, 2", waves.long_run(two, 400))
+        self.assertIsNone(waves.long_run(two, 200))
+        self.assertIsNone(waves.long_run({"waves": [{"units": [1], "run": "lane"}]}, 900))
+
+    def test_accuracy_says_whether_estimates_run_low(self):
+        rows = [{"project": "a", "mode": "Mode: waves (≈100 min; x)", "min_wall": 250,
+                 "unit_minutes": [{"id": 1, "size": "M", "min": 250, "est": 100},
+                                  {"id": 2, "size": "S", "min": 120}]}]
+        text = "\n".join(waves.accuracy(rows=rows))
+        self.assertIn("2 unit(s)", text)
+        self.assertIn("estimates run low", text)
+        self.assertIn("1 had the estimate recorded", text)
+        self.assertIn("whole runs: 1", text)
+        self.assertIn("no measured units", waves.accuracy(rows=[])[0])
+
+    def run_script(self, units, *extra):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "plan.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"units": units}, f)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "plan-waves.py"), path, "--root", d, *extra],
+                           capture_output=True, text=True, encoding="utf-8", env=dict(os.environ, BMAD_RUNS_DIR=d))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(path, encoding="utf-8") as f:
+            return r.stdout, json.load(f)
+
+    def test_the_script_prints_a_range_budgets_and_the_critical_path(self):
+        out, saved = self.run_script([dict(unit(1), items=20), dict(unit(2, deps=[1]), items=30)])
+        self.assertIn("p80 ≈", out)
+        self.assertIn("Critical path: 1 → 2", out)
+        self.assertIn("budget", out)
+        self.assertGreater(saved["estimate_p80"], saved["estimate"])
+        self.assertEqual(saved["unit_estimates"]["1"]["budget"], waves.budget(saved["unit_estimates"]["1"]["p50"]))
+        self.assertEqual(saved["critical_path"]["units"], [1, 2])
+
+    def test_the_script_chains_units_that_share_a_file_and_saves_it(self):
+        out, saved = self.run_script([dict(unit(1), files=["r.ts"]), dict(unit(2), files=["r.ts"])])
+        self.assertIn("Chained: unit 2 now depends on unit 1", out)
+        self.assertEqual(saved["units"][1]["depends_on"], [1])
+
+    def test_accuracy_runs_from_the_command_line(self):
+        d = tempfile.mkdtemp()
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "plan-waves.py"), "--accuracy"],
+                           capture_output=True, text=True, encoding="utf-8", env=dict(os.environ, BMAD_RUNS_DIR=d))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no measured units", r.stdout)
+
+    def test_cost_report_keeps_items_and_the_estimate_for_the_accuracy_check(self):
+        cost = load("cost_report_est", "cost-report.py")
+        run_dir = load("run_dir_est", "run_dir.py")
+        store = tempfile.mkdtemp()
+        root = os.path.join(tempfile.mkdtemp(), "my-repo")
+        with mock.patch.dict(os.environ, {"BMAD_RUNS_DIR": store}):
+            folder = run_dir.run_dir(root, "s1", create=True)
+            with open(os.path.join(folder, "s1-plan.json"), "w", encoding="utf-8") as f:
+                json.dump({"units": [dict(unit(1), items=20), unit(2)],
+                           "unit_estimates": {"1": {"p50": 84, "p80": 134, "budget": 168}}}, f)
+            got = cost.unit_minutes({"worker_spans": [{"unit": 1, "start": "a", "min": 90},
+                                                      {"unit": 2, "start": "b", "min": 40}]}, "s1", root)
+        self.assertEqual(got, [{"id": 1, "size": "M", "min": 90, "items": 20, "est": 84},
+                               {"id": 2, "size": "M", "min": 40}])
+
+
+class Straggler(unittest.TestCase):
+    PLAN = {"unit_estimates": {"1": {"p50": 100, "p80": 160, "budget": 200}, "2": {"p50": 50, "p80": 80, "budget": 110}}}
+
+    def test_a_unit_past_its_budget_is_a_straggler_and_past_its_p80_slow(self):
+        got = dict(straggler.check(self.PLAN, {1: 150, 2: 120}))
+        self.assertEqual(sorted(got), ["straggler"])
+        self.assertIn("Straggler: unit 2 has run 120 min, over its budget of 110", got["straggler"])
+        slow = straggler.check(self.PLAN, {1: 170, 2: 10})
+        self.assertEqual([level for level, _ in slow], ["slow"])
+        self.assertEqual(straggler.check(self.PLAN, {1: 90}), [])
+        self.assertEqual(straggler.check(self.PLAN, {9: 999}), [])  # a unit without an estimate
+
+    def run_it(self, *args):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "plan.json")
+        with open(path, "w") as f:
+            json.dump(self.PLAN, f)
+        return subprocess.run([sys.executable, os.path.join(SCRIPTS, "straggler.py"), path, *args],
+                              capture_output=True, text=True, encoding="utf-8")
+
+    def test_exit_code_is_1_only_for_a_straggler(self):
+        self.assertEqual(self.run_it("1=90").returncode, 0)
+        self.assertEqual(self.run_it("1=170").returncode, 0)
+        self.assertEqual(self.run_it("1=250").returncode, 1)
+
+    def test_bad_input_does_not_fail_the_caller(self):
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "straggler.py"), "/no/such/plan.json", "x"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("could not read", r.stdout)
 
 
 def write_jsonl(path, rows):
