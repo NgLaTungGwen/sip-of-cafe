@@ -1,6 +1,6 @@
 {
   "name": "ado-eod-report",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Azure DevOps status reports for leadership: the end-of-day report and the weekly report (Monday to Sunday), summarised by user story with every story, task and PR and its status, upcoming work inferred from it, and blockers, copied as rich text that pastes into Teams with its formatting.",
   "author": {
     "name": "Jayson Nguyen"

@@ -5,7 +5,8 @@ description: "Write the user's end-of-day (EOD) report from their Azure DevOps b
 
 # ADO EOD report
 
-Builds the user's end-of-day report from Azure DevOps. The script reads the
+Builds the user's end-of-day report from Azure DevOps, plus their GitHub
+issues and PRs when the `gh` CLI is signed in. The script reads the
 board with the user's PAT, or with their `az login` session when there is no
 PAT or the PAT is rejected. You turn what it returns into a short,
 summarised report for leadership that reads in under a minute. It summarises
