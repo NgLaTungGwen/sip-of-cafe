@@ -1464,12 +1464,16 @@ class Guard(unittest.TestCase):
         from unittest import mock
         other = tempfile.mkdtemp(dir=os.path.dirname(SCRIPTS))
         self.addCleanup(shutil.rmtree, other, True)
+        # Not under /tmp either: the guard allows /tmp/ (Git Bash's temp folder),
+        # which on Linux is where this test's repository itself sits.
+        outside = tempfile.mkdtemp(dir=os.path.dirname(SCRIPTS)).replace("\\", "/")
+        self.addCleanup(shutil.rmtree, outside, True)
         patch = mock.patch.dict(os.environ, {"TEMP": other, "TMP": other, "TMPDIR": other})
         patch.start()
         self.addCleanup(patch.stop)
         api = f"{self.wt}/api"
         self.assertIsNotNone(self.bash("npx vitest run > ../../scratchpad-s5-a.log 2>&1", cwd=api))
-        self.assertIsNotNone(self.bash(f"echo x | tee {self.root}/out.log", cwd=api))
+        self.assertIsNotNone(self.bash(f"echo x | tee {outside}/out.log", cwd=api))
         for cmd in ["npx vitest run > ../_bmad-output/run.log 2>&1", "echo x > /tmp/a.log",
                     "npm test 2>/dev/null", "echo x | tee coverage.txt", "awk '{if ($3>0) print}' f"]:
             self.assertIsNone(self.bash(cmd, cwd=api), cmd)
