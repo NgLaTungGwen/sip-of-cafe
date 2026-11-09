@@ -120,6 +120,19 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.15.3:** `heavy.sh` admits by measured load as well as declared slots.
+  - A test suite weighs as many slots as its Vitest workers (it weighed 1, so a
+    12-CPU machine admitted twelve suites of three workers).
+  - It holds a command while memory or CPU pressure (`/proc/pressure`) is high
+    or swap is in use with little RAM left. After `BMAD_HEAVY_MAX_WAIT` it
+    starts anyway only with 512 MB free, and exits 75 after twice that wait.
+  - Estimates learn from earlier runs: the command runs in a systemd user
+    scope with a memory cap, which reports its peak. More kinds (e2e, builds),
+    and `classes.conf` for your own.
+  - Each command has its own session. A killed `heavy.sh` ends it, and the next
+    call ends one it left behind.
+  - `flock` replaces the mkdir lock where available; `--status`, `--count` and
+    `--explain` show the state and the estimate; macOS reads `vm_stat`.
 - **0.6.0:** reports name who they are for: the first run confirms the
   signed-in account and asks your name and role (`config --name/--role`).
   Tasks are written as plain sentences saying what was done, with the IDs

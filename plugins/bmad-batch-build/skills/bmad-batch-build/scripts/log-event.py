@@ -32,6 +32,7 @@ def error_line(path):
 def main(args):
     tool, cwd, rc, secs, cmd = args[:5]
     out = args[5] if len(args) > 5 else None
+    peak = args[6] if len(args) > 6 else ""
     now = dt.datetime.now(dt.timezone.utc)
     event = {
         "end": now.isoformat(timespec="seconds"),
@@ -39,6 +40,8 @@ def main(args):
         "tool": tool, "cwd": cwd, "rc": int(rc), "sec": int(secs or 0), "cmd": cmd[:400],
         "error": error_line(out) if out and int(rc) != 0 else None,
     }
+    if peak.isdigit():  # peak memory in MB, when heavy.sh could measure it
+        event["peak_mb"] = int(peak)
     store = os.environ.get("BMAD_RUNS_DIR") or os.path.expanduser("~/.claude/bmad-batch-runs")
     os.makedirs(store, exist_ok=True)
     with open(os.path.join(store, "events.jsonl"), "a", encoding="utf-8") as fh:

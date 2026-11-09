@@ -262,8 +262,15 @@ through `scripts/heavy.sh`. It admits a command only while the machine has room
 for it, counting every session and run on this machine, so many runs can go at
 once without crashing; they queue instead. Waiting commands start in arrival
 order. CPU and RAM may still run high, and that is expected. The limits follow
-the machine: one slot per CPU, a free-RAM check, and Vitest capped at a quarter
-of the CPUs per suite (3 on 12 CPUs).
+the machine: one slot per CPU (a test suite takes as many slots as its Vitest
+workers, a quarter of the CPUs, 3 on 12 CPUs), a free-RAM check against an
+estimate learned from earlier runs of the same kind of command, and a pause
+while the machine is already stalling on memory or CPU (`/proc/pressure`) or
+swapping. A command that waits past `BMAD_HEAVY_MAX_WAIT` starts anyway only
+if 512 MB is free; otherwise `heavy.sh` exits 75, "overloaded, try again", and
+you retry later. Each command runs in its own session, so a killed `heavy.sh`
+leaves no orphan: the next call ends it. `heavy.sh --status` shows what runs
+and waits.
 
 `scripts/heavy_hook.py` is an optional PreToolUse hook the user can enable. It
 routes a heavy command that an agent typed without `heavy.sh` through the
@@ -311,7 +318,7 @@ and `--no-tests` when the profile has no `suite` or the repository's
 instructions ban tests:
 
 ```bash
-n=$(ls ~/.cache/bmad-heavy/run.* 2>/dev/null | wc -l); [ "$n" -ge $(( $(nproc) / 3 )) ] && b=--busy || b=
+n=$(bash "<skill>/scripts/heavy.sh" --count); [ "$n" -ge $(( $(nproc) / 3 )) ] && b=--busy || b=
 python "<skill>/scripts/plan-waves.py" "<runs>/<slug>-plan.json" $b [--no-tests] --root "<root>"
 ```
 
