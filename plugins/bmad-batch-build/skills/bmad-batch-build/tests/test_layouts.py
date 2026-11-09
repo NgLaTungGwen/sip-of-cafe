@@ -443,6 +443,129 @@ class HeavyQueue(unittest.TestCase):
         self.assertIn("starting anyway", r.stderr)
         self.assertIn("started", r.stdout)
 
+    def heavy(self, *args, env=None, **kw):
+        return subprocess.run([BASH, os.path.join(SCRIPTS, "heavy.sh"), *args], capture_output=True, text=True,
+                              env=env or self.env(), timeout=120, **kw)
+
+    def test_a_test_suite_weighs_its_workers_and_a_typecheck_one_slot(self):
+        out = dict(p.split("=") for p in self.heavy("--explain", "npx vitest run").stdout.split())
+        self.assertEqual(out["kind"], "test")
+        self.assertGreaterEqual(int(out["weight"]), 2)
+        self.assertEqual(self.heavy("--explain", "npm run typecheck").stdout.split()[1], "weight=1")
+
+    def test_a_weight_above_the_slots_is_capped(self):
+        r = self.heavy("--explain", "--weight", "9", "echo x", env=self.env(BMAD_HEAVY_SLOTS="2"))
+        self.assertIn("weight=2", r.stdout)
+
+    def test_own_kinds_come_from_classes_conf(self):
+        env = self.env()
+        os.makedirs(env["BMAD_HEAVY_DIR"])
+        write(os.path.join(env["BMAD_HEAVY_DIR"], "classes.conf"), "# mine\nbrowser 4000 *chromium*\n")
+        self.assertEqual(self.heavy("--explain", "run chromium", env=env).stdout.strip(), "kind=browser weight=1 mem=4000")
+        self.assertIn("kind=e2e", self.heavy("--explain", "npx playwright test", env=env).stdout)
+
+    def test_the_estimate_follows_earlier_peaks_within_half_to_double(self):
+        env = self.env()
+        d = env["BMAD_HEAVY_DIR"]
+        os.makedirs(d)
+        write(os.path.join(d, "peaks.typecheck"), "100\n100\n100\n")       # too low: floor at half
+        self.assertIn("mem=500", self.heavy("--explain", "npm run typecheck", env=env).stdout)
+        write(os.path.join(d, "peaks.typecheck"), "1200\n1200\n1300\n")
+        self.assertIn("mem=1495", self.heavy("--explain", "npm run typecheck", env=env).stdout)
+        write(os.path.join(d, "peaks.typecheck"), "1200\n1200\n")           # two runs are not enough
+        self.assertIn("mem=1000", self.heavy("--explain", "npm run typecheck", env=env).stdout)
+
+    def test_status_and_count_show_a_running_command(self):
+        env = self.env()
+        d = env["BMAD_HEAVY_DIR"]
+        os.makedirs(d)
+        blocker = subprocess.Popen([BASH, "-c", f'echo "$$ 2 2500 $(date +%s) test" > "{d}/run.$$"; sleep 60'])
+        try:
+            for _ in range(100):
+                if any(f.startswith("run.") for f in os.listdir(d)):
+                    break
+                time.sleep(0.1)
+            self.assertEqual(self.heavy("--count", env=env).stdout.strip(), "1")
+            status = self.heavy("--status", env=env).stdout
+            self.assertIn("running weight 2 of", status)
+            self.assertIn("test  weight 2", status)
+            self.assertIn("free RAM", status)
+        finally:
+            blocker.kill()
+            blocker.wait()  # a zombie still answers kill -0
+        self.assertEqual(self.heavy("--count", env=env).stdout.strip(), "0")
+
+    def test_a_machine_with_no_memory_left_says_overloaded_instead_of_starting(self):
+        env = self.env(BMAD_HEAVY_MAX_WAIT="2", BMAD_HEAVY_POLL="1", BMAD_HEAVY_FLOOR_MB="99999999",
+                       BMAD_HEAVY_HARD_MB="99999999")
+        d = env["BMAD_HEAVY_DIR"]
+        os.makedirs(d)
+        blocker = subprocess.Popen([BASH, "-c", f'echo "$$ 1 2500 9999999999 other" > "{d}/run.$$"; sleep 60'])
+        try:
+            for _ in range(100):
+                if any(f.startswith("run.") for f in os.listdir(d)):
+                    break
+                time.sleep(0.1)
+            r = self.heavy("echo started", env=env)
+        finally:
+            blocker.kill()
+        self.assertEqual(r.returncode, 75)
+        self.assertIn("overloaded", r.stderr)
+        self.assertNotIn("started", r.stdout)
+
+    @unittest.skipUnless(shutil.which("setsid") and shutil.which("pkill"), "needs setsid and pkill")
+    def test_the_next_call_ends_what_a_killed_heavy_sh_left_running(self):
+        env = self.env()
+        d = env["BMAD_HEAVY_DIR"]
+        marker = "sleep 7%d" % (os.getpid() % 900 + 100)
+        p = subprocess.Popen([BASH, os.path.join(SCRIPTS, "heavy.sh"), marker], env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        alive = lambda: subprocess.run(["pgrep", "-fx", marker], capture_output=True).returncode == 0
+        try:
+            for _ in range(100):
+                if os.path.exists(os.path.join(d, "pg.%d" % p.pid)) and alive():
+                    break
+                time.sleep(0.1)
+            self.assertTrue(alive(), "the command never started")
+            p.kill()
+            p.wait()
+            self.assertTrue(alive(), "setup: the command should outlive a SIGKILLed heavy.sh")
+            self.heavy("--count", env=env)
+            for _ in range(50):
+                if not alive():
+                    break
+                time.sleep(0.1)
+            self.assertFalse(alive(), "the orphaned command was not ended")
+            self.assertFalse(os.path.exists(os.path.join(d, "run.%d" % p.pid)))
+        finally:
+            subprocess.run(["pkill", "-fx", marker], capture_output=True)
+
+    @unittest.skipUnless(shutil.which("setsid") and shutil.which("pkill"), "needs setsid and pkill")
+    def test_a_terminated_heavy_sh_ends_its_command(self):
+        env = self.env()
+        marker = "sleep 6%d" % (os.getpid() % 900 + 100)
+        p = subprocess.Popen([BASH, os.path.join(SCRIPTS, "heavy.sh"), marker], env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        alive = lambda: subprocess.run(["pgrep", "-fx", marker], capture_output=True).returncode == 0
+        try:
+            for _ in range(100):
+                if os.path.exists(os.path.join(env["BMAD_HEAVY_DIR"], "pg.%d" % p.pid)) and alive():
+                    break
+                time.sleep(0.1)
+            p.terminate()
+            p.wait(timeout=30)
+            for _ in range(50):
+                if not alive():
+                    break
+                time.sleep(0.1)
+            self.assertFalse(alive())
+        finally:
+            subprocess.run(["pkill", "-fx", marker], capture_output=True)
+
+    def test_a_command_still_reads_its_stdin(self):
+        r = self.heavy("cat", input="hello")
+        self.assertEqual(r.stdout, "hello")
+
 
 class PluginAgents(unittest.TestCase):
     def test_plugin_root_agents_match_the_skills_copy(self):
