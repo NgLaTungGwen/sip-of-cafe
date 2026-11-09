@@ -9,8 +9,8 @@ board, for leadership: each summarised by user story, yet naming every story,
 task and PR with its status. The end-of-day report: It reads every
 work item you changed that day, plus items assigned to you that someone else
 moved, such as QA closing a bug, and the work items of every PR of yours that
-merged that day, even when the board still shows them as New. It sorts the
-work into PXP, SXP, Timetable and Others, lists each task under its story, and
+merged that day, even when the board still shows them as New. It groups the
+work by Azure DevOps project (or by your own sections), lists each task under its story, and
 infers your upcoming tasks from what you did and what is still open. It lists
 blockers, then puts the report on your clipboard as rich text, so it pastes
 into Teams with its bold and bullets. It only reads from ADO.
@@ -53,7 +53,7 @@ both).
 ```
 /ado-eod-report                     # today
 /ado-eod-report yesterday
-/ado-eod-report 2026-10-24 also paired with Minh on the Timetable import
+/ado-eod-report 2026-10-24 also paired with a teammate on the data import
 ```
 
 (With the plugin install: `/ado-eod-report:ado-eod-report`.) Notes after the
@@ -66,7 +66,7 @@ implemented:
 ```
 /ado-weekly-report                  # this week (last week on a Monday)
 /ado-weekly-report last
-/ado-weekly-report 2026-10-28 also ran the PXP demo for the client
+/ado-weekly-report 2026-10-28 also ran the product demo for the client
 ```
 
 (With the plugin install: `/ado-eod-report:ado-weekly-report`.)
@@ -78,15 +78,21 @@ places.
 
 ### Sections
 
-An item goes to the first section whose words appear in its project, area
-path, iteration path or tags (as whole words, any case); everything else goes
-to Others. The defaults match `PXP`, `SXP` and `Timetable`. To change them:
+Nothing is built in. By default each item goes to a section named after its
+own Azure DevOps project, so the report shows whatever projects you actually
+worked in. To group differently, set your own sections: an item goes to the
+first one whose words appear in its project, area path, iteration path or
+tags (as whole words, any case); everything else goes to the section with an
+empty `match`. `"style": "plain"` makes a section use one-line entries
+instead of story lines.
 
 ```bash
 python3 <skill>/scripts/ado_eod.py config --sections \
-  '[{"name":"PXP","match":["PXP","Payments"]},{"name":"SXP","match":["SXP"]},
-    {"name":"Timetable","match":["Timetable"]},{"name":"Others","match":[]}]'
+  '[{"name":"Web","match":["WebApp","Checkout"]},{"name":"Support","match":["support"],"style":"plain"},
+    {"name":"Others","match":[]}]'
 ```
+
+`config --sections '[]'` goes back to one section per project.
 
 `config --timezone Asia/Ho_Chi_Minh` sets which day counts as "today" when the
 machine's clock zone is wrong; `config --show` prints the settings and where
@@ -94,6 +100,14 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.4.1:** no project names are built in. Sections default to one per
+  Azure DevOps project you worked in; your own `config --sections` still
+  wins. A config the old version saved with the fixed PXP/SXP/Timetable
+  sections, without you choosing them, is reset to by-project on the next run.
+  The rules both reports share moved out of the EOD SKILL.md into
+  `ado-eod-report/references/` (`access.md`, `data.md`, `report-rules.md`,
+  `clipboard.md`), so each rule is written once. Each SKILL.md keeps only its
+  own layout and follow-ups, and a test checks every `<eod>/...` path they name.
 - **0.4.0:** the weekly report (`ado-weekly-report`), Monday to Sunday, from
   the same script: `collect --week this|last|YYYY-MM-DD`, and `--days N` for
   any window. Both reports are summarised by user story for leadership, and

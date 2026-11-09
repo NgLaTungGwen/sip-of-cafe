@@ -13,6 +13,14 @@ import unittest
 from contextlib import redirect_stdout
 from unittest import mock
 
+# A user's own sections, as `config --sections` would save them. The script
+# itself has no built-in sections.
+SECTIONS = [
+    {"name": "ProjectA", "match": ["ProjectA"]},
+    {"name": "ProjectB", "match": ["ProjectB"]},
+    {"name": "ProjectC", "match": ["ProjectC"], "style": "plain"},
+    {"name": "Others", "match": []},
+]
 SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
 spec = importlib.util.spec_from_file_location("ado_eod", os.path.join(SCRIPTS, "ado_eod.py"))
 eod = importlib.util.module_from_spec(spec)
@@ -73,14 +81,41 @@ class Parsing(unittest.TestCase):
 
 class Sections(unittest.TestCase):
     def test_match_project_area_or_tag_as_whole_word(self):
-        f = {"System.TeamProject": "Core", "System.AreaPath": "Core\\PXP\\Checkout"}
-        self.assertEqual(eod.section_for(f, eod.DEFAULT_SECTIONS), "PXP")
-        f = {"System.TeamProject": "Core", "System.Tags": "timetable; urgent"}
-        self.assertEqual(eod.section_for(f, eod.DEFAULT_SECTIONS), "Timetable")
+        f = {"System.TeamProject": "Core", "System.AreaPath": "Core\\ProjectA\\Checkout"}
+        self.assertEqual(eod.section_for(f, SECTIONS), "ProjectA")
+        f = {"System.TeamProject": "Core", "System.Tags": "projectc; urgent"}
+        self.assertEqual(eod.section_for(f, SECTIONS), "ProjectC")
 
     def test_no_partial_word_match(self):
-        f = {"System.TeamProject": "SPXPlatform"}
-        self.assertEqual(eod.section_for(f, eod.DEFAULT_SECTIONS), "Others")
+        f = {"System.TeamProject": "ProjectAlpha"}
+        self.assertEqual(eod.section_for(f, SECTIONS), "Others")
+
+
+    def test_no_config_groups_by_project(self):
+        self.assertEqual(eod.section_for({"System.TeamProject": "Contoso Web"}, []), "Contoso Web")
+        self.assertEqual(eod.section_for({}, []), "Others")
+
+    def test_section_list_by_project_is_sorted_with_others_last(self):
+        out = eod.section_list([], ["zeta", "Others", "Alpha", "zeta"])
+        self.assertEqual([s["name"] for s in out], ["Alpha", "zeta", "Others"])
+
+    def test_section_list_keeps_config_order_and_style(self):
+        out = eod.section_list(SECTIONS, ["ProjectA"])
+        self.assertEqual([s["name"] for s in out], ["ProjectA", "ProjectB", "ProjectC", "Others"])
+        self.assertEqual(out[2]["style"], "plain")
+
+    def test_old_fixed_sections_are_dropped_on_first_collect(self):
+        saved = {}
+        cfg = {"sections": eod.LEGACY_SECTIONS}
+        with mock.patch.object(eod, "connect", return_value=(FakeClient(), ME)),                 mock.patch.object(eod, "load_config", return_value=cfg),                 mock.patch.object(eod, "save_config", side_effect=saved.update):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(eod.main(["collect", "--date", DAY.isoformat()]), 0)
+        out = json.loads(buf.getvalue())
+        self.assertTrue(out["first_run"])
+        self.assertEqual((saved["sections"], out["sections_from"]), ([], "project"))
+        self.assertIn("ProjectA", [s["name"] for s in out["sections"]])
+        self.assertEqual(out["items"][0]["section"], "ProjectA")
 
 
 class Summarize(unittest.TestCase):
@@ -124,17 +159,17 @@ class FakeClient(eod.Client):
         super().__init__("https://dev.azure.com/acme", "pat")
         self.items = {
             101: {"id": 101, "fields": {"System.Title": "Checkout retries", "System.WorkItemType": "Task",
-                                        "System.State": "Closed", "System.TeamProject": "PXP",
+                                        "System.State": "Closed", "System.TeamProject": "ProjectA",
                                         "System.AssignedTo": {"id": "me-1", "displayName": "Quy"}},
                   "relations": [{"rel": "System.LinkTypes.Hierarchy-Reverse",
                                  "url": "https://dev.azure.com/acme/_apis/wit/workItems/100"},
                                 {"rel": "ArtifactLink", "url": "vstfs:///Git/PullRequestId/p1%2Fr1%2F55"}]},
             102: {"id": 102, "fields": {"System.Title": "Someone else's", "System.WorkItemType": "Bug",
-                                        "System.State": "Active", "System.TeamProject": "SXP",
+                                        "System.State": "Active", "System.TeamProject": "ProjectB",
                                         "System.AssignedTo": {"id": "x", "displayName": "X"}}},
             100: {"id": 100, "fields": {"System.Title": "Payments story", "System.WorkItemType": "User Story"}},
             200: {"id": 200, "fields": {"System.Title": "Next thing", "System.WorkItemType": "Task",
-                                        "System.State": "New", "System.TeamProject": "Timetable"}},
+                                        "System.State": "New", "System.TeamProject": "ProjectC"}},
         }
         self.updates = {
             101: [update(1, "2026-10-27T08:00:00Z", System_State={"newValue": "Active"}),
@@ -156,7 +191,7 @@ class FakeClient(eod.Client):
         if url.startswith("_apis/git/pullrequests?"):
             self.pr_query = url
             return {"value": [{"pullRequestId": pr, "title": f"PR {pr}",
-                               "repository": {"id": "r1", "name": "web", "project": {"id": "p1", "name": "PXP"}}}
+                               "repository": {"id": "r1", "name": "web", "project": {"id": "p1", "name": "ProjectA"}}}
                               for pr in self.merged]}
         if url.endswith("/workitems"):
             pr = int(url.split("/pullRequests/")[1].split("/")[0])
@@ -168,16 +203,16 @@ class FakeClient(eod.Client):
 
 class Collect(unittest.TestCase):
     def test_collect_end_to_end(self):
-        out = eod.collect(FakeClient(), DAY, UTC, eod.DEFAULT_SECTIONS)
+        out = eod.collect(FakeClient(), DAY, UTC, SECTIONS)
         self.assertEqual([i["id"] for i in out["items"]], [101])
         item = out["items"][0]
-        self.assertEqual(item["section"], "PXP")
+        self.assertEqual(item["section"], "ProjectA")
         self.assertEqual((item["state_start"], item["state_end"]), ("Active", "Closed"))
         self.assertEqual(item["parent"]["title"], "Payments story")
         self.assertEqual(item["prs"][0]["status"], "completed")
-        self.assertEqual(item["url"], "https://dev.azure.com/acme/PXP/_workitems/edit/101")
+        self.assertEqual(item["url"], "https://dev.azure.com/acme/ProjectA/_workitems/edit/101")
         self.assertEqual([o["id"] for o in out["open_assigned"]], [200])
-        self.assertEqual(out["open_assigned"][0]["section"], "Timetable")
+        self.assertEqual(out["open_assigned"][0]["section"], "ProjectC")
         self.assertEqual(out["merged_prs"], [])
         self.assertEqual(item["merged_today"], [])
 
@@ -190,7 +225,7 @@ class Collect(unittest.TestCase):
         client.items[151] = {"id": 151, "fields": {"System.Title": "Dropped", "System.WorkItemType": "Task",
                                                    "System.State": "Removed"}}
         client.items[101]["fields"]["System.State"] = "Active"  # still open on the board, but its PR is completed
-        out = eod.collect(client, DAY, UTC, eod.DEFAULT_SECTIONS)
+        out = eod.collect(client, DAY, UTC, SECTIONS)
         children = out["items"][0]["parent"]["children"]
         self.assertEqual((children["total"], children["done"]), (2, 1))
         self.assertEqual([o["id"] for o in children["open"]], [150])
@@ -199,16 +234,16 @@ class Collect(unittest.TestCase):
     def test_week_window_takes_every_day_of_it(self):
         client = FakeClient()
         client.updates[101].append(update(3, "2026-10-31T09:00:00Z", System_History={"newValue": "Deployed to QA"}))
-        day_only = eod.collect(client, DAY, UTC, eod.DEFAULT_SECTIONS)
+        day_only = eod.collect(client, DAY, UTC, SECTIONS)
         self.assertEqual(len(day_only["items"][0]["events"]), 1)
-        week = eod.collect(client, dt.date(2026, 10, 26), UTC, eod.DEFAULT_SECTIONS, days=7)
+        week = eod.collect(client, dt.date(2026, 10, 26), UTC, SECTIONS, days=7)
         events = week["items"][0]["events"]
         self.assertEqual([e["date"] for e in events], ["2026-10-27", "2026-10-28", "2026-10-31"])
         self.assertEqual((week["items"][0]["state_start"], week["to"], week["days"]), (None, "2026-11-01", 7))
         self.assertIn("searchCriteria.maxTime=2026-11-02T00%3A00%3A00Z", client.pr_query)
 
     def test_cli_week_and_days_bounds(self):
-        with mock.patch.object(eod, "connect", return_value=(FakeClient(), ME)),                 mock.patch.object(eod, "load_config", return_value={"sections": eod.DEFAULT_SECTIONS}):
+        with mock.patch.object(eod, "connect", return_value=(FakeClient(), ME)),                 mock.patch.object(eod, "load_config", return_value={"sections": SECTIONS}):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 self.assertEqual(eod.main(["collect", "--week", "2026-10-29"]), 0)
@@ -222,10 +257,10 @@ class Collect(unittest.TestCase):
     def test_items_of_a_merged_pr_are_listed_though_untouched(self):
         client = FakeClient()
         client.items[300] = {"id": 300, "fields": {"System.Title": "Linked task", "System.WorkItemType": "Task",
-                                                   "System.State": "New", "System.TeamProject": "PXP"}}
+                                                   "System.State": "New", "System.TeamProject": "ProjectA"}}
         client.updates[300] = [update(1, "2026-10-20T08:00:00Z", System_State={"newValue": "New"})]
         client.merged = {60: [300], 61: []}
-        out = eod.collect(client, DAY, UTC, eod.DEFAULT_SECTIONS)
+        out = eod.collect(client, DAY, UTC, SECTIONS)
         linked = next(i for i in out["items"] if i["id"] == 300)
         self.assertEqual((linked["state_end"], linked["events"], linked["merged_today"]), ("New", [], [60]))
         self.assertEqual([(p["id"], p["work_items"]) for p in out["merged_prs"]], [(60, [300]), (61, [])])
@@ -242,7 +277,7 @@ class Collect(unittest.TestCase):
             return real(method, url, body)
 
         client.call = call
-        out = eod.collect(client, DAY, UTC, eod.DEFAULT_SECTIONS)
+        out = eod.collect(client, DAY, UTC, SECTIONS)
         self.assertEqual([i["id"] for i in out["items"]], [101])
         self.assertTrue(any("Merged PRs unknown" in w for w in out["warnings"]))
 
@@ -373,10 +408,31 @@ class Commands(unittest.TestCase):
             self.assertEqual(json.load(f)["org"], "https://dev.azure.com/acme")
 
     def test_bad_sections_rejected(self):
-        code, out = self.run_main("config", "--sections", '{"PXP": 1}')
+        code, out = self.run_main("config", "--sections", '{"Team A": 1}')
         self.assertEqual(code, 2)
         self.assertTrue(out.startswith("ERROR BAD_ARGS:"))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkillDocPathsTest(unittest.TestCase):
+    """Every `<eod>/...` path the skill docs name must exist, so a moved or renamed
+    file breaks a test instead of silently breaking the weekly or EOD report."""
+
+    def test_eod_paths_exist(self):
+        import glob
+        import re
+        eod_dir = os.path.dirname(SCRIPTS)
+        docs = [os.path.join(eod_dir, "SKILL.md"),
+                os.path.join(os.path.dirname(eod_dir), "ado-weekly-report", "SKILL.md")]
+        docs += glob.glob(os.path.join(eod_dir, "references", "*.md"))
+        seen = 0
+        for doc in docs:
+            with open(doc, encoding="utf-8") as f:
+                for rel in re.findall(r"<eod>/([\w./-]+)", f.read()):
+                    seen += 1
+                    path = os.path.join(eod_dir, rel.rstrip("."))
+                    self.assertTrue(os.path.exists(path), f"{os.path.basename(doc)} names missing <eod>/{rel}")
+        self.assertGreater(seen, 10)

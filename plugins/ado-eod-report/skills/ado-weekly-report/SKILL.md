@@ -5,36 +5,35 @@ description: "Write the user's weekly status report from their Azure DevOps boar
 
 # ADO weekly report
 
-Builds the user's weekly report from Azure DevOps, for leadership: Senior
-Engineering Manager, Engineering Director, Sr. Engineering Director and Client
-Partner. They read it in two minutes, so it summarises the week by user story,
-yet still names every story, task and PR with its status, and ends with a plan
-for next week inferred from what was implemented.
+Builds the user's weekly report from Azure DevOps, for leadership. They read
+it in two minutes, so it summarises the week by user story, yet still names
+every story, task and PR with its status, and ends with a plan for next week
+inferred from what was implemented.
 
 `<eod>` below is the `ado-eod-report` skill's folder, the sibling of this
 one (`../ado-eod-report` from this skill's folder: both ship in the
 `ado-eod-report` plugin, and a copied install puts them side by side in
-`~/.claude/skills/`). This skill has no script of its own:
-it runs `<eod>/scripts/ado_eod.py`, which shares the EOD report's sign-in,
-organization and sections. Run Python as `python3` (`python` on Windows).
+`~/.claude/skills/`). This skill has no script or rules of its own to share:
+it runs `<eod>/scripts/ado_eod.py` and follows the files in
+`<eod>/references/`, the same ones the EOD report uses. Each step below says
+which file to read. Read it at that step; don't work from memory. Run Python
+as `python3` (`python` on Windows).
 
 ## Arguments
 
 - A week: `this` (default), `last`, or any `YYYY-MM-DD` inside the week. On a
   Monday, with no week given, report `last` week: this week has barely
   started.
-- Free-text notes, such as "also ran the PXP demo for the client". These are
+- Free-text notes, such as "also ran the product demo for the client". These are
   work ADO doesn't show. Put each note in the part it belongs to.
 
 ## 1. Check access
 
+Read `<eod>/references/access.md` and follow it:
+
 ```bash
 python3 "<eod>/scripts/ado_eod.py" check
 ```
-
-On `OK ...` go on. On an `ERROR` line, handle it exactly as step 1 of
-`<eod>/SKILL.md` says (read that section; don't guess), then run `check`
-again.
 
 ## 2. Collect
 
@@ -45,12 +44,9 @@ from there:
 python3 "<eod>/scripts/ado_eod.py" collect --week <week> > "<scratchpad>/ado-week.json"
 ```
 
-The JSON is the one step 2 of `<eod>/SKILL.md` describes, over the whole
-week: `date` is the Monday and `to` the Sunday; each event has a `date`;
-`state_start` and `state_end` are the states at the start and end of the week;
-`merged_today` means merged during the week, and `merged_prs` lists every PR
-the user merged that week. `children` and `parent.children` give each story's
-task progress, including tasks nobody touched that week.
+`<eod>/references/data.md` describes the JSON; read it. For a week, `date`
+is the Monday and `to` the Sunday; each event has a `date`; `merged_today`
+means merged during the week.
 
 If `items` is empty, say there is no ADO activity for that week, and ask
 whether they meant another week or want a report from their notes only. Don't
@@ -58,8 +54,9 @@ write an empty report.
 
 ## 3. Write the report
 
-Use exactly this layout. Keep the top headings even when empty; inside
-Delivered and In Progress, leave out a section with nothing in it.
+Read `<eod>/references/report-rules.md` before writing, and apply it inside
+this layout. Keep the top headings even when empty; inside Delivered and In
+Progress, leave out a section with nothing in it.
 
 ```
 # Weekly Report – <DD Mon> to <DD Mon YYYY>
@@ -71,17 +68,17 @@ Delivered and In Progress, leave out a section with nothing in it.
 
 ## Delivered This Week
 
-### PXP
+### <section name, from `sections`>
 - **[User Story #100] <short story name>:** <what it delivers, as an outcome> -> **Done, PR #45 merged**
   - Tasks: #101 <2-4 word label> **Done** · #102 <label> **Done**
   - PRs: #45 **Merged** · #48 **Merged**
 
-### SXP
+### <next section>
 - ...
 
 ## In Progress (carrying over)
 
-### PXP
+### <section name>
 - **[User Story #120] <short story name>:** <where it stands> -> **In progress (2/4 tasks done)**
   - Tasks: #121 <label> **Done** · #122 <label> **In review (PR #50)**
   - PRs: #50 **In review**
@@ -93,12 +90,9 @@ Delivered and In Progress, leave out a section with nothing in it.
 - None
 ```
 
-### Grouping and statuses
+### Weekly differences
 
-Follow step 3 of `<eod>/SKILL.md` for grouping by story, the Tasks and PRs
-lines, standalone items, status words, Timetable lines, noise and merged PRs
-with no work item (grouped by theme). Read it before writing. The weekly
-differences:
+On top of `report-rules.md`:
 
 - **Status is the end of the week**: `state_end` and the PRs' current status.
 - **Delivered This Week** holds the items whose status is Done, Done with a
@@ -149,43 +143,15 @@ finished with nothing left.
 
 ### Risks & Blockers
 
-List items with `blocked: true`, and comments that say blocked, "waiting
-on", "pending from" or "depends on". Add a risk line for an item that stayed
-in progress all week without a state change, or a PR in review for more than
-three days, when the data shows it. One line each: what, on whom or what, the
-impact, and since when if known. If there are none, write `- None`.
-
-### Style, for engineering and client leadership
-
-- Plain business words. Outcomes and impact, not activity. No ADO field
-  names, board columns, internal jargon, dates or times of individual
-  changes, or file and function names.
-- A story line is at most about 20 words before the status. Tasks and PRs
-  lines carry only IDs, short labels and statuses.
-- No item gets a second mention. The plan only says what's next for an item.
+Follow the Blockers rule in `report-rules.md`. Also add a risk line for an
+item that stayed in progress all week without a state change, or a PR in
+review for more than three days, when the data shows it.
 
 ## 4. Print
 
-Put the report on the clipboard as rich text, as step 4 of `<eod>/SKILL.md`
-describes:
-
-1. Write it as an HTML fragment to a file in the scratchpad:
-   `<p><b>Weekly Report – <dates></b></p>`; `<p><b>Summary:</b></p>` with a
-   `<ul>`; `<p><b>Delivered This Week:</b></p>` and
-   `<p><b>In Progress (carrying over):</b></p>`, each with one `<ul>` whose
-   items are the sections in bold, each holding a nested `<ul>` of story
-   lines, and each story a further `<ul>` with its Tasks and PRs lines; then
-   `<p><b>Plan for Next Week:</b></p>` and `<p><b>Risks &amp; Blockers:</b></p>`,
-   each with a `<ul>`. Bold the `[Type #id] name:` prefix and every status
-   word. Escape `&`, `<`, `>` and write `->` as `-&gt;`.
-2. On Windows:
-   `powershell -NoProfile -STA -File "<eod>/scripts/copy_html.ps1" <file.html>`.
-   Elsewhere, skip this step.
-
-Then print the report in one fenced `text` block as a fallback. Below it, say
-first that the report is on the clipboard and pastes into Teams with Ctrl+V,
-then at most three short lines: how many work items were read and how many
-story lines they rolled up into, anything left out on purpose, and any
-`warnings`.
-
-Don't write to ADO. The report is only printed; the user copies it.
+Read `<eod>/references/clipboard.md` and follow it. The HTML headings are:
+`<p><b>Weekly Report – <dates></b></p>`; `<p><b>Summary:</b></p>` with a
+`<ul>`; `<p><b>Delivered This Week:</b></p>` and
+`<p><b>In Progress (carrying over):</b></p>`, both sectioned; then
+`<p><b>Plan for Next Week:</b></p>` and `<p><b>Risks &amp; Blockers:</b></p>`,
+each with a `<ul>`.
