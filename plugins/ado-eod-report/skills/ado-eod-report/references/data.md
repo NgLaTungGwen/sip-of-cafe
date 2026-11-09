@@ -41,6 +41,8 @@ It prints JSON:
 - `open_assigned`: open items assigned to the user that weren't touched in
   the window, highest priority first.
 - `warnings`, and `first_run`.
+- `profile`: the `name` (and `role`, when set) for the report header, or
+  null until the user has said who they are (see `access.md`).
 - `github`: the user's GitHub work in the same window, from the `gh` CLI's
   own sign-in, or null when GitHub is off or unreachable (a `warnings` line
   then says why). Repos in the config's `github.exclude` are left out. It has:

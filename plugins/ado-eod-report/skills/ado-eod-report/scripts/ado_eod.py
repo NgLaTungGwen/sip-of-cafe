@@ -829,6 +829,8 @@ def main(argv=None) -> int:
     p_config.add_argument("--org")
     p_config.add_argument("--sections", help='JSON list: [{"name": "Team A", "match": ["ProjectA"]}, ...]; [] groups by project')
     p_config.add_argument("--timezone")
+    p_config.add_argument("--name", help="your name as it goes on the report")
+    p_config.add_argument("--role", help="your role or team, shown under your name; empty clears it")
     p_config.add_argument("--pat-stdin", action="store_true", help="read the PAT from stdin and save it")
     p_config.add_argument("--show", action="store_true")
     p_config.add_argument("--github", choices=["on", "off"], help="include GitHub issues and PRs (default on)")
@@ -862,6 +864,13 @@ def main(argv=None) -> int:
                 gh_cfg["sections"] = mapping
             if not gh_cfg:
                 cfg.pop("github")
+            if args.name is not None or args.role is not None:
+                profile = cfg.setdefault("profile", {})
+                for key, value in (("name", args.name), ("role", args.role)):
+                    if value is not None:
+                        profile[key] = value.strip()
+                if not profile.get("name"):
+                    raise Fail("BAD_ARGS", "--name is required: the report needs your name")
             if args.timezone:
                 cfg["timezone"] = args.timezone
                 timezone(cfg)
@@ -880,6 +889,11 @@ def main(argv=None) -> int:
         client, me = connect(args, cfg)
         if args.cmd == "check":
             print(f"OK {me['name']} <{me['email']}> {client.org} (via {client.via})")
+            profile = cfg.get("profile") or {}
+            if profile.get("name"):
+                print(f"PROFILE {profile['name']}" + (f" | {profile['role']}" if profile.get("role") else ""))
+            else:
+                print("PROFILE NONE")
             return 0
 
         tz = timezone(cfg)
@@ -895,6 +909,7 @@ def main(argv=None) -> int:
             save_config(cfg)
         result = collect(client, day, tz, cfg["sections"], me, days)
         result["first_run"] = first_run
+        result["profile"] = cfg.get("profile") or None
         result["github"] = None
         gh_cfg = cfg.get("github", {})
         if gh_cfg.get("enabled", True) and not args.no_github:

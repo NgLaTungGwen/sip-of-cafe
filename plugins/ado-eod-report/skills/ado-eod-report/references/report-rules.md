@@ -7,24 +7,35 @@ window" is the report's day or week.
 ## Grouping
 
 A busy window can hold many items. Don't write one long line per item:
-summarise **by user story**. Each story gets one outcome line, and its tasks
-and PRs are listed compactly under it, each with its status.
+summarise **by user story**. Each story gets one outcome line, and under it
+one plain-language bullet per piece of work, saying what was done.
 
 - **A story line**: one line per user story (or other parent: Bug, Feature,
   Product Backlog Item) that had work in the window, on itself or on one of
   its tasks. Each item's `parent` says which story it belongs to. A story
   whose own parent is a Feature or Epic is still its own top-level line; it
   may name the feature in a few words.
-- **Tasks line**: every task worked on under that story, as
-  `#id <label> **<status>**`, separated by ` · `. The label is 2-4 plain
-  words. With more than 6 tasks, group them by status instead:
-  `Tasks: 5 **Done** (#101, #102, #103, #104, #105) · 1 **In progress** (#106)`.
-  Leave the line out when the story has no tasks in the data.
-- **PRs line**: every PR linked to the story or its tasks, once each, with its
-  status. Leave it out when there are none.
+- **Task bullets**: under the story, one bullet per task worked on, written
+  for a reader who doesn't know the ticket: what was built, fixed or changed,
+  and what it means for the product, in 8-15 plain words. The IDs come after
+  the sentence, in brackets, with the task's PR when it has one; the status
+  last:
+  `- Failed payment webhooks now retry automatically instead of being lost (#101, PR #45) **Done**`.
+  Take the wording from the task title, its comments in the window and its
+  PR title, never the bare ticket title or a 2-word label like
+  "API changes". Don't invent detail the data doesn't show; when only a
+  title exists, turn it into a plain sentence close to it.
+- **Many tasks**: with more than 6, merge tasks of the same theme into one
+  bullet, listing their IDs:
+  `- Built the upload, validation and preview steps of the import screen (#101, #102, #103) **Done**`.
+  Keep each story to at most 6 bullets.
+- **PRs**: a PR goes in the brackets of the task it implements. A PR linked
+  only to the story gets its own bullet saying what it changes:
+  `- PR #48: removed the old export path now that the new one is live **Merged**`.
+  Every PR appears once.
 - **Items with no parent** (a standalone task, bug or story) get one line
-  each. One PR goes in the status (`-> **In review (PR #46)**`); a `PRs:`
-  sub-line only when there are several.
+  each, written the same plain way. Their PR goes in the status
+  (`-> **In review (PR #46)**`); with several PRs, one bullet each under it.
 - **The story's status** is its own, from `state_end` and its PRs, by the
   status words below. When the story itself wasn't touched, use
   `parent.state` and `parent.children`: when the story is still open and
@@ -39,15 +50,15 @@ When the JSON's `github` is set, its work goes in the same report, in the
 section each item names, by the same rules:
 
 - **An issue with sub-issues** is a story line: `**[Issue #41] <name>:**`.
-  Its sub-issues are its Tasks line, and the PRs that close them its PRs
-  line. An issue with no parent and no sub-issues is a standalone line.
+  Its sub-issues are its task bullets, with the PRs that close them in the
+  brackets. An issue with no parent and no sub-issues is a standalone line.
 - **Status words:** a closed issue (`COMPLETED`) is **Done**, or
   **Done, PR #n merged** when a merged PR closes it; `NOT_PLANNED` is
   **Closed, not planned**. An open issue with an open PR is
   **In review (PR #n)**; without one, **In progress**.
 - **Merged PRs that close no issue** go in their section, grouped by theme
   like ADO PRs with no work item. A PR whose title is the same as an issue's
-  can go on that issue's PRs line.
+  goes in that issue's brackets.
 - **Counts:** issue stories count as user stories, sub-issues as tasks, and
   `github.merged_prs` add to the PRs merged; say how many came from each
   source when both have work.
@@ -88,8 +99,8 @@ From `state_end` and `prs`:
 - A merged PR wins over the board: an item with `merged_today`, or a
   `completed` PR, is **Done, PR #n merged** whatever its state says. The
   board often still shows New after a merge. With several merged PRs it is
-  **Done, n PRs merged**, and the PRs line names them. In a Tasks or PRs
-  line this is just **Done** or **Merged**.
+  **Done, n PRs merged**, and the bullets name them. On a task or PR bullet
+  this is just **Done** or **Merged**.
 - Done, Closed or Completed: **Done**.
 - Resolved: **Resolved, awaiting verification**.
 - Active, In Progress or Committed with an active PR: **In review (PR #n)**.
@@ -114,8 +125,12 @@ Sr. Engineering Director and Client Partner.
 - Plain business words. Outcomes and impact, not activity. No ADO field
   names, board columns, internal jargon, dates or times of individual
   changes, or file and function names.
-- A story line is at most about 20 words before the status. Tasks and PRs
-  lines carry only IDs, short labels and statuses.
+- A story line is at most about 20 words before the status; a task bullet
+  8-15 words. Write them so someone outside the team understands what changed
+  without opening the ticket: no bare ticket titles, no ID-only lists.
 - No item gets a second mention: a task listed under its story never gets its
   own line, and the follow-up section only says what's next for an item.
+- **Follow-up lines** (upcoming tasks, plan for next week) also say the work
+  in plain words first, then the ID: "Finish the retry dashboard so support
+  can see failed payments (#122)", not "Continue #122".
 - Don't plan follow-ups for work that is finished and has nothing left.

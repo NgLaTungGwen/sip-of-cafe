@@ -40,7 +40,8 @@ from memory.
 
 ## 1. Check access
 
-Read `<eod>/references/access.md` and follow it:
+Read `<eod>/references/access.md` and follow it, including "Who the report
+is for": on `PROFILE NONE`, ask the user who they are before collecting.
 
 ```bash
 python3 "<eod>/scripts/ado_eod.py" check
@@ -66,6 +67,7 @@ empty.
 
 ```
 # EOD Report – <Day DD Mon YYYY>
+**<profile name>** · <profile role>
 
 ## Summary
 <2-3 sentences in business terms: what was delivered, what is in review,
@@ -75,9 +77,9 @@ any risk. Lead with the outcome that matters most.>
 
 ### <section name, from `sections`>
 - **[User Story #100] <short story name>:** <what it delivers, as an outcome> -> **<status>**
-  - Tasks: #101 <2-4 word label> **Done** · #102 <label> **In progress**
-  - PRs: #45 **Merged** · #46 **In review**
-- **[Bug #210] <short name>:** <what was fixed> -> **<status>**
+  - <what this task did, in plain words> (#101, PR #45) **Done**
+  - <what this task is doing, in plain words> (#102, PR #46) **In review**
+- **[Bug #210] <short name>:** <what was fixed, for the user> -> **<status>**
 
 ### <next section>
 - ...
@@ -106,7 +108,7 @@ EOD-specific rules, on top of `report-rules.md`:
 Write 2 to 5 lines, inferred from today's work. Most important first:
 
 1. Blocked items: what has to happen to unblock them.
-2. In progress: "Continue <work> (#id): <next concrete step>". Take the next
+2. In progress: "Continue <work, in plain words> (#id): <next concrete step>". Take the next
    step from the comments, the remaining tasks under the same parent, or
    "finish and raise PR".
 3. In review: "Address review comments on PR #n" or "Merge PR #n once

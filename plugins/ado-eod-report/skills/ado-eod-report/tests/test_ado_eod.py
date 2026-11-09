@@ -526,3 +526,40 @@ class GitHub(unittest.TestCase):
                 with redirect_stdout(buf):
                     self.assertEqual(eod.main(argv + ["--date", DAY.isoformat()]), 0)
                 gh.assert_not_called()
+
+
+class Profile(unittest.TestCase):
+    """The report names who it is for: `check` says whether that is saved yet."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        patcher = mock.patch.dict(os.environ, {"ADO_EOD_HOME": self.home}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def run_main(self, *argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf), mock.patch.object(eod, "connect", return_value=(FakeClient(), ME)):
+            code = eod.main(list(argv))
+        return code, buf.getvalue()
+
+    def test_check_says_profile_none_then_the_saved_name_and_role(self):
+        code, out = self.run_main("check")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines()[1], "PROFILE NONE")
+        self.assertEqual(self.run_main("config", "--name", "Lan Tran", "--role", "Backend engineer")[0], 0)
+        self.assertEqual(self.run_main("check")[1].splitlines()[1], "PROFILE Lan Tran | Backend engineer")
+        self.run_main("config", "--role", "")
+        self.assertEqual(self.run_main("check")[1].splitlines()[1], "PROFILE Lan Tran")
+
+    def test_role_alone_needs_a_name(self):
+        code, out = self.run_main("config", "--role", "QA")
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR BAD_ARGS", out)
+
+    def test_collect_carries_the_profile(self):
+        self.run_main("config", "--name", "Lan Tran", "--sections", "[]")
+        code, out = self.run_main("collect", "--no-github", "--date", DAY.isoformat())
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["profile"], {"name": "Lan Tran"})
