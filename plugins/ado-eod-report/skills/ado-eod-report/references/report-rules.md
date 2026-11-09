@@ -33,6 +33,27 @@ and PRs are listed compactly under it, each with its status.
   an item itself has the same counts in its own `children`; add
   "(2/4 tasks done)" to an In progress status there too.
 
+## GitHub work
+
+When the JSON's `github` is set, its work goes in the same report, in the
+section each item names, by the same rules:
+
+- **An issue with sub-issues** is a story line: `**[Issue #41] <name>:**`.
+  Its sub-issues are its Tasks line, and the PRs that close them its PRs
+  line. An issue with no parent and no sub-issues is a standalone line.
+- **Status words:** a closed issue (`COMPLETED`) is **Done**, or
+  **Done, PR #n merged** when a merged PR closes it; `NOT_PLANNED` is
+  **Closed, not planned**. An open issue with an open PR is
+  **In review (PR #n)**; without one, **In progress**.
+- **Merged PRs that close no issue** go in their section, grouped by theme
+  like ADO PRs with no work item. A PR whose title is the same as an issue's
+  can go on that issue's PRs line.
+- **Counts:** issue stories count as user stories, sub-issues as tasks, and
+  `github.merged_prs` add to the PRs merged; say how many came from each
+  source when both have work.
+- **Follow-ups** also come from `github.open_prs` and
+  `github.open_assigned`, the same way as their ADO counterparts.
+
 ## What to write
 
 - **Outcomes, not activity, not ticket titles.** Use the title, the window's

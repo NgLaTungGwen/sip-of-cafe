@@ -94,12 +94,32 @@ python3 <skill>/scripts/ado_eod.py config --sections \
 
 `config --sections '[]'` goes back to one section per project.
 
+### GitHub
+
+When the `gh` CLI is signed in (`gh auth login`), both reports also include
+your GitHub issues and PRs for the same day or week: issues with sub-issues
+become stories, their sub-issues tasks, and merged PRs count like ADO PRs.
+Each repo lands in the section `github.sections` maps it to, else a section
+whose `match` words appear in the repo name or a label, else its own section.
+
+```bash
+python3 <skill>/scripts/ado_eod.py config --github-exclude owner/side-project,owner/dotfiles
+python3 <skill>/scripts/ado_eod.py config --github-sections '{"owner/web-app":"Web"}'
+python3 <skill>/scripts/ado_eod.py config --github off      # Azure DevOps only
+```
+
+`collect --no-github` leaves GitHub out for one run. When `gh` is missing or
+signed out, the report still runs on Azure DevOps and says GitHub was left out.
+
 `config --timezone Asia/Ho_Chi_Minh` sets which day counts as "today" when the
 machine's clock zone is wrong; `config --show` prints the settings and where
 the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.5.0:** GitHub as a second source: your issues (with sub-issues as
+  tasks) and PRs for the window, through the `gh` CLI's sign-in, in the same
+  sections and counts. `github.exclude` and `github.sections` in the config.
 - **0.4.1:** no project names are built in. Sections default to one per
   Azure DevOps project you worked in; your own `config --sections` still
   wins. A config the old version saved with the fixed PXP/SXP/Timetable

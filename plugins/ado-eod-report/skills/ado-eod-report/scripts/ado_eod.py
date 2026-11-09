@@ -23,6 +23,8 @@ directory. PAT scopes: Work Items (Read & write); Code (Read) adds PR status.
 
 Every failure prints one line `ERROR <CODE>: <message>` and exits 2. Codes:
 NO_AUTH, NO_ORG, AUTH, FORBIDDEN, NOT_FOUND, NETWORK, BAD_ARGS.
+GitHub (through the gh CLI's sign-in) is optional: when it fails, collect
+still succeeds and says why in `warnings`.
 """
 import argparse
 import base64
@@ -455,6 +457,9 @@ def section_list(sections: list, used: list) -> list:
     if sections:
         names = [s["name"] for s in sections]
         out = [{"name": s["name"], "style": s.get("style", "stories")} for s in sections]
+        extra = sorted({u for u in used if u not in names and u != OTHERS}, key=str.lower)
+        catch_all = next((i for i, s in enumerate(sections) if not s.get("match")), len(out))
+        out[catch_all:catch_all] = [{"name": n, "style": "stories"} for n in extra]
         if OTHERS in used and OTHERS not in names:
             out.append({"name": OTHERS, "style": "stories"})
         return out
@@ -641,6 +646,138 @@ def collect(client: Client, day: dt.date, tz, sections: list, me: dict = None, d
 
 # --- commands -----------------------------------------------------------------
 
+# ---------------------------------------------------------------- GitHub
+# GitHub work comes from the `gh` CLI's own sign-in, so it needs no token here.
+# It is a second source next to Azure DevOps: issues play the part of work
+# items (an issue with sub-issues is a story, a sub-issue its task), and PRs
+# play the part of ADO PRs.
+
+GH_FIELDS = """
+  ... on PullRequest { number title url state isDraft mergedAt updatedAt reviewDecision
+    repository { nameWithOwner } labels(first: 20) { nodes { name } }
+    closingIssuesReferences(first: 20) { nodes { number repository { nameWithOwner } } } }
+  ... on Issue { number title url state stateReason closedAt updatedAt
+    repository { nameWithOwner } labels(first: 20) { nodes { name } }
+    parent { number title state subIssues(first: 100) { nodes { number title state } } }
+    subIssues(first: 100) { nodes { number title state } } }
+"""
+GH_QUERY = ("query($q: String!, $after: String) { search(query: $q, type: ISSUE, first: 100, after: $after) {"
+            " pageInfo { hasNextPage endCursor } nodes {" + GH_FIELDS + "} } }")
+
+
+def gh_search(q: str, limit: int = 300) -> list:
+    """Every node a GitHub search returns, through `gh api graphql`."""
+    gh = shutil.which("gh")
+    if not gh:
+        raise Fail("GITHUB", "the GitHub CLI (gh) is not installed")
+    nodes, after = [], None
+    while len(nodes) < limit:
+        cmd = [gh, "api", "graphql", "-f", f"query={GH_QUERY}", "-f", f"q={q}"]
+        if after:
+            cmd += ["-f", f"after={after}"]
+        try:
+            run = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=90)
+        except subprocess.TimeoutExpired:
+            raise Fail("GITHUB", "GitHub search timed out")
+        if run.returncode != 0:
+            lines = (run.stderr or run.stdout or "").strip().splitlines()
+            raise Fail("GITHUB", lines[-1] if lines else "gh api graphql failed (run `gh auth login`)")
+        page = json.loads(run.stdout)["data"]["search"]
+        nodes += [n for n in page["nodes"] if n]
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        after = page["pageInfo"]["endCursor"]
+    return nodes[:limit]
+
+
+def gh_section(repo: str, labels: list, sections: list, mapping: dict) -> str:
+    """The section of a GitHub repo: the user's mapping, else a configured
+    section whose match words appear in the repo or a label, else the repo's
+    own name. Nothing is built in."""
+    if repo in mapping:
+        return mapping[repo]
+    short = repo.split("/")[-1]
+    for s in sections or []:
+        for m in s.get("match", []):
+            pattern = r"(?<![A-Za-z0-9])" + re.escape(m) + r"(?![A-Za-z0-9])"
+            if any(re.search(pattern, h or "", re.I) for h in [repo, short] + labels):
+                return s["name"]
+    return short
+
+
+def gh_state(state: str) -> str:
+    return {"OPEN": "Open", "CLOSED": "Closed", "MERGED": "Merged"}.get(state, state.title())
+
+
+def gh_children(nodes: list):
+    if not nodes:
+        return None
+    return {"total": len(nodes), "done": sum(n["state"] == "CLOSED" for n in nodes),
+            "open": [{"id": n["number"], "title": n["title"], "state": gh_state(n["state"])}
+                     for n in nodes if n["state"] != "CLOSED"]}
+
+
+def gh_labels(node: dict) -> list:
+    return [l["name"] for l in (node.get("labels") or {}).get("nodes", [])]
+
+
+def collect_github(start: dt.datetime, end: dt.datetime, sections: list, gh_cfg: dict, search=None) -> dict:
+    """GitHub issues and PRs of the signed-in gh user in [start, end)."""
+    span = f"{start.isoformat()}..{(end - dt.timedelta(seconds=1)).isoformat()}"
+    skip = " ".join(f"-repo:{r}" for r in gh_cfg.get("exclude", []))
+    mapping = gh_cfg.get("sections", {})
+    run = search or gh_search
+
+    def find(q):
+        return run(f"{q} {skip}".strip())
+
+    def section(repo, node):
+        return gh_section(repo, gh_labels(node), sections, mapping)
+
+    def pr_out(n):
+        status = ("completed" if n["state"] == "MERGED" else "abandoned" if n["state"] == "CLOSED"
+                  else "draft" if n.get("isDraft") else "active")
+        repo = n["repository"]["nameWithOwner"]
+        return {"repo": repo, "id": n["number"], "title": n["title"], "status": status, "url": n["url"],
+                "merged_at": n.get("mergedAt"), "review": n.get("reviewDecision"),
+                "issues": [i["number"] for i in (n.get("closingIssuesReferences") or {}).get("nodes", [])
+                           if i["repository"]["nameWithOwner"] == repo],
+                "section": section(repo, n)}
+
+    merged = [pr_out(n) for n in find(f"is:pr author:@me merged:{span}")]
+    open_prs = [pr_out(n) for n in find(f"is:pr is:open author:@me updated:{span}")]
+    prs_by_issue = {}
+    for p in merged + open_prs:
+        for i in p["issues"]:
+            prs_by_issue.setdefault((p["repo"], i), []).append({k: p[k] for k in ("id", "title", "status", "url")})
+
+    issues = {}
+    for q in (f"is:issue author:@me closed:{span}", f"is:issue assignee:@me closed:{span}",
+              f"is:issue is:open assignee:@me updated:{span}", f"is:issue is:open author:@me updated:{span}"):
+        for n in find(q):
+            issues[(n["repository"]["nameWithOwner"], n["number"])] = n
+    items = []
+    for (repo, num), n in sorted(issues.items()):
+        par = n.get("parent")
+        items.append({
+            "source": "github", "repo": repo, "id": num, "type": "Issue", "title": n["title"],
+            "state_end": gh_state(n["state"]), "state_reason": n.get("stateReason"),
+            "closed_at": n.get("closedAt"), "labels": gh_labels(n), "section": section(repo, n),
+            "parent": ({"id": par["number"], "type": "Issue", "title": par["title"], "state": gh_state(par["state"]),
+                        "children": gh_children((par.get("subIssues") or {}).get("nodes", []))} if par else None),
+            "children": gh_children((n.get("subIssues") or {}).get("nodes", [])),
+            "prs": prs_by_issue.get((repo, num), []),
+            "blocked": any("block" in l.lower() for l in gh_labels(n)),
+            "url": n["url"],
+        })
+
+    open_assigned = [{"repo": n["repository"]["nameWithOwner"], "id": n["number"], "type": "Issue",
+                      "title": n["title"], "state": "Open", "section": section(n["repository"]["nameWithOwner"], n)}
+                     for n in find("is:issue is:open assignee:@me sort:updated-desc")
+                     if (n["repository"]["nameWithOwner"], n["number"]) not in issues][:15]
+    return {"items": items, "merged_prs": merged, "open_prs": open_prs, "open_assigned": open_assigned}
+
+
 def connect(args, cfg):
     """(client, me) signed in with the PAT, or with `az login` when there is no
     PAT or Azure DevOps rejects it."""
@@ -687,12 +824,16 @@ def main(argv=None) -> int:
     p_collect.add_argument("--days", type=int, default=1, help="window length in days, from --date")
     p_collect.add_argument("--week", help="this, last or YYYY-MM-DD: the Monday-to-Sunday week holding it")
     p_collect.add_argument("--org", default="")
+    p_collect.add_argument("--no-github", action="store_true", help="leave out GitHub for this run")
     p_config = sub.add_parser("config")
     p_config.add_argument("--org")
     p_config.add_argument("--sections", help='JSON list: [{"name": "Team A", "match": ["ProjectA"]}, ...]; [] groups by project')
     p_config.add_argument("--timezone")
     p_config.add_argument("--pat-stdin", action="store_true", help="read the PAT from stdin and save it")
     p_config.add_argument("--show", action="store_true")
+    p_config.add_argument("--github", choices=["on", "off"], help="include GitHub issues and PRs (default on)")
+    p_config.add_argument("--github-exclude", help="comma-separated owner/repo list to leave out; empty clears it")
+    p_config.add_argument("--github-sections", help='JSON map {"owner/repo": "Section"}')
     args = parser.parse_args(argv)
 
     try:
@@ -707,6 +848,20 @@ def main(argv=None) -> int:
                 except (ValueError, AssertionError, AttributeError):
                     raise Fail("BAD_ARGS", "--sections must be a JSON list of {\"name\": ..., \"match\": [...]}")
                 cfg["sections"] = sections
+            gh_cfg = cfg.setdefault("github", {})
+            if args.github:
+                gh_cfg["enabled"] = args.github == "on"
+            if args.github_exclude is not None:
+                gh_cfg["exclude"] = [r.strip() for r in args.github_exclude.split(",") if r.strip()]
+            if args.github_sections:
+                try:
+                    mapping = json.loads(args.github_sections)
+                    assert isinstance(mapping, dict) and all(isinstance(v, str) for v in mapping.values())
+                except (ValueError, AssertionError):
+                    raise Fail("BAD_ARGS", '--github-sections must be a JSON map {"owner/repo": "Section"}')
+                gh_cfg["sections"] = mapping
+            if not gh_cfg:
+                cfg.pop("github")
             if args.timezone:
                 cfg["timezone"] = args.timezone
                 timezone(cfg)
@@ -740,6 +895,19 @@ def main(argv=None) -> int:
             save_config(cfg)
         result = collect(client, day, tz, cfg["sections"], me, days)
         result["first_run"] = first_run
+        result["github"] = None
+        gh_cfg = cfg.get("github", {})
+        if gh_cfg.get("enabled", True) and not args.no_github:
+            start = dt.datetime.combine(day, dt.time.min, tzinfo=tz)
+            try:
+                result["github"] = collect_github(start, start + dt.timedelta(days=days), cfg["sections"], gh_cfg)
+            except Fail as e:
+                result["warnings"].append(f"GitHub left out: {e}")
+            g = result["github"]
+            if g:
+                used = [s["name"] for s in result["sections"]] + [
+                    x["section"] for x in g["items"] + g["merged_prs"] + g["open_prs"] + g["open_assigned"]]
+                result["sections"] = section_list(cfg["sections"], used)
         print(json.dumps(result, ensure_ascii=False, indent=1))
         return 0
     except Fail as e:

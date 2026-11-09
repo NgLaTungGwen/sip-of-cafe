@@ -25,6 +25,8 @@ SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 spec = importlib.util.spec_from_file_location("ado_eod", os.path.join(SCRIPTS, "ado_eod.py"))
 eod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(eod)
+# Tests never reach GitHub: each GitHub test passes its own search.
+eod.gh_search = lambda q, limit=300: []
 
 UTC = dt.timezone.utc
 ME = {"id": "me-1", "name": "Quy", "email": "quy@example.com"}
@@ -436,3 +438,91 @@ class SkillDocPathsTest(unittest.TestCase):
                     path = os.path.join(eod_dir, rel.rstrip("."))
                     self.assertTrue(os.path.exists(path), f"{os.path.basename(doc)} names missing <eod>/{rel}")
         self.assertGreater(seen, 10)
+
+
+def gh_node(repo, number, title, state="CLOSED", kind="Issue", **extra):
+    node = {"number": number, "title": title, "state": state, "url": f"https://github.com/{repo}/x/{number}",
+            "repository": {"nameWithOwner": repo}, "labels": {"nodes": []}}
+    if kind == "Issue":
+        node.update(stateReason="COMPLETED" if state == "CLOSED" else None, closedAt="2026-10-28T03:00:00Z",
+                    parent=None, subIssues={"nodes": []})
+    else:
+        node.update(isDraft=False, mergedAt="2026-10-28T03:00:00Z" if state == "MERGED" else None,
+                    reviewDecision=None, closingIssuesReferences={"nodes": []})
+    node.update(extra)
+    return node
+
+
+class GitHub(unittest.TestCase):
+    START = dt.datetime(2026, 10, 26, tzinfo=UTC)
+
+    def fake(self, queries):
+        repo = "acme/web"
+        story = gh_node(repo, 1, "Checkout story", subIssues={"nodes": [
+            {"number": 2, "title": "Retry", "state": "CLOSED"}, {"number": 3, "title": "Docs", "state": "OPEN"}]})
+        task = gh_node(repo, 2, "Retry", parent={"number": 1, "title": "Checkout story", "state": "CLOSED",
+                                                 "subIssues": story["subIssues"]})
+        pr = gh_node(repo, 9, "Retry checkout", state="MERGED", kind="PR",
+                     closingIssuesReferences={"nodes": [{"number": 2, "repository": {"nameWithOwner": repo}}]})
+        open_issue = gh_node("acme/api", 5, "Rate limits", state="OPEN")
+
+        def search(q):
+            queries.append(q)
+            if "is:pr" in q:
+                return [pr] if "merged:" in q else []
+            if "closed:" in q:
+                return [story, task]
+            if "sort:updated-desc" in q:
+                return [open_issue, task]
+            return []
+        return search
+
+    def test_issues_prs_children_and_sections(self):
+        queries = []
+        g = eod.collect_github(self.START, self.START + dt.timedelta(days=7), SECTIONS,
+                               {"exclude": ["acme/private"], "sections": {"acme/api": "ProjectB"}},
+                               search=self.fake(queries))
+        self.assertTrue(all("-repo:acme/private" in q for q in queries))
+        self.assertIn("merged:2026-10-26T00:00:00+00:00..2026-11-01T23:59:59+00:00", queries[0])
+        story, task = g["items"]
+        self.assertEqual((story["children"]["done"], story["children"]["total"]), (1, 2))
+        self.assertEqual(story["children"]["open"][0]["id"], 3)
+        self.assertEqual(task["parent"]["children"]["total"], 2)
+        self.assertEqual([p["id"] for p in task["prs"]], [9])
+        self.assertEqual(g["merged_prs"][0]["issues"], [2])
+        self.assertEqual(story["section"], "web")             # no section matches: the repo's own name
+        self.assertEqual(g["open_assigned"], [dict(g["open_assigned"][0], id=5)])
+        self.assertEqual(g["open_assigned"][0]["section"], "ProjectB")   # mapped in github.sections
+
+    def test_section_by_match_word_or_label(self):
+        self.assertEqual(eod.gh_section("acme/ProjectA-site", [], SECTIONS, {}), "ProjectA")
+        self.assertEqual(eod.gh_section("acme/site", ["projectc"], SECTIONS, {}), "ProjectC")
+        self.assertEqual(eod.gh_section("acme/site", [], [], {}), "site")
+
+    def test_repo_sections_go_before_the_catch_all(self):
+        names = [s["name"] for s in eod.section_list(SECTIONS, ["web", "ProjectA"])]
+        self.assertEqual(names, ["ProjectA", "ProjectB", "ProjectC", "web", "Others"])
+
+    def test_github_failure_is_a_warning_not_an_error(self):
+        def broken(*a, **k):
+            raise eod.Fail("GITHUB", "the GitHub CLI (gh) is not installed")
+        with mock.patch.object(eod, "connect", return_value=(FakeClient(), ME)), \
+                mock.patch.object(eod, "load_config", return_value={"sections": SECTIONS}), \
+                mock.patch.object(eod, "collect_github", side_effect=broken):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(eod.main(["collect", "--date", DAY.isoformat()]), 0)
+        out = json.loads(buf.getvalue())
+        self.assertIsNone(out["github"])
+        self.assertIn("GitHub left out: the GitHub CLI (gh) is not installed", out["warnings"])
+
+    def test_no_github_flag_and_config_off_skip_it(self):
+        for argv, cfg in ((["collect", "--no-github"], {"sections": SECTIONS}),
+                          (["collect"], {"sections": SECTIONS, "github": {"enabled": False}})):
+            with mock.patch.object(eod, "connect", return_value=(FakeClient(), ME)), \
+                    mock.patch.object(eod, "load_config", return_value=cfg), \
+                    mock.patch.object(eod, "collect_github") as gh:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    self.assertEqual(eod.main(argv + ["--date", DAY.isoformat()]), 0)
+                gh.assert_not_called()

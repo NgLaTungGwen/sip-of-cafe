@@ -41,6 +41,20 @@ It prints JSON:
 - `open_assigned`: open items assigned to the user that weren't touched in
   the window, highest priority first.
 - `warnings`, and `first_run`.
+- `github`: the user's GitHub work in the same window, from the `gh` CLI's
+  own sign-in, or null when GitHub is off or unreachable (a `warnings` line
+  then says why). Repos in the config's `github.exclude` are left out. It has:
+  - `items`: issues the user opened or is assigned, closed in the window or
+    still open and updated in it. Same shape as an ADO item, plus `repo`:
+    `type` is `Issue`, `state_end` is `Open` or `Closed` (`state_reason`
+    says `COMPLETED` or `NOT_PLANNED`), `parent` is the parent issue and
+    `children` the sub-issues, counted like ADO tasks. `prs` are the PRs
+    that close the issue.
+  - `merged_prs`: the user's PRs merged in the window, each with `repo`,
+    `title`, `issues` (the issue numbers it closes) and `section`.
+  - `open_prs`: the user's open PRs updated in the window (`status` is
+    `active` or `draft`; `review` is GitHub's review decision).
+  - `open_assigned`: open issues assigned to the user that weren't touched.
 - `sections`: the report's sections in order, each with `name` and `style`
   (`stories`, or `plain` for one-line entries); `sections_from` says where
   they came from:
@@ -50,3 +64,6 @@ It prints JSON:
     An item goes to the first section whose `match` words appear in its
     project, area path, iteration path or tags, as whole words. Anything else
     goes to Others.
+  - A GitHub repo goes to the section the config's `github.sections` maps it
+    to, else to a configured section whose `match` words appear in the repo
+    name or a label, else to a section named after the repo itself.
