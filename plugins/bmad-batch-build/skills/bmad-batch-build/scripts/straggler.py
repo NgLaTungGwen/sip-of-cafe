@@ -2,8 +2,12 @@
 
 usage: python straggler.py <plan.json> <unit>=<minutes running> [<unit>=<minutes> ...]
 
-plan-waves.py writes a p50, a p80 and a budget (twice the estimate, and at
-least 60 min over it) for every unit under "unit_estimates" in the plan file.
+plan-waves.py writes a p50, a p80 and a budget (twice the estimate, at least
+60 min over it and 30 min past the p80) for every unit under "unit_estimates"
+in the plan file. The p80 comes from the recorded runs of the plan's mode
+(their ceil((n+1) x 0.8) order statistic) once there are five, so a budget
+follows how runs of that kind really went. A budget under the p80, from an
+older plan, counts as the p80.
 A unit past its p80 is **Slow**; one past its budget is a **Straggler**, and
 the script exits 1. sonar-zero-5 (2026-11-07) was estimated at 6 h and ran
 13.4 h, one unit 315 min, with nothing comparing a running unit with its
@@ -25,13 +29,16 @@ def check(plan, running):
         e = est.get(str(unit))
         if not e:
             continue
-        if minutes > e["budget"]:
-            out.append(("straggler", f"Straggler: unit {unit} has run {minutes} min, over its budget of {e['budget']} "
+        # A plan written before budgets followed the p80 can have a budget
+        # under it; the p80 then is the budget.
+        cap = max(e["budget"], e["p80"])
+        if minutes > cap:
+            out.append(("straggler", f"Straggler: unit {unit} has run {minutes} min, over its budget of {cap} "
                                      f"(estimate {e['p50']}, p80 {e['p80']}). Stop it after its current round, gate what "
                                      "it committed, and give the items still open to a fresh worker."))
         elif minutes > e["p80"]:
             out.append(("slow", f"Slow: unit {unit} has run {minutes} min, past its p80 of {e['p80']} "
-                                f"(estimate {e['p50']}, budget {e['budget']}). Check its fix rounds at the next return."))
+                                f"(estimate {e['p50']}, budget {cap}). Check its fix rounds at the next return."))
     return out
 
 

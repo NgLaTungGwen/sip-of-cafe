@@ -632,6 +632,13 @@ def unit_minutes(row, slug, root):
     plan file."""
     path = run_dir.find(root, slug, "-plan.json") if root else None
     if not path:
+        # --collect passes the session's folder as root, which is not always the
+        # checkout the run was planned in (review-merged-history: started in the
+        # home folder, planned under hive-factory), so its sizes and estimates
+        # were lost. Take the one plan of that slug in any project's folder.
+        found = glob.glob(os.path.join(glob.escape(store_dir()), "runs", "*", glob.escape(slug), f"{glob.escape(slug)}-plan.json"))
+        path = found[0] if len(found) == 1 else None
+    if not path:
         return None
     try:
         plan = json.load(open(path, encoding="utf-8"))
