@@ -147,14 +147,29 @@ PR pipeline enforces, with the pipeline's caps (`ratchet-<variable>.rc`, from
 `ci-ratchets.py`), and exits 1 when any check fails, so `bg.sh wait` prints
 `failed` and the rc lines. `heavy.sh` holds it until the machine has
 room, shared with every other session, so a busy machine slows the verify
-instead of crashing it. It often takes longer than the 10 minutes one Bash
-call may run, so start it in the background, adding `--apps` if `apps/`
-changed, `--infra` if `infra/` changed, and `--no-test` when the run changed
-nothing the test suite covers (only docs, pipeline YAML, or scripts outside
-the workspaces):
+instead of crashing it.
+
+It runs only what the branch changed. It reads
+`git diff --name-only` against the merge base with the base branch and keeps
+the checks whose dir has a code change: the root checks for anything outside
+`apps/` and `infra/`, the `apps/` checks for `apps/`, the `infra/` checks for
+`infra/`, with or without `--apps` and `--infra`. A change to docs, pipeline
+YAML or scripts only runs no check (ratchets still run when YAML changed). A
+path in `affected.py`'s `FORCE_FULL` list (packages/contracts, migrations,
+test setup, vitest or tsconfig config, a package.json or lockfile, the
+profile) runs everything, and so does `--full`. The units ran only their
+affected tests, so this is where the full suite runs once for the run. The
+output's second block prints each check as `run` or `skip` with the reason;
+copy the skipped ones into `VERIFY:` as `skipped (<reason>)`. When the project
+has a database and a suite is selected, a database that doesn't answer gives
+`database.rc:1` and fails the verify: start it and verify again, never read
+that as green.
+
+It often takes longer than the 10 minutes one Bash call may run, so start it
+in the background (`--no-test` is still there to skip the suites by hand):
 
 ```bash
-bash "<skill>/scripts/bg.sh" run "<iwt>" verify "bash '<skill>/scripts/heavy.sh' --priority --weight 6 --mem 5000 \"bash '<skill>/scripts/verify.sh' '<iwt>' [--apps] [--infra] [--no-test]\""
+bash "<skill>/scripts/bg.sh" run "<iwt>" verify "bash '<skill>/scripts/heavy.sh' --priority --weight 6 --mem 5000 \"bash '<skill>/scripts/verify.sh' '<iwt>' [--full] [--no-test]\""
 ```
 
 as a Bash call with `run_in_background: true`, then
@@ -166,13 +181,33 @@ runs. The log ends with the folder again and one
 so the tree stays clean. Read only the failing part of each log whose check
 didn't return 0.
 
+**Never run the same verify twice.** A check that passed keeps its rc under
+`<git dir>/bmad/verify/<HEAD^{tree}>/`; a verify of the same clean tree
+reuses it (`cached: <check>`) and runs only what failed or never ran. A fix
+commit makes a new tree, so after it the checks the diff selects run again.
 While fixing, re-run only what failed: the failing test files
 (`cd api && npx vitest run <files>`; in `apps/`, `cd apps && bunx vitest run <files>`
 when `apps/package.json` declares vitest, `cd apps && bun run test <files>` when it
 has a test script, and `cd apps && bun test <files>` only when it has neither),
-or the one check that failed. Run the full verify above once more after the last fix,
-before the PR. Anything that may take over 10 minutes goes through `bg.sh`
+or the one check, `verify.sh '<iwt>' --only <check>` the same way as above.
+Then run the verify above once more after the last fix, before the PR; with
+nothing committed since the last green verify, it is all cache hits and takes
+seconds, so don't skip it. Anything that may take over 10 minutes goes through `bg.sh`
 the same way; never wrap a wait in a loop, `timeout` or `sleep`.
+
+**Failures that are already on the base.** When a failing check fails the
+same way on the base commit (check it once: the failing test files in a
+checkout of `<base>`, or the base's last pipeline), it is not this run's to
+fix. Record it once per base commit so no later wave triages it again:
+
+```bash
+python "<skill>/scripts/affected.py" known "<iwt>" --base <origin/base> <check> "<the failing tests, and why they are not ours>"
+```
+
+Every later verify against the same base commit prints
+`known-on-base: <check> ...` beside the rc lines. The check still fails:
+compare its failing tests with the note, and fix anything new. Name the known
+failures in the PR's notes and in `VERIFY:`.
 
 Tests alone are not enough. In this repo vitest can pass while typecheck fails.
 
@@ -242,8 +277,10 @@ the fix touches, then run the script again with `<start>` set to the head the
 reviewer saw, and send only that new diff for one more review. Stop after two
 review rounds: findings still open go into the PR under `## Open review
 findings`, and into `REVIEW:`. Low findings you don't fix go there as well.
-The full verify of section 3 runs after the last fix, so the PR opens at the
-commit that was reviewed and verified.
+The verify of section 3 runs after the last fix, so the PR opens at the
+commit that was reviewed and verified. It selects from the whole branch's
+diff and reuses what already passed on that tree, so a review fix costs only
+the checks its tree needs.
 
 **Final `no`:** when every check is green, skip sections 4 and 5. Update
 `<state>` with what is merged and verified, then reply with `RESULT:
@@ -352,7 +389,11 @@ failure a `LOG` file with the error lines and the end of the failed step.
   - **The code or the pipeline definition:** reproduce it in `<iwt>` (the
     failing command or test file), fix it, commit `fix(ci): ...`, and have
     the fix reviewed as in section 3b, with `<start>` set to the head the PR
-    had. Re-run the check that failed, `git push`, and watch again.
+    had. Re-run only the check that failed, locally (the failing test files,
+    or `verify.sh '<iwt>' --only <check>`), then `git push` and watch again.
+    Don't run the whole local verify again for a `fix(ci)`: the pipeline you
+    are about to watch runs every check on the pushed commit anyway. A fix to
+    pipeline YAML only needs no local check at all.
 
   At most two fix rounds. If it is still red, stop: write the failure and
   what you tried to `<state>`, and say so in `CI:` and `NOTES:`.

@@ -47,7 +47,7 @@ Keep turns few and context small:
 - Batch small commands (`git status`, `ls`, `grep`, `cat` of a short file)
   into one Bash call joined with `;`, instead of one turn each. Every turn
   re-reads your whole context.
-- The install and the full suite run in the background through `bg.sh run`,
+- The install and the affected tests run in the background through `bg.sh run`,
   where your prompt and the workflow's pinned facts say, so they overlap
   planning and review. Collect them with `bg.sh wait`, never by re-running
   them. No Bash call may run past 10 minutes; Claude Code moves a longer one
