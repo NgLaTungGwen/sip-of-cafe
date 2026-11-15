@@ -188,6 +188,10 @@ def workspace_of(wt, path):
 def runner_of(wt, d):
     pkg = read_json(os.path.join(wt, d, "package.json"))
     deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+    # A bun workspace (hive-factory's apps/) is tested with bun, never npx,
+    # even when it lists vitest. The apps runner choice is decided here.
+    if prof_mod.pm_of(os.path.join(wt, d)) == "bun":
+        return "bun"
     if "vitest" in deps or any(os.path.exists(os.path.join(wt, d, f"vitest.config.{x}"))
                                for x in ("ts", "mts", "js", "mjs")):
         return "vitest"

@@ -2034,7 +2034,7 @@ class Affected(unittest.TestCase):
         root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, root, True)
         files = {"package.json": "{}", "api/package.json": '{"devDependencies": {"vitest": "2"}}',
-                 "api/src/a.ts": "", "apps/package.json": "{}", "apps/bun.lock": "", "apps/src/b.ts": "",
+                 "api/src/a.ts": "", "apps/package.json": '{"devDependencies": {"vitest": "2"}}', "apps/bun.lock": "", "apps/src/b.ts": "",
                  "apps/src/b.test.ts": "", "apps/src/__tests__/b.spec.tsx": "", "apps/src/c.ts": "",
                  "lib/package.json": "{}", "lib/x.ts": ""}
         for rel, text in files.items():
