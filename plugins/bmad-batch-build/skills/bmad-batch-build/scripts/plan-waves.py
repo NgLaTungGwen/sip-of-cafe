@@ -13,6 +13,15 @@ plan.json is written by the orchestrator at the split, next to the run file
        "reason": "imports the chart kit; uses the new contract fields"}
     ]}
 
+With an intake, `intake.py to-plan` writes this file from the intake's Units:
+ids as strings ("1"), depends_on as [{"id": "1", "reason": "..."}], size S to
+XL, plus "risk", "acs", "files", "items" and the intake's path. Both forms are
+accepted; the ids are written back as numbers, the reasons joined into
+"reason", and "risk" and "acs" pass through. An XL unit is scheduled as L and
+gets a Split line. When <slug>-intake.md is beside the plan (or the plan names
+it), a **Set mode:** line follows the Mode line: the intake.py set-mode
+command, ready to paste, with the reason for the mode.
+
 A unit may also carry "items", the number of separate things it must fix or
 build (findings, work items, acceptance criteria), and "files", the source
 files those items are in, relative to --root. They feed the time estimate, the
@@ -231,7 +240,7 @@ def unit_minutes(u, model, root=None):
     them, else from its size."""
     items = u.get("items") or 0
     if items <= 0:
-        return model["size"][u["size"]]
+        return model["size"][size_key(u)]
     t = BASE_ITEMS + model["per_item"] * items
     if root:
         for f in u.get("files") or []:
@@ -510,7 +519,7 @@ def parallel_cap(others):
 def plan(units, busy=False, minutes=None, max_par=MAX_PARALLEL, times=None, queue=None, heavy=HEAVY_SHARE,
          synth=SYNTH):
     minutes = minutes or DEFAULT
-    t = times or {u["id"]: minutes[u["size"]] for u in units}
+    t = times or {u["id"]: minutes[size_key(u)] for u in units}
     queue = queue or (lambda k: 1.0)
     margin = 40 if busy else 20
     levels = waves_of(units)
@@ -648,6 +657,8 @@ def too_big(units, root=None):
                 n = file_lines(root, f)
                 if n > MAX_LINES:
                     why.append(f"{f} has {n} lines, over {MAX_LINES}: give it a unit of its own")
+        if u.get("size") == "XL":
+            why.append("size XL is more than one worker's session: split it into L or smaller units")
         if why:
             out.append(f"unit {u['id']} ({u.get('title', '')}): " + "; ".join(why))
     return out
@@ -712,6 +723,59 @@ def accuracy(project=None, rows=None):
     return lines
 
 
+def normalize(units):
+    """Accepts the plan intake.py to-plan writes as well as the older one, in
+    place: ids "1" (or "U1") become 1, depends_on [{"id": "1", "reason": ".."}]
+    becomes [1] with the reasons joined into "reason", and an XL unit is
+    scheduled as L (it gets a Split line). Other keys, such as "risk" and
+    "acs", pass through untouched."""
+    def as_id(v):
+        if isinstance(v, dict):
+            v = v.get("id")
+        s = str(v).strip()
+        m = re.fullmatch(r"[Uu]?(\d+)", s)
+        return int(m.group(1)) if m else v
+    for u in units:
+        u["id"] = as_id(u["id"])
+        deps, why = [], []
+        for d in u.get("depends_on") or []:
+            deps.append(as_id(d))
+            if isinstance(d, dict) and d.get("reason"):
+                why.append(d["reason"])
+        u["depends_on"] = deps
+        if why and not u.get("reason"):
+            u["reason"] = "; ".join(why)
+        size = str(u.get("size") or "M").upper()
+        u["size"] = size
+    return units
+
+
+def size_key(u):
+    """The size whose minutes the model has: XL is scheduled as L."""
+    return "L" if u.get("size") == "XL" else u.get("size")
+
+
+def set_mode_line(plan_path, line, result, cap_why, busy, hint=None):
+    """The ready-to-paste intake.py set-mode command for this plan's intake
+    (<slug>-intake.md beside <slug>-plan.json, else the plan's "intake"), or
+    None when the plan has no intake."""
+    import shlex
+    folder, name = os.path.split(os.path.abspath(plan_path))
+    intake = os.path.join(folder, name[:-len("-plan.json")] + "-intake.md") if name.endswith("-plan.json") else None
+    if not (intake and os.path.exists(intake)):
+        intake = hint if hint and os.path.exists(hint) else None
+    if not intake:
+        return None
+    how = {"parallel": "no unit depends on another, and parallel beats a lane by more than the margin",
+           "lane": "a lane is as fast or faster here (one unit, small units or a chain), and costs less",
+           "waves": "some units need others' code, so they run in dependency waves"}[result["mode"]]
+    reason = (f"plan-waves.py chose {result['mode']}: {how}; parallel cap {cap_why}"
+              + ("; busy machine (40 min margin)" if busy else ""))
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intake.py").replace("\\", "/")
+    return (f"python {shlex.quote(script)} set-mode {shlex.quote(intake.replace(chr(92), '/'))} "
+            f"{shlex.quote(line)} --reason {shlex.quote(reason)}")
+
+
 def opt(args, name, default=None):
     return args[args.index(name) + 1] if name in args else default
 
@@ -726,7 +790,7 @@ def main(args):
         return 0
     path = args[0]
     data = json.load(open(path, encoding="utf-8"))
-    units = data["units"]
+    units = normalize(data["units"])
     root = opt(args, "--root")
     project = opt(args, "--project") or (os.path.basename(os.path.normpath(root)) if root else None)
     rows = read_jsonl("runs.jsonl")
@@ -765,7 +829,11 @@ def main(args):
     risks = stragglers(units, t)
     for s in risks:
         print("Straggler risk: " + s + ".")
-    print(mode_line(units, result, p80))
+    line = mode_line(units, result, p80)
+    print(line)
+    set_mode = set_mode_line(path, line, result, cap_why, busy, data.get("intake"))
+    if set_mode:
+        print("Set mode: " + set_mode)
     split = too_big(units, root)
     for s in split:
         print("Split: " + s + ".")

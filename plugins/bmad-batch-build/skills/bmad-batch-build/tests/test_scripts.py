@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -2596,6 +2597,212 @@ class Scheduling(unittest.TestCase):
             got = cost.unit_minutes({"worker_spans": [{"unit": 1, "start": "a", "min": 45}]}, "s2",
                                     os.path.join(tempfile.mkdtemp(), "Quy"))
         self.assertEqual(got, [{"id": 1, "size": "M", "min": 45, "est": 104}])
+
+
+FILLED_INTAKE = {
+    "Goal": "Show live counts on the dashboard.",
+    "Non-goals": "- No new charts.",
+    "Acceptance criteria": "- AC-1: Given a visit When the page loads Then the count shows\n"
+                           "- AC-2: Given no visits When the page loads Then it shows 0",
+    "Shared interfaces": "- GET /api/counts: none -> {total: number} | owner U1",
+    "Units": "- U1 Counts endpoint | size M | risk med | depends on: - | touches: api/src/counts.ts, api/src/routes.ts"
+             " | ACs: AC-1 | items: 3\n"
+             "  kind change\n"
+             "- U2 Counts widget | size S | risk low | depends on: U1 (imports the counts type) | touches: "
+             "web/src/Counts.tsx | ACs: AC-1, AC-2 | items: 2",
+    "Coupling map": "U2 needs U1's type, so it runs after it.",
+    "Verification scenarios": "- SC-1: Given HOLDOUT-SECRET-SCENARIO When it runs Then it passes",
+}
+
+
+class Intake(unittest.TestCase):
+    def setUp(self):
+        self.runs = tempfile.mkdtemp()
+        self.addCleanup(self.cleanup)
+        self.intake_mod = load("intake_mod", "intake.py")
+
+    def cleanup(self):
+        for dirpath, _, files in os.walk(self.runs):
+            for f in files:
+                os.chmod(os.path.join(dirpath, f), 0o666)
+        shutil.rmtree(self.runs, ignore_errors=True)
+
+    def run_intake(self, *args):
+        return subprocess.run([sys.executable, os.path.join(SCRIPTS, "intake.py"), *args],
+                              capture_output=True, encoding="utf-8")
+
+    def new(self, slug="demo", prompt="Add live counts.\n## Goal\nSOURCE-PROMPT-MARKER\n"):
+        pf = os.path.join(self.runs, "prompt.txt")
+        with open(pf, "w", encoding="utf-8") as f:
+            f.write(prompt)
+        r = self.run_intake("new", self.runs, slug, "--prompt-file", pf)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return os.path.join(self.runs, f"{slug}-intake.md")
+
+    def fill(self, path, **over):
+        text = open(path, encoding="utf-8").read()
+        for name, value in {**FILLED_INTAKE, **over}.items():
+            text = self.intake_mod.replace_body(text, name, value)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def ready(self):
+        path = self.new()
+        self.fill(path)
+        self.assertEqual(self.run_intake("check", path).stdout.strip(), "READY")
+        return path
+
+    def test_new_keeps_the_prompt_verbatim_marks_the_run_and_refuses_to_overwrite(self):
+        path = self.new()
+        self.assertIn("Add live counts.\n## Goal\nSOURCE-PROMPT-MARKER\n", open(path, encoding="utf-8").read())
+        self.assertRegex(open(os.path.join(self.runs, "demo.md"), encoding="utf-8").read(),
+                         r"INTAKE start \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+        pf = os.path.join(self.runs, "prompt.txt")
+        self.assertEqual(self.run_intake("new", self.runs, "demo", "--prompt-file", pf).returncode, 1)
+
+    def test_readiness_stops_a_vague_intake_with_missing_lines(self):
+        path = self.new()
+        r = self.run_intake("check", path)
+        self.assertEqual(r.returncode, 2)
+        lines = r.stdout.splitlines()
+        self.assertEqual(lines[0], "NOT READY")
+        self.assertTrue(any("Goal" in ln for ln in lines[1:]))
+        self.assertTrue(any("no unit" in ln for ln in lines[1:]))
+        self.assertTrue(all(ln.startswith("MISSING: ") for ln in lines[1:]))
+        # A half-filled one names each gap.
+        self.fill(path, Units="- U1 Endpoint | size M | risk <low/med/high> | depends on: U7 | touches: a.ts | ACs: AC-9",
+                  **{"Shared interfaces": "- GET /x: a -> b"})
+        out = self.run_intake("check", path).stdout
+        for want in ("U1 has no risk", "U1 names AC-9", "U1 depends on U7", "GET /x has no owner unit"):
+            self.assertIn(want, out)
+        self.assertEqual(self.run_intake("freeze", path).returncode, 2)
+        self.assertEqual(self.run_intake("to-plan", path, os.path.join(self.runs, "demo-plan.json")).returncode, 2)
+
+    def test_a_question_timeout_applies_the_default_into_assumptions(self):
+        path = self.ready()
+        r = self.run_intake("asked", path, "--count", "3")
+        self.assertEqual(r.returncode, 0)
+        r = self.run_intake("defaults", path, "--question", "Migration", "--took", "Edit in place")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = open(path, encoding="utf-8").read()
+        assumptions = self.intake_mod.body(text, "Assumptions and defaults applied")
+        self.assertEqual(assumptions, "- TIMEOUT: Migration: took Edit in place")
+        run = open(os.path.join(self.runs, "demo.md"), encoding="utf-8").read()
+        self.assertRegex(run, r"INTAKE questions 3 \d{4}-")
+        self.assertIn("TIMEOUT: Migration: took Edit in place", run)
+        self.assertEqual(self.run_intake("check", path).returncode, 0)
+
+    def test_freeze_verify_amend_and_a_second_freeze(self):
+        path = self.ready()
+        self.assertEqual(self.run_intake("verify", path).stdout.strip(), "NOT FROZEN")
+        self.assertEqual(self.run_intake("verify", path).returncode, 3)
+        self.assertEqual(self.run_intake("amend", path, "--reason", "r", "--text", "t").returncode, 1)
+        r = self.run_intake("freeze", path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("INTAKE approved", open(os.path.join(self.runs, "demo.md"), encoding="utf-8").read())
+        self.assertFalse(os.access(path, os.W_OK))
+        self.assertEqual(self.run_intake("verify", path).stdout.strip(), "FROZEN ok")
+        # amend lands under Changes after approval and keeps the hash.
+        r = self.run_intake("amend", path, "--reason", "user asked", "--text", "U2 also shows a spinner")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.access(path, os.W_OK))
+        text = open(path, encoding="utf-8").read()
+        changes = self.intake_mod.body(text, "Changes after approval")
+        self.assertRegex(changes, r"^- \d{4}-\S+ U2 also shows a spinner \(reason: user asked\)$")
+        self.assertEqual(self.run_intake("verify", path).stdout.strip(), "FROZEN ok")
+        # Before freeze only.
+        self.assertEqual(self.run_intake("defaults", path, "--question", "q", "--took", "o").returncode, 1)
+        self.assertEqual(self.run_intake("set-mode", path, "Mode: lane", "--reason", "r").returncode, 1)
+        self.assertEqual(self.run_intake("freeze", path).returncode, 1)
+        # A direct edit of the frozen part is caught.
+        os.chmod(path, 0o666)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text.replace("Show live counts", "Show live and past counts"))
+        r = self.run_intake("verify", path)
+        self.assertEqual((r.returncode, r.stdout.strip()), (1, "FROZEN changed"))
+
+    def test_iface_add_and_show_with_concurrent_appends(self):
+        f = os.path.join(self.runs, "demo-interface-changes.md")
+        r = self.run_intake("iface", "show", f)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "none"))
+        r = self.run_intake("iface", "add", f, "--unit", "1", "--iface", "GET /api/counts",
+                            "--change", "{total} -> {total, today}", "--reason", "the widget needs today")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout.strip(), r"^- \S+Z U1 GET /api/counts: \{total\} -> \{total, today\} "
+                                           r"\(reason: the widget needs today\)$")
+        loop = ("import subprocess, sys\n"
+                "for i in range(15):\n"
+                "    subprocess.run([sys.executable, sys.argv[1], 'iface', 'add', sys.argv[2], '--unit', sys.argv[3],"
+                " '--iface', 'sym%d' % i, '--change', 'a -> b', '--reason', 'r'], check=True)\n")
+        procs = [subprocess.Popen([sys.executable, "-c", loop, os.path.join(SCRIPTS, "intake.py"), f, u])
+                 for u in ("U2", "3")]
+        self.assertEqual([p.wait(timeout=240) for p in procs], [0, 0])
+        lines = self.run_intake("iface", "show", f).stdout.splitlines()
+        self.assertEqual(len(lines), 31)
+        self.assertTrue(all(re.fullmatch(r"- \S+Z U\d .+: .+ \(reason: .+\)", ln) for ln in lines), lines)
+        self.assertEqual(sum(" U2 " in ln for ln in lines), 15)
+        self.assertEqual(sum(" U3 " in ln for ln in lines), 15)
+        self.assertFalse(os.path.exists(f + ".lock"))
+
+    def test_to_plan_feeds_plan_waves_and_prints_set_mode(self):
+        path = self.ready()
+        plan = os.path.join(self.runs, "demo-plan.json")
+        with open(plan, "w", encoding="utf-8") as f:
+            json.dump({"units": [{"id": 1, "title": "old", "size": "S", "branch": "feat/demo-1"}], "keep": 1}, f)
+        r = self.run_intake("to-plan", path, plan)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.load(open(plan, encoding="utf-8"))
+        self.assertEqual(data["keep"], 1)
+        u1, u2 = data["units"]
+        self.assertEqual((u1["id"], u1["size"], u1["risk"], u1["branch"], u1["items"]), ("1", "M", "med", "feat/demo-1", 3))
+        self.assertEqual(u1["files"], ["api/src/counts.ts", "api/src/routes.ts"])
+        self.assertEqual(u2["depends_on"], [{"id": "1", "reason": "imports the counts type"}])
+        self.assertEqual(u2["acs"], ["AC-1", "AC-2"])
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "plan-waves.py"), plan, "--max-parallel", "4"],
+                           capture_output=True, encoding="utf-8",
+                           env={**os.environ, "BMAD_RUNS_DIR": self.runs})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        mode = [ln for ln in r.stdout.splitlines() if ln.startswith("Mode: ")]
+        self.assertEqual(len(mode), 1)
+        self.assertIn("2←1 (imports the counts type)", mode[0])
+        cmd = [ln for ln in r.stdout.splitlines() if ln.startswith("Set mode: ")]
+        self.assertEqual(len(cmd), 1)
+        self.assertIn("intake.py set-mode ", cmd[0])
+        self.assertIn(path.replace("\\", "/"), cmd[0])
+        self.assertIn("'" + mode[0] + "' --reason 'plan-waves.py chose ", cmd[0])
+        data = json.load(open(plan, encoding="utf-8"))
+        self.assertEqual([u["id"] for u in data["units"]], [1, 2])
+        self.assertEqual(data["units"][1]["depends_on"], [1])
+        self.assertEqual(data["units"][1]["risk"], "low")
+        self.assertEqual(data["units"][1]["acs"], ["AC-1", "AC-2"])
+        self.assertIn("1", data["unit_estimates"])
+        # The pasted command fills Mode decision.
+        r = self.run_intake("set-mode", path, mode[0], "--reason", "chosen by plan-waves")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.intake_mod.body(open(path, encoding="utf-8").read(), "Mode decision"),
+                         mode[0] + "\nReason: chosen by plan-waves")
+
+    def test_plan_waves_takes_an_xl_unit_and_keeps_old_plans(self):
+        units = waves.normalize([{"id": "U1", "title": "a", "size": "xl", "depends_on": []},
+                                 {"id": 2, "title": "b", "size": "S", "depends_on": [1], "reason": "old"}])
+        self.assertEqual([(u["id"], u["size"], u["depends_on"]) for u in units], [(1, "XL", []), (2, "S", [1])])
+        self.assertEqual(units[1]["reason"], "old")
+        self.assertEqual(waves.unit_minutes(units[0], waves.calibration(rows=[])), 160)
+        self.assertTrue(any("XL" in s for s in waves.too_big(units)))
+
+    def test_unit_prints_the_worker_view_without_scenarios_or_prompt(self):
+        path = self.ready()
+        r = self.run_intake("unit", path, "U2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = r.stdout
+        for want in ("Show live counts", "No new charts", "GET /api/counts", "U2 Counts widget",
+                     "AC-1: Given a visit", "AC-2: Given no visits"):
+            self.assertIn(want, out)
+        for never in ("HOLDOUT-SECRET-SCENARIO", "SC-1", "SOURCE-PROMPT-MARKER", "Add live counts"):
+            self.assertNotIn(never, out)
+        self.assertNotIn("AC-2", self.run_intake("unit", path, "1").stdout)
+        self.assertEqual(self.run_intake("unit", path, "U9").returncode, 1)
+        self.assertIn("HOLDOUT-SECRET-SCENARIO", self.run_intake("scenarios", path).stdout)
 
 
 if __name__ == "__main__":
