@@ -609,7 +609,8 @@ class PrepareWorktree(unittest.TestCase):
         pkg = '{"scripts": {"test": "bun test --coverage"}}'
         wt, toml = self.pinned(with_api=True, with_apps=True, apps_pkg=pkg)
         self.assertIn("cd " + wt + "/apps && bun run test'", toml)
-        self.assertIn("cd " + wt + "/apps && bun test <files>", toml)  # no vitest: bun's runner per file
+        self.assertIn("cd " + wt + "/apps && bun run test <files>", toml)
+        self.assertNotIn("bun test <files>", toml)
 
     def test_a_profile_with_commands_gets_no_apps_clause(self):
         # The profile already names where and how apps/ is checked.

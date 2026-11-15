@@ -158,7 +158,8 @@ didn't return 0.
 
 While fixing, re-run only what failed: the failing test files
 (`cd api && npx vitest run <files>`; in `apps/`, `cd apps && bunx vitest run <files>`
-when `apps/package.json` declares vitest, otherwise `cd apps && bun test <files>`),
+when `apps/package.json` declares vitest, `cd apps && bun run test <files>` when it
+has a test script, and `cd apps && bun test <files>` only when it has neither),
 or the one check that failed. Run the full verify above once more after the last fix,
 before the PR. Anything that may take over 10 minutes goes through `bg.sh`
 the same way; never wrap a wait in a loop, `timeout` or `sleep`.

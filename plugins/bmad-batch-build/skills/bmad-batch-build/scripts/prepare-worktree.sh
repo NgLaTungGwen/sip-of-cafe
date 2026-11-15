@@ -205,7 +205,7 @@ apps_clause=""
 # The suite is its own test script whenever it has one, as verify.sh runs it.
 . "$(dirname "${BASH_SOURCE[0]}")/lib-packages.sh"
 apps_test="bun test <files>" apps_suite="bun test"
-has_script "$wt/apps" test && apps_suite="bun run test"
+has_script "$wt/apps" test && apps_test="bun run test <files>" apps_suite="bun run test"
 if [ -f "$wt/apps/package.json" ] && grep -q '"vitest"' "$wt/apps/package.json"; then
   apps_test="bunx vitest run <files>" apps_suite="bun run test"
 fi
