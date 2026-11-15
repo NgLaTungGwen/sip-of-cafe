@@ -33,8 +33,14 @@ Send every worker in **one message**, with one `Agent` call per unit
 `model`; `<agents>` is the prefix SKILL.md set).
 That agent (`agents/bmad-batch-worker.md`) runs on Opus with a 1-hour
 prompt cache, so its context survives the waits on its coder, its reviewers
-and the test suite. The worker plans, verifies and triages the review; bmad-build-auto runs
-its review subagents at the worker's model, and they keep the default 5-minute
+and the test suite. The worker plans, verifies and triages the review. The
+review is sized by risk through the pinned toml's per-layer `when` gates,
+which read the `Size:` line below: an S unit under 400 changed lines that
+touches no contract, migration or auth code gets only the edge-case and
+verification-gap layers; the intent auditor runs only for L units or when an
+interface changed from the agreed shape. Those two layers run at the worker's
+model; the blind hunter and the intent auditor run on Sonnet (a pinned fact
+replaces step-04's same-model rule for them). All keep the default 5-minute
 cache. Opus, not Sonnet: Sonnet workers skipped the review in 31 of 47 units
 (2026-10-21/22), while Opus workers completed the workflow in 62 of 67. The
 code itself is written by the `<agents>haiku-implementer` agent that the worktree's
@@ -47,6 +53,9 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 - `<name>`: `<slug>-<n>`
 - `<budget>` and `<estimate>`: the unit's `budget` and `p50` under `unit_estimates` in the
   plan file, in minutes
+- `<size>`: the unit's size from the split (S, M or L)
+- `<template>`: the `DB-TEMPLATE` name from SKILL.md section 4; leave out
+  `--db-template` when it printed `none`
 - `<wt>`: `<root>/.claude/worktrees/<name>`
 - `<branch>`: the unit's branch
 - `<base>`: the wave's base. For wave 1 that is `origin/<base>` (SKILL.md), and the
@@ -56,6 +65,7 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 ```text
 You are a Build Auto worker for one unit of a BMAD batch build.
 Unit: <n>
+Size: <size>   (the review layers' `Run only when` lines read this)
 Budget: <budget> min (about <estimate> expected). Run `date +%s` first and keep the number.
 
 Project root: <wt>   (a git worktree on branch <branch>, which you create in step 0)
@@ -63,7 +73,7 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
 
 0. Prepare the worktree:
    a. As one foreground Bash call with `timeout: 600000`:
-      bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<name>" "<branch>" --no-install --agents "<agents>" [--base <base>]
+      bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<name>" "<branch>" --no-install --agents "<agents>" [--base <base>] [--db-template <template>]
       If it fails, reply with:
       SPEC: none
       STATUS: blocked

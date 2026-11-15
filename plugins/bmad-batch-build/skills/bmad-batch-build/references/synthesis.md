@@ -23,6 +23,10 @@ the workers at the start of the run:
 - `<final>` is `yes` for the last synthesis of the run, which opens the PR,
   and `no` between waves.
 
+Never name a test database in the prompt: the integration worktree's `.env`
+already points at its own (`hive_pb_<name>_test`), and the prompt below says
+so. A dispatch that named `hive_factory_test` sent synthesis to the shared one.
+
 Merge-script output, interface lines and the state file keep the agent's own
 reading small: it opens a spec or a file only where a check points at it.
 
@@ -63,6 +67,12 @@ per unit <unit n: #task id>. If ticket creation failed: "none: <error>". With ti
 off (setup said so): "off".
 
 PR tool: `<pr>` (from the run's setup: az, gh or none).
+
+Test database: the one `<iwt>/.env` names (its DATABASE_URL, which the
+suite routes to `<that name>_test` in hive-factory), private to this
+worktree. Never point a run at a shared one such as `hive_factory_test`, and
+never set DATABASE_URL or TEST_DATABASE_URL by hand: other worktrees' suites
+would delete your rows.
 
 Read `<iwt>/AGENTS.md` first. Then record where your own work starts:
 `git -C <iwt> rev-parse HEAD` is `<start>`; write it into `<state>`.

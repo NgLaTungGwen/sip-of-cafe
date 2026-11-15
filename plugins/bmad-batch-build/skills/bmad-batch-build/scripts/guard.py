@@ -253,7 +253,9 @@ def check_skill_copy(cmd, kind=None):
         if theirs == mine or (own and version_of(theirs) == own):
             continue
         return (f"{m.group(0)} is another copy of this skill's scripts (version {version_of(theirs) or 'unknown'}, "
-                f"this run uses {own or 'this copy'}); run {SCRIPTS.replace(chr(92), '/')}/{m.group('n')} instead")
+                f"this run uses {own or 'this copy'}); run {SCRIPTS.replace(chr(92), '/')}/{m.group('n')} instead. "
+                "Your worktree's current script paths are in "
+                "`cat \"$(git -C <your worktree> rev-parse --absolute-git-dir)/bmad/scripts.env\"`")
     return None
 
 
