@@ -22,8 +22,14 @@ Both also build the run journal (journal.py): what failed and what the agents
 reported, written to <store>/journals/<session>.md (and, for --record, to
 <slug>-journal.md in the run folder) and kept on the row under "journal".
 
-The main session is counted only from the skill invocation to the last
-synthesis Agent result, so unrelated work in the same session is excluded.
+A row is one run, keyed by (session, slug): one session can hold several
+runs (a second batch asked for after the first), and each gets its own row.
+A run's part of the main session runs from its own start (its skill
+invocation, or the creation of its run file when it had none) to its own
+last synthesis result (else its --record call, else the next run's start),
+and only the subagents launched for it count (split_session). --collect
+records every run of a session. Without a slug (the plain report), the main
+session counts from the first invocation to the last synthesis result.
 """
 import collections
 import datetime as dt
@@ -81,6 +87,138 @@ def main_span(lines):
     return start, end
 
 
+def blocks_of(x):
+    m = x.get("message")
+    if isinstance(m, dict) and isinstance(m.get("content"), list):
+        return [b for b in m["content"] if isinstance(b, dict)]
+    return []
+
+
+def run_marks(lines):
+    """{slug: index} of the first line where the orchestrator made or wrote
+    each run's own file: `run_dir.py <slug>`, or a Write or Edit of
+    <slug>.md. A run file that is only read or listed (an old run looked up)
+    is not a run of this session."""
+    marks = {}
+    for i, x in enumerate(lines):
+        if x.get("type") != "assistant":
+            continue
+        for b in blocks_of(x):
+            if b.get("type") != "tool_use":
+                continue
+            inp = b.get("input") or {}
+            slug = None
+            if b.get("name") in ("Write", "Edit"):
+                slug = run_dir.slug_in(json.dumps(inp.get("file_path") or ""))
+            elif b.get("name") in ("Bash", "PowerShell"):
+                m = re.search(r"run_dir\.py[\"']?\s+([\w.-]+)", inp.get("command") or "")
+                slug = m.group(1) if m and not m.group(1).startswith("-") else None
+            if slug and slug not in marks:
+                marks[slug] = i
+    return marks
+
+
+def slug_pattern(slug):
+    # ti-port matches ti-port, ti-port-3 and ti-port/..., not ti-port-x.
+    return re.compile(r"(?<![\w.-])" + re.escape(slug) + r"(?![\w.]|-[A-Za-z])")
+
+
+def runs_in(lines):
+    """The runs one session holds, in the order they started:
+    [{"slug", "start", "next"}], where start is the line of the run's own
+    skill invocation, or of its run file's creation when the run had none (a
+    second run asked for in plain words), and next is the start of the run
+    after it (or the end of the log). Empty when no run file was made."""
+    marks = run_marks(lines)
+    inv = [i for i, x in enumerate(lines) if x.get("type") in ("user", "assistant") and invokes(json.dumps(x))]
+    runs, prev = [], -1
+    for slug in sorted(marks, key=marks.get):
+        own = [i for i in inv if prev < i <= marks[slug]]
+        runs.append({"slug": slug, "start": own[-1] if own else marks[slug]})
+        prev = marks[slug]
+    for k, r in enumerate(runs):
+        r["next"] = runs[k + 1]["start"] if k + 1 < len(runs) else len(lines)
+    return runs
+
+
+def owner_run(runs, at, text):
+    """The run an agent belongs to: the run its dispatch text names (a run
+    file, a worktree <slug>-<n>), else the run that was going when it was
+    launched (the latest one started at `at`, a line index)."""
+    hits = [k for k, r in enumerate(runs) if slug_pattern(r["slug"]).search(text or "")]
+    cands = hits or list(range(len(runs)))
+    started = [k for k in cands if runs[k]["start"] <= at]
+    return max(started, key=lambda k: runs[k]["start"]) if started else cands[0]
+
+
+def split_session(lines, subs):
+    """Splits one session into its runs. Returns (runs, owner): each run gets
+    its own "end" (its last synthesis result, else its `--record` call, else
+    the start of the next run), and owner maps each subagent log to its run
+    index. A subagent belongs to the run of the Agent call that launched it
+    (by that call's dispatch text, then its line); one a worker launched goes
+    with that worker; one with no known launcher goes by its dispatch text
+    and launch time."""
+    runs = runs_in(lines)
+    if not runs:
+        return runs, {}
+    launched = {}  # Agent tool_use id -> ("main", line, text) or (log, None, text)
+    synth = collections.defaultdict(set)
+    for i, x in enumerate(lines):
+        for b in blocks_of(x):
+            if b.get("type") == "tool_use" and b.get("name") == "Agent":
+                text = json.dumps(b.get("input") or {})
+                k = owner_run(runs, i, text)
+                launched[b["id"]] = ("main", k)
+                if "ynthesis" in text[:300]:
+                    synth[k].add(b["id"])
+    for f, (meta, sub) in subs.items():
+        for b in tool_uses(sub):
+            if b.get("name") == "Agent":
+                launched.setdefault(b["id"], (f, None))
+    stamps = []
+    for r in runs:
+        stamps.append(next((x["timestamp"] for x in lines[r["start"]:] if x.get("timestamp")), "~"))
+    owner = {}
+
+    def resolve(f, depth=0):
+        if f in owner:
+            return owner[f]
+        meta, sub = subs[f]
+        via = launched.get(meta.get("toolUseId"))
+        if via and via[0] == "main":
+            k = via[1]
+        elif via and via[0] in subs and via[0] != f and depth < 8:
+            k = resolve(via[0], depth + 1)
+        else:
+            first = next((x["timestamp"] for x in sub if x.get("timestamp")), "")
+            at = max([i for i, t in enumerate(stamps) if t <= first] or [0])
+            k = owner_run(runs, runs[at]["start"], json.dumps(sub[0]) if sub else "")
+        owner[f] = k
+        return k
+
+    for f in subs:
+        resolve(f)
+    for k, r in enumerate(runs):
+        end = None
+        for i in range(r["start"], len(lines)):
+            for b in blocks_of(lines[i]):
+                if b.get("type") == "tool_result" and b.get("tool_use_id") in synth[k]:
+                    end = i + 1
+        if end is None:
+            pat = slug_pattern(r["slug"])
+            for i in range(r["start"], len(lines)):
+                cmds = [(b.get("input") or {}).get("command") or "" for b in blocks_of(lines[i])
+                        if b.get("type") == "tool_use" and b.get("name") in ("Bash", "PowerShell")]
+                m = next((re.search(r"--record\s+(\S+)", c) for c in cmds if "--record" in c), None)
+                # A literal slug must be this run's; a "$s" in a loop records every open run.
+                if m and (pat.search(m.group(1)) or "$" in m.group(1)):
+                    end = i + 1
+                    break
+        r["end"] = end or r["next"]
+    return runs, owner
+
+
 def role(meta, first_line):
     agent = meta.get("agentType")
     if agent == "haiku-implementer":
@@ -135,6 +273,12 @@ def profile(lines, lab, acc, edits, waits, spans=None):
                     t0, kind = pending.pop(b["tool_use_id"])
                     waits[(lab, kind)][0] += 1
                     waits[(lab, kind)][1] += (ts(x["timestamp"]) - ts(t0)).total_seconds()
+                    # The user answered a permission prompt for this call: the
+                    # whole call counts as waiting on them (an upper bound).
+                    by = str((x.get("permissionDecision") or {}).get("source") or "")
+                    if by.startswith("user") and kind != "AskUserQuestion":
+                        waits[(lab, "user permission")][0] += 1
+                        waits[(lab, "user permission")][1] += (ts(x["timestamp"]) - ts(t0)).total_seconds()
                     if spans is not None:
                         spans[(lab, kind)].append((ts(t0), ts(x["timestamp"])))
             continue
@@ -205,9 +349,25 @@ def union(intervals):
     return total + ((cur[1] - cur[0]).total_seconds() if cur else 0)
 
 
-def run(session_path):
+# (session path, slug) -> ((start, end), subagent logs) of each run run() split out.
+RUN_PARTS = {}
+
+
+def load_subagents(base):
+    subs = {}
+    for f in sorted(glob.glob(base + "/subagents/*.jsonl")):
+        mp = f[:-6] + ".meta.json"
+        subs[f] = (json.load(open(mp)) if os.path.exists(mp) else {}, load(f))
+    return subs
+
+
+def run(session_path, slug=None):
     """Returns (acc, edits, start, waits, spans, quality, ivals).
 
+    With slug, only that run of the session counts: its own span of the main
+    log and its own subagents (split_session). Without one, or when the
+    session has no run file of that slug, the whole session from the first
+    invocation to the last synthesis result.
     spans maps role -> list of seconds; ivals maps (role, kind) -> tool-call intervals.
     """
     base = session_path[:-6]
@@ -219,14 +379,21 @@ def run(session_path):
                "busy_iv": []}
     ivals = collections.defaultdict(list)
     lines = load(session_path)
-    s, e = main_span(lines)
+    subs = load_subagents(base)
+    runs, owner = split_session(lines, subs)
+    quality["session_runs"] = [r["slug"] for r in runs]
+    k = next((i for i, r in enumerate(runs) if r["slug"] == slug), None) if slug else None
+    if k is None:
+        s, e = main_span(lines)
+    else:
+        s, e = runs[k]["start"], runs[k]["end"]
+        subs = {f: v for f, v in subs.items() if owner.get(f) == k}
+        # The journal of this run reads the same part of the session.
+        RUN_PARTS[(session_path, slug)] = ((s, e), set(subs))
     main_ts = profile(lines[s:e], "main", acc, edits, waits, ivals)
     ends = {}
     acc["main"]["agents"] += 1
-    for f in glob.glob(base + "/subagents/*.jsonl"):
-        mp = f[:-6] + ".meta.json"
-        meta = json.load(open(mp)) if os.path.exists(mp) else {}
-        sub = load(f)
+    for f, (meta, sub) in subs.items():
         lab = role(meta, json.dumps(sub[0]) if sub else "")
         if lab == "worker":
             quality["workers"].append(unit_quality(sub, children(base, sub)))
@@ -254,11 +421,17 @@ def run(session_path):
         acc[lab]["agents"] += 1
     # Synthesis usually runs in the background, so its Agent result returns at
     # launch; the run ends at whichever is later, main or synthesis.
-    # Time the run spent waiting on the user: the gap before every typed user
-    # message (an approval asked in plain text) plus AskUserQuestion answers.
-    user_wait = waits.get(("main", "AskUserQuestion"), [0, 0.0])[1]
+    # Time the run spent waiting on the user, in two parts. ask: answering an
+    # AskUserQuestion, or a permission prompt in the main session (a tool call
+    # the user approved or refused by hand). typed: the gap before every other
+    # typed user message (an approval asked in plain text, a nudge).
+    ask = waits.get(("main", "AskUserQuestion"), [0, 0.0])[1] + waits.get(("main", "user permission"), [0, 0.0])[1]
+    typed_wait = 0.0
     prev = None
     for x in lines[s:e]:
+        for b in blocks_of(x):
+            if b.get("type") == "tool_use" and b.get("name") == "AskUserQuestion":
+                acc["main"]["questions"] += len((b.get("input") or {}).get("questions") or [None])
         t = x.get("timestamp")
         if not t:
             continue
@@ -267,10 +440,13 @@ def run(session_path):
             isinstance(c, list) and any(b.get("type") == "tool_result" for b in c if isinstance(b, dict))
         ) and "<task-notification>" not in json.dumps(c or "") and c
         if typed and prev and x.get("type") == "user" and not x.get("isMeta"):
-            user_wait += (ts(t) - ts(prev)).total_seconds()
+            # Clock skew between lines can make a gap negative; it is no wait.
+            typed_wait += max((ts(t) - ts(prev)).total_seconds(), 0)
         if x.get("type") != "queue-operation":
             prev = t
-    acc["main"]["user_wait"] += user_wait
+    acc["main"]["user_ask"] += ask
+    acc["main"]["user_typed"] += typed_wait
+    acc["main"]["user_wait"] += ask + typed_wait
     start = main_ts[0] if main_ts else ""
     end = max([main_ts[1]] + ends.get("synthesis", [])) if main_ts else ""
     spans["main"].append((ts(end) - ts(start)).total_seconds() if main_ts else 0)
@@ -327,8 +503,9 @@ def mins(sec):
     return f"{sec / 60:.0f}m" if sec else "-"
 
 
-def report(paths):
-    """Prints the report for these sessions; returns one data row per session."""
+def report(paths, slug=None):
+    """Prints the report for these sessions; returns one data row per session.
+    With slug, each row covers only that run of its session (see run())."""
     rows = []
     grand = collections.defaultdict(collections.Counter)
     idle = collections.Counter()
@@ -340,7 +517,7 @@ def report(paths):
     fix_merge = []
     print(f"{'session':10} {'date':10} {'workers':>7} {'$total':>7} {'$main':>6} {'$work':>6} {'$impl':>5} {'$rev':>5} {'$haiku':>6} {'$synth':>6} {'$idle≤':>6} {'Mtok in':>8} {'Ktok out':>8}")
     for p in paths:
-        acc, ed, start, waits, spans, quality, ivals = run(p)
+        acc, ed, start, waits, spans, quality, ivals = run(p, slug)
         for k, iv in ivals.items():
             all_union[k] += union(iv)
         units += quality["workers"]
@@ -373,7 +550,11 @@ def report(paths):
             "usd_idle_max": round(sum(v["usd_idle"] for v in acc.values()), 2),
             "mtok_in": round(tok_in / 1e6, 2), "ktok_out": round(tok_out / 1e3, 1),
             "mtok_w1h_subagents": round(sum(v["tok_w1h"] for k, v in acc.items() if k != "main") / 1e6, 2),
+            # min_user_wait = min_ask + min_typed (rounded apart), kept for older readers.
             "min_wall": round(wall / 60), "min_user_wait": round(ask / 60),
+            "min_ask": round(acc["main"]["user_ask"] / 60), "min_typed": round(acc["main"]["user_typed"] / 60),
+            "questions": acc["main"]["questions"],
+            "session_runs": quality.get("session_runs") or [],
             "min_slowest_worker": round(slowest / 60), "min_synthesis": round(synth / 60),
             "min_rest": round(rest_s / 60),
             "workers": acc["worker"]["agents"],
@@ -539,15 +720,28 @@ def load_rows():
     return rows
 
 
+def row_key(r):
+    """A row is one run: (session, slug). One session can hold several runs.
+    A row written before rows were keyed this way has a slug too; one without
+    any slug keys as (session, None) and is kept as it is."""
+    return r.get("session"), r.get("slug")
+
+
 def save_row(row):
-    """Adds the row, replacing any earlier row of the same session."""
-    rows = [r for r in load_rows() if r.get("session") != row["session"]] + [row]
+    """Adds the row, replacing any earlier row of the same run (session and slug)."""
+    rows = [r for r in load_rows() if row_key(r) != row_key(row)] + [row]
     rows.sort(key=lambda r: r.get("start") or "")
     os.makedirs(store_dir(), exist_ok=True)
     path = os.path.join(store_dir(), "runs.jsonl")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("".join(json.dumps(r) + "\n" for r in rows))
     return path
+
+
+def drop_row(row):
+    rows = [r for r in load_rows() if row_key(r) != row_key(row)]
+    with open(os.path.join(store_dir(), "runs.jsonl"), "w", encoding="utf-8") as fh:
+        fh.write("".join(json.dumps(r) + "\n" for r in rows))
 
 
 def hardware():
@@ -593,7 +787,7 @@ def build_row(session, slug, project, mode):
     import io
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        row = report([session])[0]
+        row = report([session], slug)[0]
     row.update({
         "slug": slug, "project": project, "mode": mode,
         "skill_version": version_for(row["start"]),
@@ -609,10 +803,16 @@ def add_journal(row, session, slug, root, run_copy=False):
     """Builds the run journal (journal.py): keeps its items on the row, writes
     <store>/journals/<session>.md, and with run_copy also <slug>-journal.md
     in the run folder. Returns its headline."""
-    j = journal.build(session, slug, root, store_dir())
+    # A session with several runs: only this run's part of it (see run()).
+    span, keep = RUN_PARTS.get((session, slug)) or (None, None)
+    multi = len(row.get("session_runs") or []) > 1
+    j = journal.build(session, slug, root, store_dir(), span=span if multi else None,
+                      keep=keep if multi else None)
     row["journal"] = {"counts": j["counts"], "items": j["items"][:60], "outcome": j["outcome"]}
     text = journal.markdown(j, row)
-    paths = [os.path.join(store_dir(), "journals", f"{row['session']}.md")]
+    # A session that held several runs gets one journal per run.
+    name = row["session"] if len(row.get("session_runs") or []) < 2 else f"{row['session']}-{slug}"
+    paths = [os.path.join(store_dir(), "journals", f"{name}.md")]
     if run_copy and root:
         paths.append(os.path.join(run_dir.run_dir(root, slug), f"{slug}-journal.md"))
     for path in paths:
@@ -663,22 +863,26 @@ def unit_minutes(row, slug, root):
     return [by_unit[k] for k in sorted(by_unit)] or None
 
 
+def run_file_facts(root, slug):
+    """(mode, system map verdict, skill issues) from the run file, or Nones."""
+    run_file = run_dir.find(root, slug, ".md") if root else None
+    if not run_file:
+        return None, None, []
+    run_text = open(run_file, encoding="utf-8", errors="ignore").read()
+    m = re.search(r"^.*Mode:.*$", run_text, re.M)
+    mode = m.group(0).strip() if m else None
+    m = re.search(r"\bMAP (none|ok|stale)\b", run_text)
+    issues = [s.strip() for s in re.findall(r"^\s*-?\s*SKILL ISSUE: (.+)$", run_text, re.M)]
+    return mode, (m.group(1) if m else None), issues
+
+
 def record(slug, root):
     session = find_session(slug)
     if not session:
         print(f"record: no session log mentions the run file {slug}.md")
         return 1
     runs = run_dir.run_dir(root, slug)
-    run_file = run_dir.find(root, slug, ".md")
-    mode = system_map = None
-    issues = []
-    if run_file:
-        run_text = open(run_file, encoding="utf-8").read()
-        m = re.search(r"^.*Mode:.*$", run_text, re.M)
-        mode = m.group(0).strip() if m else None
-        m = re.search(r"\bMAP (none|ok|stale)\b", run_text)
-        system_map = m.group(1) if m else None
-        issues = [s.strip() for s in re.findall(r"^\s*-?\s*SKILL ISSUE: (.+)$", run_text, re.M)]
+    mode, system_map, issues = run_file_facts(root, slug)
     row, text = build_row(session, slug, os.path.basename(os.path.normpath(root)), mode)
     # Whether the split had a system map (check-map.py's verdict, from the run file).
     row["system_map"] = system_map
@@ -697,7 +901,8 @@ def record(slug, root):
         fh.write(text)
     path = save_row(row)
     # The headline for the orchestrator's final report.
-    print(f"recorded {slug}: ${row['usd']:.1f}, wall {row['min_wall']}m (user wait {row['min_user_wait']}m, "
+    print(f"recorded {slug}: ${row['usd']:.1f}, wall {row['min_wall']}m (user wait {row['min_user_wait']}m: "
+          f"questions {row['min_ask']}m over {row['questions']}, typed {row['min_typed']}m; "
           f"rest {row['min_rest']}m), {row['workers']} workers, reviewed {row['units_reviewed']}, "
           f"first-review high+medium {row['first_review_high_medium']}, fix(merge) {row['fix_merge_commits']}, "
           f"1h-TTL writes {row['mtok_w1h_subagents']} Mtok, turn budget hit: {', '.join(row['turn_budget_hit']) or 'none'}, "
@@ -708,7 +913,9 @@ def record(slug, root):
 
 
 def session_info(path):
-    """(invoked, slug, project, cwd) for one session log."""
+    """(invoked, slugs, project, cwd) for one session log. slugs lists every
+    run the session made (runs_in), in order; for an older log without a run
+    file made in it, the first run file it mentions; or []."""
     invoked, slug, cwd = False, None, None
     with open(path, encoding="utf-8", errors="ignore") as fh:
         for line in fh:
@@ -721,8 +928,28 @@ def session_info(path):
                     pass
             if slug is None and "runs" in line:
                 slug = run_dir.slug_in(line)
+    slugs = [r["slug"] for r in runs_in(load(path))] if invoked else []
     project = os.path.basename(os.path.normpath(cwd)) if cwd else os.path.basename(os.path.dirname(path))
-    return invoked, slug, project, cwd
+    return invoked, slugs or ([slug] if slug else []), project, cwd
+
+
+def is_current(old_rows, mtime, migrate=True):
+    """Whether a session's rows are up to date: one of them was built after
+    the log last grew, and every run it saw in the session has a row. A row
+    from before rows were keyed per run has no session_runs; with migrate
+    (an explicit --collect) its session is recorded again once, splitting any
+    runs it had merged. Without (the sweep after --record, which must stay
+    quick) it counts as current, as before."""
+    seen = {r.get("slug") for r in old_rows}
+    for r in old_rows:
+        if r.get("session_mtime", 0) < mtime - 1:
+            continue
+        if "session_runs" in r:
+            if set(r["session_runs"]) <= seen:
+                return True
+        elif not migrate:
+            return True
+    return False
 
 
 def archive(path, project):
@@ -770,7 +997,9 @@ def collect(quiet=False, refresh=False):
     waits for the next collect. A session that grew after its row was written
     (a resumed run) is recorded again.
     """
-    rows = {r["session"]: r for r in load_rows()}
+    rows = collections.defaultdict(list)
+    for r in load_rows():
+        rows[r.get("session")].append(r)
     prune_events()
     reports = os.path.join(store_dir(), "reports")
     os.makedirs(reports, exist_ok=True)
@@ -781,28 +1010,44 @@ def collect(quiet=False, refresh=False):
         mtime = os.path.getmtime(path)
         if now - mtime < 900:
             continue
-        old = rows.get(session)
-        if old and old.get("session_mtime", 0) >= mtime - 1 and not refresh:
+        olds = rows.get(session) or []
+        if olds and is_current(olds, mtime, migrate=not quiet) and not refresh:
             continue
-        invoked, slug, project, cwd = session_info(path)
+        invoked, slugs, project, cwd = session_info(path)
         if not invoked:
             continue
         archive(path, project)
-        try:
-            row, text = build_row(path, (old or {}).get("slug") or slug or session[:8], project, (old or {}).get("mode"))
-            row["unit_minutes"] = unit_minutes(row, row["slug"], cwd)
-            row["system_map"] = (old or {}).get("system_map")
-            row["skill_issues"] = (old or {}).get("skill_issues") or []
-            if (old or {}).get("version_exact"):
-                row["skill_version"], row["version_exact"] = old["skill_version"], True
-            add_journal(row, path, row["slug"], cwd)
-        except Exception as exc:  # one unreadable log must not stop the rest
-            print(f"collect: skipped {session[:8]}: {exc}")
-            continue
-        with open(os.path.join(reports, f"{session}.txt"), "w", encoding="utf-8") as fh:
-            fh.write(text)
-        save_row(row)
-        added.append(f"{row['start'][:10]} {project} {row['slug']}")
+        if not slugs:
+            # No run file: the session is one run, named as before.
+            slugs = [(olds[0].get("slug") if len(olds) == 1 else None) or session[:8]]
+        for slug in slugs:
+            old = next((r for r in olds if r.get("slug") == slug), None)
+            if old is None and len(slugs) == 1 and len(olds) == 1:
+                old = olds[0]  # the session's one earlier row, whatever it was named
+            try:
+                mode, system_map, issues = run_file_facts(cwd, slug)
+                row, text = build_row(path, slug, project, (old or {}).get("mode") or mode)
+                row["unit_minutes"] = unit_minutes(row, slug, cwd)
+                row["system_map"] = (old or {}).get("system_map") or system_map
+                row["skill_issues"] = (old or {}).get("skill_issues") or issues
+                if (old or {}).get("version_exact"):
+                    row["skill_version"], row["version_exact"] = old["skill_version"], True
+                add_journal(row, path, slug, cwd)
+            except Exception as exc:  # one unreadable log must not stop the rest
+                print(f"collect: skipped {session[:8]} {slug}: {exc}")
+                continue
+            name = session if len(slugs) < 2 else f"{session}-{slug}"
+            with open(os.path.join(reports, f"{name}.txt"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+            if old is not None and row_key(old) != row_key(row):
+                drop_row(old)
+            save_row(row)
+            added.append(f"{row['start'][:10]} {project} {row['slug']}")
+        # A row named after the session (no run file found back then) is
+        # replaced by the runs found now.
+        for r in olds:
+            if r.get("slug") == session[:8] and session[:8] not in slugs:
+                drop_row(r)
     if not quiet or added:
         print(f"collect: {len(added)} session(s) recorded" + "".join(f"\n  {a}" for a in added))
     return 0

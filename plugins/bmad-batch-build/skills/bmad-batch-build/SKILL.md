@@ -83,6 +83,11 @@ can go. Keep its lines:
 - `PR az`, `PR gh` or `PR none (...)`: pass it to synthesis as `<pr>`.
 - `AGENTS note: ...`: a project copy of an agent differs from the shipped one
   and was kept; pass that line on to the user.
+- `FORK on (...)`: Claude Code's fork mode starts every subagent in the
+  background. The run still works (workers and synthesis wait on `bg.sh`
+  instead of ending their turn), but put the line's fix in the approval
+  message as one line. Never suggest `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
+  instead: it also stops the background Bash calls `bg.sh` runs on.
 - A line with `BLOCKED` (and `SETUP blocked`): stop and show the user those
   lines; each says what to install. Nothing else stops a run.
 
@@ -176,6 +181,16 @@ carries the details becomes one unreadable paragraph:
   `(Recommended)`.
 - **Use `preview`** when the user needs to see something to choose: the unit
   list on an approve option, the failing check on a retry option.
+- **A question that closes on timeout takes the Recommended option.** When
+  `AskUserQuestion` returns without an answer (it timed out or closed
+  unanswered), go on with the option marked `(Recommended)`, write
+  `TIMEOUT: <header>: took <option>` into the run file, and say so in the
+  final report. Where no option is marked, a timeout takes the one that
+  changes least: **Leave it out** for a failed unit, **Stop** for a blocker
+  in a lane or dependency chain and for a stuck synthesis. Only the split
+  approval waits for a real answer, since approving starts the spending and
+  the tickets: on a timeout there, ask it again once, then stop and record
+  the run.
 
 ## 1. Read the input
 
@@ -474,8 +489,17 @@ adjust and cancel. Building directly means:
 Approving it still approves the new tickets.
 
 Otherwise ask with `AskUserQuestion` whether to approve, adjust or cancel. Iterate until
-the user approves. After approval, run to the end without asking, except for
-the two stop cases in sections 6 and 7.
+the user approves. In the same call, ask the **gate policy** once (skip it
+for a single unit, or when every unit is in one lane): `If a unit nothing
+depends on fails its gate, what then?`, with **Re-dispatch once, then leave
+it out (Recommended)**, "A fresh worker builds it once more; if that fails
+too, its task stays open and out of the PR", **Merge unverified**, "Keep its
+code when it failed only on review traces, the reproduction or the app check;
+the PR marks it", and **Ask me**, "Stop and ask about each failed unit".
+Write the answer into the run file as `Gate policy: <option>`. After
+approval, run to the end without asking, except for a failed unit that
+later units build on (section 6), a failed unit under **Ask me**, and a
+stuck synthesis (section 7).
 
 ### Asking for approval
 
@@ -506,6 +530,10 @@ Q1  [Split]      Approve the split: 2 units in one lane, about 230 min?
 Q2  [Migration]  The LiveCounts migration is not merged yet. Edit it or add a new one?
     Edit in place (Recommended) | Add a new migration
 ```
+
+(Both units are in one lane, so the call has no gate-policy question. A run
+with independent units adds it as one more question:
+`Q3  [Gate]  If a unit nothing depends on fails its gate, what then?`.)
 
 ## 4. Launch
 
@@ -624,17 +652,24 @@ reply without its `SPEC:`/`STATUS:` lines means the worker ran out. Gate the
 unit anyway, because its branch may hold usable commits, and record "turn
 budget" as the reason. Section 6 then decides what happens next.
 
-**Early hand-backs.** Claude Code can return an `Agent` call as "Async agent
-launched" even in the foreground, and can hand a worker or synthesis back
-before it has finished: its reply says `blocked` or `in progress` because a
-coder or reviewer it launched is still running, or a synthesis reply has no
-`RESULT:` line. That is not a failed unit (sonar-zero-5: 14 resumes, two
-synthesis replies without `RESULT:`). Don't gate it and don't ask the user:
-wait for the notifications of the agents it says are still running (they
-arrive as their own task notifications or hand-back messages), then continue it
-with `SendMessage`, giving it their reports word for word and what it still has
-to do, and wait again. Gate only a reply that says `done` or `ready`, or one
-that names a real blocking condition. Note each resume in the run file.
+**Background agents and early hand-backs.** With fork mode on (setup's
+`FORK on`), Claude Code starts every subagent in the background, so your
+`Agent` calls answer "Async agent launched" and each worker's and synthesis's
+reply arrives as its own task notification. For you that is fine: end your
+turn and wait for those notifications; never poll for them. For a worker or
+synthesis it is not, because a subagent that ends its turn is handed back.
+So they never end their turn while an agent they launched still runs: they
+wait on a `bg.sh expect`/`done`/`wait` file instead (`references/worker.md`
+step 2, and the synthesis agent file). A hand-back should now be rare.
+When one still comes (a reply that says `blocked` or `in progress` because a
+coder or reviewer it launched is still running, or a synthesis reply without
+a `RESULT:` line), it is not a failed unit. Don't gate it and don't ask the
+user: wait for the notifications of the agents it says are still running,
+then continue it with `SendMessage`, giving it their reports word for word
+and what it still has to do, and wait again. Gate only a reply that says
+`done` or `ready`, or one that names a real blocking condition. Note each
+resume in the run file as `RESUME: <unit or synthesis>: <why>`; the journal
+counts them.
 
 ## 6. Gate
 
@@ -643,17 +678,28 @@ Apply the gate in `references/worker.md` to every unit, in one Bash call with
 
 - **Every unit is ready:** continue (the next unit in a lane wave, or the
   wave's synthesis or the next wave).
-- **Some units are not ready:** show in your message which ones and why, with
-  the spec paths. Then ask one question per unit, up to four (beyond that,
-  one question for the rest), for example `Unit 3 (metrics handler) isn't
-  ready. What now?`, with **Leave it out**, "Continue; its task stays open and
-  out of the PR", **Re-dispatch**, "A fresh worker builds it again", and
-  **Stop**, "End the run here; the branches stay as they are". When a unit failed only
-  on workflow traces (no baseline, no intent contract, no review pass), its
-  code exists but is unreviewed; also offer **Merge unreviewed**, "Keep its
-  code; the PR marks it unreviewed". When it failed only on the reproduction
-  or the app check, offer **Merge unverified**, "Keep its code; the PR marks
-  it unverified", the same way.
+- **Some units nothing depends on are not ready:** follow the run file's
+  `Gate policy:` line without asking. Write each unit, its reasons and its
+  spec path into the run file, and what the policy did with it.
+  - **Re-dispatch once, then leave it out** (also the policy when the run
+    file has none): re-dispatch the unit once, as below, with the gate's
+    reasons added to its intent. If the second worker's unit is not ready
+    either, leave it out: its task stays open and out of the PR.
+  - **Merge unverified**: when the unit failed only on workflow traces (no
+    baseline, no intent contract, no review pass), keep its code and mark it
+    unreviewed; when it failed only on the reproduction or the app check,
+    keep it and mark it unverified. Otherwise (no commits, a dirty tree, the
+    wrong branch, a blocked reply) treat it as the first policy.
+  - **Ask me**: show in your message which units failed and why, with the
+    spec paths. Then ask one question per unit, up to four (beyond that, one
+    question for the rest), for example `Unit 3 (metrics handler) isn't
+    ready. What now?`, with **Leave it out**, "Continue; its task stays open
+    and out of the PR", **Re-dispatch**, "A fresh worker builds it again", and
+    **Stop**, "End the run here; the branches stay as they are", plus **Merge
+    unreviewed** or **Merge unverified** when only the traces, or only the
+    reproduction or app check, failed.
+  The final report lists every unit the policy re-dispatched, left out or
+  merged unreviewed or unverified.
   To re-dispatch, clear the unit first, because `prepare-worktree.sh` refuses an
   existing path and branch:
   `bash "<skill>/scripts/remove-worktree.sh" "<root>" "<name>" "<branch>"`, then
@@ -661,7 +707,8 @@ Apply the gate in `references/worker.md` to every unit, in one Bash call with
   branch). Then send a fresh worker with the same, or a corrected, intent.
 - **A lane unit is not ready:** the lane stops there, because later units
   build on it. A unit that later waves depend on stops the run the same way.
-  Ask `Unit <n> (<short title>) isn't ready and later units build on it. What
+  These are the only gate failures you always ask about, whatever the gate
+  policy. Ask `Unit <n> (<short title>) isn't ready and later units build on it. What
   now?`, with:
   - **Keep, unreviewed**: "Continue with the next unit; the PR marks this one
     unreviewed".
@@ -795,13 +842,12 @@ python "<skill>/scripts/ci-status.py" deploy <pr id> --root "<iwt>" --wait 240 [
 - `CI approval`: name the pipeline that waits for approval; approving it is
   the user's.
 - `CI green`: report it.
-- `CI red`: show the failing pipeline, the stage and the error lines from its
-  `LOG` file. Ask `Deploy <pipeline> failed. Fix it?`, with **Fix it
-  (Recommended)**, "A fresh agent fixes the cause on a new branch and opens a
-  follow-up PR", and **Leave it**, "Nothing changes; the failure stays for
-  you".
+- `CI red`: report it without a question: the failing pipeline, the stage
+  and the error lines from its `LOG` file, then this line: `Reply **fix the
+  deploy** and a fresh agent fixes the cause on a new branch and opens a
+  follow-up PR; otherwise nothing changes.`
 
-To fix it: prepare a worktree from the latest base,
+When the user replies that they want it fixed: prepare a worktree from the latest base,
 `git -C "<root>" fetch origin <base> --quiet` then
 `bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<slug>-deploy-fix" "<run branch>-deploy-fix" --base origin/<base>`
 (one Bash call, 10-minute timeout), and launch a fresh synthesis agent

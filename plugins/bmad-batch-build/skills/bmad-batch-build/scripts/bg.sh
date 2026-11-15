@@ -3,6 +3,15 @@
 #
 # usage: bg.sh run  <worktree> <name> <command string>
 #        bg.sh wait <worktree> <name> [<seconds>]
+#        bg.sh expect <worktree> <name>
+#        bg.sh done <worktree> <name> [<rc>]
+#
+# `expect` and `done` let an agent wait for a subagent it launched the same
+# way: run `expect` before the Agent call, end the subagent's prompt with a
+# last step `done` (which writes <name>.rc, 0 unless <rc> is given), and if
+# Claude Code starts the subagent in the background ("Async agent launched"),
+# block on `wait` instead of ending the turn. For a subagent, ending its turn
+# hands it back to whoever launched it (sonar-zero-5: 14 resumes).
 #
 # `run` is meant for a Bash call with run_in_background: true. It runs the
 # command and writes <name>.log and then <name>.rc into the worktree's private
@@ -24,7 +33,7 @@
 # is why the Haiku coder, not the Opus worker, waits for the install.
 set -uo pipefail
 
-mode=${1:?usage: bg.sh run|wait <worktree> <name> ...} wt=${2:?worktree} name=${3:?name}
+mode=${1:?usage: bg.sh run|wait|expect|done <worktree> <name> ...} wt=${2:?worktree} name=${3:?name}
 gd=$(git -C "$wt" rev-parse --absolute-git-dir) || exit 3
 dir="$gd/bmad"
 mkdir -p "$dir"
@@ -45,6 +54,22 @@ case $mode in
     rm -f "$dir/$name.pid"
     echo "$name: $([ "$code" -eq 0 ] && echo ok || echo "failed (rc $code)"); log $log"
     exit "$code"
+    ;;
+  expect)
+    # Something (a subagent) will write <name>.rc; the pid file tells `wait`
+    # it has started, so it never answers "not started".
+    rm -f "$rc"
+    echo agent > "$dir/$name.pid"
+    echo "$name: expected"
+    exit 0
+    ;;
+  done)
+    code=${4:-0}
+    case $code in ''|*[!0-9]*) code=1 ;; esac
+    echo "$code" > "$rc"
+    rm -f "$dir/$name.pid"
+    echo "$name: done (rc $code)"
+    exit 0
     ;;
   wait)
     max_wait=100
@@ -71,7 +96,7 @@ case $mode in
       exit 0
     fi
     echo "$name: failed (rc $code); log $log"
-    tail -n 40 "$log"
+    [ -f "$log" ] && tail -n 40 "$log"
     exit 1
     ;;
   *)

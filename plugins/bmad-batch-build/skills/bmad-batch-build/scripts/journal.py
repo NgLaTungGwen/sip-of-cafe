@@ -185,16 +185,26 @@ def main_span(lines):
     return lines[start:end]
 
 
-def build(session, slug=None, root=None, store=None):
-    """Returns the journal as a dict: items, counts, timeline, outcome."""
+def build(session, slug=None, root=None, store=None, span=None, keep=None):
+    """Returns the journal as a dict: items, counts, timeline, outcome.
+
+    span (start, end line of the main log) and keep (the subagent logs that
+    are the run's) narrow it to one run of a session that held several
+    (cost-report.py's split_session)."""
     base = session[:-6]
     store = store or os.environ.get("BMAD_RUNS_DIR") or os.path.expanduser("~/.claude/bmad-batch-runs")
-    main = main_span(load(session))
+    main = load(session)[span[0]:span[1]] if span else main_span(load(session))
     logs = [("orchestrator", main, {}, None)]
     cutoff = next((x["timestamp"] for x in reversed(main) if x.get("timestamp")), None)
+    keep = {os.path.normcase(os.path.abspath(f)) for f in keep} if keep is not None else None
     for f in sorted(glob.glob(os.path.join(base, "subagents", "*.jsonl"))):
         mp = f[:-6] + ".meta.json"
         meta = json.load(open(mp, encoding="utf-8")) if os.path.exists(mp) else {}
+        if keep is not None:
+            if os.path.normcase(os.path.abspath(f)) not in keep:
+                continue
+            logs.append((None, load(f), meta, f))
+            continue
         lines = load(f)
         first = next((x["timestamp"] for x in lines if x.get("timestamp")), None)
         # Agents started after the run ended belong to later work in the

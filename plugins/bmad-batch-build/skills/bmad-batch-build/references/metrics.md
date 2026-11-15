@@ -12,8 +12,11 @@ and change with it. A field change that would break a reader raises `SCHEMA`.
 - **Every machine:** `metrics.py import <bundle>...` merges bundles, plus this
   machine's own runs, into `~/.claude/bmad-batch-runs/metrics/runs.jsonl` and
   `events.jsonl`, one JSON object per line. Run it again to refresh this
-  machine's rows. Rows are unique per `(installation_id, session)` for runs
-  and `(installation_id, end, tool, sec)` for events.
+  machine's rows. Rows are unique per `(installation_id, session, slug)` for
+  runs (one session can hold several runs, each its own row) and
+  `(installation_id, end, tool, sec)` for events. A bundle replaces every row
+  of the sessions it carries, so an older row that merged a session's runs
+  into one goes; a row without a slug is kept as it is.
 
 ## Refresh before reading
 
@@ -39,14 +42,17 @@ at least that often.
 | `session` | Claude Code session id of the run |
 | `start` | Start of the run, ISO 8601 UTC |
 | `project` | Project name on the maintainer's own rows; `p-<hash>` from other machines |
-| `slug` | Run name; on the maintainer's own rows only |
+| `slug` | Run name on the maintainer's own rows; `r-<hash>` from other machines. Part of the key |
 | `skill_version`, `version_exact` | Version that ran; `version_exact` false means guessed from dates (`before-X` = older than X) |
 | `mode` | `lane`, `parallel`, `waves`, or null for runs before modes were recorded |
 | `usd`, `usd_by_role` | Cost in USD, total and per role (`main`, `worker`, `haiku`, `implementer`, `reviewer`, `synthesis`, `explore`, `other`); `implementer` is a worker's general-purpose coder, counted under `reviewer` before 0.12.13 |
 | `usd_idle_max` | Upper bound on the cost of cache re-writes after the cache expired in an idle gap, summed over all agents |
 | `mtok_in`, `ktok_out`, `mtok_w1h_subagents` | Input Mtok, output ktok, subagent 1-hour cache writes in Mtok |
-| `min_wall` | Wall time of the run, minutes |
-| `min_user_wait` | Minutes spent waiting for the user (approvals) |
+| `min_wall` | Wall time of the run, minutes: from its own start (its skill invocation, or its run file's creation) to its own last synthesis result |
+| `min_user_wait` | Minutes spent waiting for the user: `min_ask` + `min_typed` (each rounded on its own) |
+| `min_ask` | Minutes waiting on `AskUserQuestion` answers and on permission prompts the user answered in the main session |
+| `min_typed` | Minutes before the user's other typed messages (an approval asked in plain text, a nudge) |
+| `questions` | Questions asked with `AskUserQuestion` (each question of a call counts) |
 | `min_slowest_worker`, `min_synthesis`, `min_rest` | Slowest worker, synthesis, and everything else, minutes |
 | `workers` | Workers dispatched |
 | `units` | One `{size, min}` per unit: S/M/L/XL and its worker minutes |
