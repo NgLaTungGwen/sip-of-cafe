@@ -120,6 +120,27 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.17.0:** an Intake stage before planning (PRs #15–#17).
+  - Every run starts by writing `<runs>/<slug>-intake.md` (`intake.py`): the
+    prompt word for word, the goal, non-goals, testable ACs, pinned shared
+    interfaces, the units with size, risk and ACs, the coupling, the mode and
+    holdout scenarios. It is written before any worktree exists.
+  - A readiness check stops a vague prompt and lists what is missing. All open
+    questions are asked in one round, each with a recommended default that is
+    applied if the question times out. Then comes one approval, covering the
+    intake, the plan and the gate policy. After that the intake is frozen:
+    later changes are added only under "Changes after approval".
+  - Workers build from `intake.py unit`. They never change a pinned interface
+    (`STATUS: blocked-interface`). An approved exception goes into
+    `interface-changes.md`, which every worker reads before each verify, and the
+    gate rejects an unrecorded change.
+  - Review layers follow the unit's risk, and the intent auditor checks against
+    the unit's ACs, the goal and the non-goals. Every triage row carries its
+    review layer's tag.
+  - Synthesis runs the holdout scenarios as tests that stay out of the PR,
+    flags edited or deleted assertions (`assert-guard.py`), and records escapes.
+  - Metrics: `intake_min`, questions and wait split at the approval, the intent
+    auditor's reject rate, scenario pass rate, assertion edits and escapes.
 - **0.16.0:** fixes from an eval of 64 runs (PRs #8–#12).
   - Each unit runs only the tests its change affects (`affected-tests.sh`), and the
     full suite runs once, in synthesis. Changes to contracts, migrations, config or
