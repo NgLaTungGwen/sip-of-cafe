@@ -2,7 +2,7 @@
 # Run one heavy command (install, build, full test suite, typecheck) under a
 # machine-wide admission check shared by every session and every run.
 #
-# usage: heavy.sh [--weight N] [--mem MB] <command string>
+# usage: heavy.sh [--priority] [--weight N] [--mem MB] <command string>
 #        (separate words, as in heavy.sh npm ci --no-audit, are joined into one)
 #        heavy.sh --status           what runs, what waits, free RAM and pressure
 #        heavy.sh --count            how many commands run now
@@ -14,8 +14,10 @@
 #   - the running weight plus its own stays within BMAD_HEAVY_SLOTS (default:
 #     the CPU count). A test suite weighs as many slots as the Vitest workers
 #     it gets, other commands 1, unless --weight says;
-#   - free RAM, minus what commands started in the last 90 s will still take,
-#     covers its memory estimate plus a BMAD_HEAVY_FLOOR_MB reserve (default
+#   - free RAM, minus what commands started in the last 90 s will still take
+#     (their estimate shrinking over those 90 s, less what free RAM already
+#     fell since they started), covers its memory estimate plus a
+#     BMAD_HEAVY_FLOOR_MB reserve (default
 #     2048). The estimate is --mem, else what the same kind of command peaked
 #     at in earlier runs (when the machine can measure it), else a default per
 #     kind (typecheck and lint 1000, install 1500, test 2500, e2e 3500);
@@ -34,8 +36,9 @@
 # 1 with it: Vitest 2 defaults the minimum to CPUs - 1 and refuses to start
 # when that is above the maximum.
 #
-# The command runs in its own session. When heavy.sh is killed, or dies
-# without cleaning up, the next heavy.sh call ends that session, so no
+# The command runs in its own session (on Git Bash, which has no setsid: its
+# Windows process tree, ended with taskkill //T). When heavy.sh is killed, or
+# dies without cleaning up, the next heavy.sh call ends that session, so no
 # orphaned build keeps eating RAM unseen. Where systemd-run --user works, it
 # also runs in a scope with a generous memory cap (the larger of 4x its
 # estimate and 8 GB, at most 90% of RAM; BMAD_HEAVY_CGROUP=0 turns it off), so
@@ -47,10 +50,16 @@
 # "<kind> <MB> <glob>", for example "e2e 4000 *playwright*"; the first glob
 # that matches the command wins over the built-in kinds.
 #
-# Waiting commands start in arrival order. State lives in BMAD_HEAVY_DIR
-# (default ~/.cache/bmad-heavy): a wait.* ticket per waiting command, a run.*
+# Waiting commands start in arrival order, --priority ones (synthesis verify,
+# merge installs) before the rest. A later command starts first only by
+# backfill: when every command ahead of it waits only for RAM and it fits now,
+# until the first of them has waited BMAD_HEAVY_AGING seconds (default half
+# of BMAD_HEAVY_MAX_WAIT), and never past a --priority one. State lives in
+# BMAD_HEAVY_DIR (default ~/.cache/bmad-heavy): a wait.* ticket and a need.*
+# file per waiting command, which touches its ticket on every poll, a run.*
 # entry per running one, pg.* and peak.* beside them, peaks.<kind> with the
-# last ten peaks. Entries of dead processes, or older than 4 h, are dropped.
+# last ten peaks. Entries of dead processes, or older than 4 h, are dropped,
+# and so are tickets untouched for 2 minutes.
 set -uo pipefail
 
 dir="${BMAD_HEAVY_DIR:-$HOME/.cache/bmad-heavy}"
@@ -63,13 +72,16 @@ psi_mem="${BMAD_HEAVY_PSI_MEM:-20}"
 psi_cpu="${BMAD_HEAVY_PSI_CPU:-90}"
 swap_max="${BMAD_HEAVY_SWAP_PCT:-60}"
 limit="${BMAD_HEAVY_TIMEOUT:-2700}"
+aging="${BMAD_HEAVY_AGING:-$((max_wait / 2))}"
 mkdir -p "$dir"
 entry="$dir/run.$$"
 ticket="" wt_lock="" bg="" pmsg=""
 
-# Memory the machine can still give, in MB.
+# Memory the machine can still give, in MB. BMAD_HEAVY_FREE_MB fixes it (tests).
 free_mb() {
-  if [ -r /proc/meminfo ]; then
+  if [ -n "${BMAD_HEAVY_FREE_MB:-}" ]; then
+    echo "$BMAD_HEAVY_FREE_MB"
+  elif [ -r /proc/meminfo ]; then
     # Cygwin/MSYS report available physical memory as MemFree.
     awk '/^MemAvailable:/ {a=$2} /^MemFree:/ {f=$2} END {print int((a ? a : f) / 1024)}' /proc/meminfo
   elif command -v vm_stat >/dev/null 2>&1; then
@@ -125,8 +137,39 @@ unlock() {
   if [ "$have_flock" = 1 ]; then flock -u 9; else rmdir "$dir/.lock" 2>/dev/null; fi
 }
 
-# End a command's whole session: the build and everything it started.
+# A pid and all its descendants, by the ppid in /proc (Git Bash). Windows'
+# own parent links break there: a forked bash that execs a program exits, so
+# taskkill //T from the top reaches nothing below it.
+proc_tree() {
+  local all="" p pp kids=" $1 " grew=1
+  for p in /proc/[0-9]*; do
+    read -r pp < "$p/ppid" 2>/dev/null && all+="${p#/proc/} $pp"$'\n'
+  done
+  while [ "$grew" = 1 ]; do
+    grew=0
+    while read -r p pp; do
+      [ -n "$p" ] || continue
+      if [[ $kids == *" $pp "* && $kids != *" $p "* ]]; then kids+="$p "; grew=1; fi
+    done <<< "$all"
+  done
+  echo $kids
+}
+
+# End a command's whole session: the build and everything it started. On Git
+# Bash (no setsid) the pg file holds win:<pid> instead: every process below
+# that pid is ended, each with taskkill //T for the native (node, npm)
+# processes under it, whose Windows parent links do hold.
 kill_session() {
+  local p wp
+  local -a args=()
+  case $1 in
+    win:*)
+      for p in $(proc_tree "${1#win:}"); do
+        read -r wp < "/proc/$p/winpid" 2>/dev/null && args+=(//PID "$wp")
+      done
+      [ "${#args[@]}" -gt 0 ] && taskkill //T //F "${args[@]}" >/dev/null 2>&1
+      return 0 ;;
+  esac
   command -v pkill >/dev/null 2>&1 || return 0
   pkill -TERM -s "$1" 2>/dev/null
   ( sleep 20; pkill -KILL -s "$1" 2>/dev/null ) >/dev/null 2>&1 &
@@ -139,30 +182,102 @@ reap() {
 }
 
 # Prints "<running weight> <MB still to be claimed by recent starts> <running>".
+# Free memory already counts what a running command took, so only what a
+# command started in the last 90 s may still take is reserved: its estimate,
+# shrinking to nothing over those 90 s, and less what free memory already
+# fell since it started (the free MB it saw then, the 6th field). Reserving
+# the whole estimate on top of the memory it already held counted it twice,
+# down to readings like "-323 MB free". $1 is the free MB now.
 survey() {
-  local now used=0 recent=0 n=0 f pid w m start kind
+  local now used=0 recent=0 n=0 f pid w m start kind f0 age left fell
   now=$(date +%s)
   for f in "$dir"/run.*; do
     [ -e "$f" ] || continue
-    read -r pid w m start kind < "$f" || { rm -f "$f"; continue; }
+    read -r pid w m start kind f0 < "$f" || { rm -f "$f"; continue; }
     if ! kill -0 "$pid" 2>/dev/null || [ $((now - start)) -gt 14400 ]; then
       reap "$pid"; rm -f "$f"; continue
     fi
     used=$((used + w)); n=$((n + 1))
-    [ $((now - start)) -lt 90 ] && recent=$((recent + m))
+    age=$((now - start))
+    if [ "$age" -lt 90 ]; then
+      [ "$age" -lt 0 ] && age=0
+      left=$((m * (90 - age) / 90))
+      if [[ ${f0:-} =~ ^[0-9]+$ ]] && [ -n "${1:-}" ]; then
+        fell=$((f0 - $1)); [ "$fell" -lt 0 ] && fell=0
+        [ $((m - fell)) -lt "$left" ] && left=$((m - fell))
+      fi
+      [ "$left" -gt 0 ] && recent=$((recent + left))
+    fi
   done
   echo "$used $recent $n"
 }
 
-# Prints how many live tickets are older than this one, dropping dead ones.
+# A waiting ticket is wait.<arrival ns>.<pid>, or wait.0.<arrival ns>.<pid> for
+# --priority, holding only the pid (what older heavy.sh copies read). Its need
+# ("<weight> <mem> <priority>") sits beside it in need.<pid>. Prints
+# "<priority 0|1> <arrival ns>" for a ticket name.
+ticket_key() {
+  local b=${1##*/wait.}
+  case $b in
+    0.*) b=${b#0.}; echo "0 ${b%.*}" ;;
+    *) echo "1 ${b%.*}" ;;
+  esac
+}
+
+# A waiting heavy.sh touches its ticket on every poll. One untouched for 2
+# minutes, or whose pid is gone, belongs to a process that died: on Git Bash a
+# dead head ticket that still answered kill -0 once held 28 commands behind
+# "running weight 0". A ticket without a need file comes from an older copy
+# that never touches it, so it gets until that copy gives up (twice max_wait).
+stale() {
+  local f=$1 pid=${1##*.}
+  kill -0 "$(cat "$f" 2>/dev/null)" 2>/dev/null || return 0
+  if [ -e "$dir/need.$pid" ]; then
+    [ -n "$(find "$f" -maxdepth 0 -mmin +2 2>/dev/null)" ]
+  else
+    [ -n "$(find "$f" -maxdepth 0 -mmin +$((max_wait * 2 / 60 + 5)) 2>/dev/null)" ]
+  fi
+}
+
+# Prints "<live tickets ahead of this one> <1 if this one may start before
+# them>", dropping dead ones. Priority tickets go first, then arrival order.
+# $1 running weight, $2 free MB after reservations.
+#
+# Backfill: a command may start before the tickets ahead of it when every one
+# of them is waiting only for RAM (its weight fits, its memory does not) and
+# this one fits now, as a scheduler backfills a small job into a gap a big
+# one can't use yet. Never past a --priority ticket, a ticket of an older copy
+# (no need file), or once the first ticket has waited BMAD_HEAVY_AGING seconds
+# (default half of max_wait), so a big command still gets its turn.
 ahead() {
-  local f n=0
+  local f n=0 may=1 me k p a pid w m pr now oldest=""
+  me=$(ticket_key "$ticket")
+  now=$(date +%s)
   for f in "$dir"/wait.*; do
     [ -e "$f" ] || continue
-    [ "$f" = "$ticket" ] && break
-    if kill -0 "$(cat "$f" 2>/dev/null)" 2>/dev/null; then n=$((n + 1)); else rm -f "$f"; fi
+    [ "$f" = "$ticket" ] && continue
+    pid=${f##*.}
+    if stale "$f"; then rm -f "$f" "$dir/need.$pid"; continue; fi
+    k=$(ticket_key "$f")
+    p=${k%% *} a=${k#* }
+    # Ahead of me: lower priority number, or the same and an earlier arrival.
+    if [ "$p" -lt "${me%% *}" ] || { [ "$p" = "${me%% *}" ] && [[ $a < ${me#* } ]]; }; then
+      n=$((n + 1))
+      [ "$p" = 0 ] && may=0
+      if read -r w m pr < "$dir/need.$pid" 2>/dev/null && [ -n "$m" ]; then
+        { [ $(($1 + w)) -le "$slots" ] && [ $(($2 - m)) -lt "$floor" ]; } || may=0
+      else
+        may=0
+      fi
+      [ -z "$oldest" ] || [[ $a < $oldest ]] && oldest=$a
+    fi
   done
-  echo "$n"
+  if [ "$may" = 1 ]; then
+    # The arrival's first 10 digits are its epoch seconds.
+    if ! [[ ${oldest:0:10} =~ ^[0-9]{10}$ ]] || [ $((now - 10#${oldest:0:10})) -ge "$aging" ]; then may=0; fi
+  fi
+  [ "$n" -eq 0 ] && may=0
+  echo "$n $may"
 }
 
 status() {
@@ -177,7 +292,7 @@ status() {
   echo "heavy.sh: running weight $used of $slots slots ($n running, $waiting waiting)"
   for f in "$dir"/run.*; do
     [ -e "$f" ] || continue
-    read -r pid w m start kind < "$f" || continue
+    read -r pid w m start kind _ < "$f" || continue
     echo "  pid $pid  ${kind:-?}  weight $w  reserves $m MB  running $((now - start))s"
   done
   echo "free RAM $(free_mb) MB (floor $floor), swap $(swap_pct)% used, stalls: memory $(psi memory)%, cpu $(psi cpu)%"
@@ -192,7 +307,7 @@ status() {
 # first, before it queues for the machine, and waits for the run ahead of it.
 is_test() {
   case $1 in
-    *vitest*|*"bun test"*|*"npm test"*|*"npm run test"*|*"npm t "*|*jest*|*pytest*|*--coverage*|*"go test"*|*"cargo test"*) return 0 ;;
+    *vitest*|*"bun test"*|*"bun run test"*|*"npm test"*|*"npm run test"*|*"npm t "*|*jest*|*pytest*|*--coverage*|*"go test"*|*"cargo test"*) return 0 ;;
   esac
   return 1
 }
@@ -227,7 +342,7 @@ learned() {
 }
 
 cleanup() {
-  rm -f "$entry" "${ticket:-}" "$dir/pg.$$" "$dir/peak.$$"
+  rm -f "$entry" "${ticket:-}" "$dir/need.$$" "$dir/pg.$$" "$dir/peak.$$" "$dir/to.$$"
   [ -n "$wt_lock" ] && rm -rf "$wt_lock"
 }
 trap cleanup EXIT
@@ -247,15 +362,16 @@ case ${1:-} in
   --explain) explain=1; shift ;;
 esac
 
-weight="" mem=""
+weight="" mem="" priority=0
 while [ $# -gt 1 ]; do
   case $1 in
     --weight) weight=$2; shift 2 ;;
     --mem) mem=$2; shift 2 ;;
+    --priority) priority=1; shift ;;
     *) break ;;
   esac
 done
-: "${1:?usage: heavy.sh [--weight N] [--mem MB] <command string>}"
+: "${1:?usage: heavy.sh [--priority] [--weight N] [--mem MB] <command string>}"
 # One string runs as given (pipes, && and globs inside it keep working). Separate
 # words are quoted and joined: taking only the first one ran a bare `npm` for
 # `heavy.sh npm ci --no-audit --no-fund` (batch-parallelism, 2026-11-02).
@@ -288,7 +404,8 @@ fi
 [ "$weight" -gt "$slots" ] && weight=$slots
 [ "$weight" -lt 1 ] && weight=1
 if [ "$explain" = 1 ]; then
-  echo "kind=$kind weight=$weight mem=$mem"
+  if [ "$priority" = 1 ]; then echo "kind=$kind weight=$weight mem=$mem priority=1"
+  else echo "kind=$kind weight=$weight mem=$mem"; fi
   exit 0
 fi
 
@@ -324,15 +441,17 @@ if [ "$kind" = test ] || is_test "$cmd"; then
   fi
 fi
 
-# First come, first served: every command takes a ticket named by its arrival
-# time, and only the oldest live ticket may start. A later, smaller command
-# never overtakes an earlier one, even when it would fit.
-ticket="$dir/wait.$(date +%s%N).$$"
+# First come, first served, --priority first: every command takes a ticket
+# named by its arrival time, and the oldest live ticket starts first. A later,
+# smaller command overtakes only by backfill (ahead()): when everything ahead
+# of it waits only for RAM it cannot get yet, and not for long.
+if [ "$priority" = 1 ]; then ticket="$dir/wait.0.$(date +%s%N).$$"; else ticket="$dir/wait.$(date +%s%N).$$"; fi
+echo "$weight $mem $priority" > "$dir/need.$$"
 echo "$$" > "$ticket"
 
 start() {
-  echo "$$ $weight $mem $(date +%s) $kind" > "$entry"
-  rm -f "$ticket"
+  echo "$$ $weight $mem $(date +%s) $kind $(free_mb)" > "$entry"
+  rm -f "$ticket" "$dir/need.$$"
 }
 
 # Ten to fourteen seconds without flock, so dozens of waiters don't fight over
@@ -342,18 +461,25 @@ poll="${BMAD_HEAVY_POLL:-$([ "$have_flock" = 1 ] && echo 5 || echo 10)}"
 
 waited=0 used=0 avail=$(free_mb) queue=0 t_queue=$SECONDS t_said=$((SECONDS - 60)) why=""
 while :; do
+  # The heartbeat: a ticket nobody touches is a dead waiter's (stale()). One
+  # that a waiter thought dead and removed is put back, keeping its place.
+  [ -e "$ticket" ] || echo "$$" > "$ticket"
+  [ -e "$dir/need.$$" ] || echo "$weight $mem $priority" > "$dir/need.$$"
+  touch "$ticket"
   if lock; then
-    queue=$(ahead)
-    read -r used recent _ < <(survey)
-    avail=$(( $(free_mb) - recent ))
+    fm=$(free_mb)
+    read -r used recent _ < <(survey "$fm")
+    avail=$((fm - recent)); [ "$avail" -lt 0 ] && avail=0
+    read -r queue backfill < <(ahead "$used" "$avail")
     why=""
-    if [ "$queue" -gt 0 ]; then why="${queue} ahead in the queue"
-    elif [ "$used" -eq 0 ]; then why=""
+    if [ "$queue" -gt 0 ] && [ "$backfill" != 1 ]; then why="${queue} ahead in the queue"
+    elif [ "$used" -eq 0 ] && [ "$queue" -eq 0 ]; then why=""
     elif [ $((used + weight)) -gt "$slots" ]; then why="running weight $used of $slots"
     elif [ $((avail - mem)) -lt "$floor" ]; then why="${avail} MB free, needs $((mem + floor))"
     elif pressure; then why="$pmsg"
     fi
     if [ -z "$why" ]; then
+      [ "$queue" -gt 0 ] && echo "heavy.sh: starting ahead of $queue waiting command(s) that need more RAM than is free" >&2
       start
       unlock
       break
@@ -399,15 +525,43 @@ peak_script='bash -c "$1"; rc=$?; f=/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/sel
 # npm ci runs that hung on 2026-10-26 held their slots for over an hour and
 # stopped every build on the machine.
 run() {
-  local cp rc t=$SECONDS
+  local cp rc wd t=$SECONDS win=0
   local -a pre=() inner
-  command -v setsid >/dev/null 2>&1 && command -v pkill >/dev/null 2>&1 && pre=(setsid)
+  if command -v setsid >/dev/null 2>&1 && command -v pkill >/dev/null 2>&1; then
+    pre=(setsid)
+  elif command -v taskkill >/dev/null 2>&1 && [ -r "/proc/$$/winpid" ]; then
+    win=1
+  fi
   inner=(bash -c "$cmd")
   [ "$use_cg" = 1 ] && inner=(systemd-run --user --scope -q --collect -p "MemoryMax=${cap}M" -- bash -c "$peak_script" _ "$cmd" "$dir/peak.$$")
-  ${pre[@]+"${pre[@]}"} timeout -k 30 "$limit" "${inner[@]}" <&0 9>&- &
-  cp=$!
-  [ "${#pre[@]}" -gt 0 ] && echo "$cp" > "$dir/pg.$$"
-  wait "$cp"; rc=$?
+  if [ "$win" = 1 ]; then
+    # Git Bash has no setsid, and timeout ends only the bash it started: the
+    # node and npm processes under it lived on. So the limit is a watchdog
+    # that ends the command's whole Windows process tree while it still has
+    # one, and the pg file lets a signal, or the next heavy.sh, do the same.
+    "${inner[@]}" <&0 9>&- &
+    cp=$!
+    echo "win:$cp" > "$dir/pg.$$"
+    (
+      while kill -0 "$cp" 2>/dev/null; do
+        if [ $((SECONDS - t)) -ge "$limit" ]; then
+          : > "$dir/to.$$"
+          kill_session "win:$cp"
+          exit 0
+        fi
+        sleep 2
+      done
+    ) </dev/null >/dev/null 2>&1 9>&- &
+    wd=$!
+    wait "$cp"; rc=$?
+    kill "$wd" 2>/dev/null
+    if [ -e "$dir/to.$$" ]; then rc=124; rm -f "$dir/to.$$"; fi
+  else
+    ${pre[@]+"${pre[@]}"} timeout -k 30 "$limit" "${inner[@]}" <&0 9>&- &
+    cp=$!
+    [ "${#pre[@]}" -gt 0 ] && echo "$cp" > "$dir/pg.$$"
+    wait "$cp"; rc=$?
+  fi
   if [ "$rc" -eq 124 ] || { [ "$rc" -eq 137 ] && [ $((SECONDS - t)) -ge "$limit" ]; }; then
     echo "heavy.sh: stopped after ${limit}s (BMAD_HEAVY_TIMEOUT): $cmd" >&2
   elif [ "$rc" -eq 137 ] && [ "$use_cg" = 1 ]; then

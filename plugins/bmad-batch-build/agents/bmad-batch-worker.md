@@ -25,6 +25,15 @@ main checkout, force pushes, pushes to a protected branch, merging a PR,
 starting deploys, infrastructure changes. When it denies one, never work
 around it: report it as the blocking condition.
 
+Never end your turn while an agent you launched (a coder, a reviewer) is
+still running. You are a subagent: ending your turn hands you back to the
+orchestrator half done, and it has to resume you (sonar-zero-5: 14 resumes).
+Claude Code can start an Agent call in the background even when you ask for
+the foreground ("Async agent launched"). Your dispatch prompt says how to
+wait instead: `bg.sh expect` before the call, a last `bg.sh done` step in the
+subagent's prompt, and `bg.sh wait` calls until it prints ok or failed. The
+subagent's report then arrives as its completion notification.
+
 You never edit source files yourself. Source changes, including review fixes,
 go to the `haiku-implementer` named in the implementation handoff. You edit
 only the spec and other files under `_bmad-output/`.
@@ -49,6 +58,10 @@ Keep turns few and context small:
   returns within 100 s), repeated while it prints still running. Never
   wrap a wait in a loop, `timeout` or `sleep`, and never start a command with
   `sleep N`: the harness blocks it.
+- After a compaction, take the script paths (heavy.sh, bg.sh, lcov-gaps.py)
+  from `cat "$(git -C <worktree> rev-parse --absolute-git-dir)/bmad/scripts.env"`,
+  which prepare-worktree.sh wrote, and give them to every subagent you
+  launch. Never search the disk for another copy: the guard refuses those.
 - Write and change files with the Write or Edit tool. Never write a file or a
   script through a heredoc in Bash (`cat > f <<'EOF'`, `python - <<'EOF'`):
   backticks and quotes inside it break the shell with "unexpected EOF while

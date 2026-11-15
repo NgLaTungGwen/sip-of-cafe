@@ -43,8 +43,14 @@ Send every worker in **one message**, with one `Agent` call per unit
 `model`; `<agents>` is the prefix SKILL.md set).
 That agent (`agents/bmad-batch-worker.md`) runs on Opus with a 1-hour
 prompt cache, so its context survives the waits on its coder, its reviewers
-and the test suite. The worker plans, verifies and triages the review; bmad-build-auto runs
-its review subagents at the worker's model, and they keep the default 5-minute
+and the test suite. The worker plans, verifies and triages the review. The
+review is sized by risk through the pinned toml's per-layer `when` gates,
+which read the `Size:` line below: an S unit under 400 changed lines that
+touches no contract, migration or auth code gets only the edge-case and
+verification-gap layers; the intent auditor runs only for L units or when an
+interface changed from the agreed shape. Those two layers run at the worker's
+model; the blind hunter and the intent auditor run on Sonnet (a pinned fact
+replaces step-04's same-model rule for them). All keep the default 5-minute
 cache. Opus, not Sonnet: Sonnet workers skipped the review in 31 of 47 units
 (2026-10-21/22), while Opus workers completed the workflow in 62 of 67. The
 code itself is written by the `<agents>haiku-implementer` agent that the worktree's
@@ -57,6 +63,9 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 - `<name>`: `<slug>-<n>`
 - `<budget>` and `<estimate>`: the unit's `budget` and `p50` under `unit_estimates` in the
   plan file, in minutes
+- `<size>`: the unit's size from the split (S, M or L)
+- `<template>`: the `DB-TEMPLATE` name from SKILL.md section 4; leave out
+  `--db-template` when it printed `none`
 - `<wt>`: `<root>/.claude/worktrees/<name>`
 - `<branch>`: the unit's branch
 - `<base>`: the wave's base. For wave 1 that is `origin/<base>` (SKILL.md), and the
@@ -66,6 +75,7 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 ```text
 You are a Build Auto worker for one unit of a BMAD batch build.
 Unit: <n>
+Size: <size>   (the review layers' `Run only when` lines read this)
 Budget: <budget> min (about <estimate> expected). Run `date +%s` first and keep the number.
 
 Project root: <wt>   (a git worktree on branch <branch>, which you create in step 0)
@@ -73,7 +83,7 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
 
 0. Prepare the worktree:
    a. As one foreground Bash call with `timeout: 600000`:
-      bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<name>" "<branch>" --no-install --agents "<agents>" [--base <base>]
+      bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<name>" "<branch>" --no-install --agents "<agents>" [--base <base>] [--db-template <template>]
       If it fails, reply with:
       SPEC: none
       STATUS: blocked
@@ -92,12 +102,31 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
    with the intent below. Run every step, in order: plan, implement through
    the implementation handoff, review. Subagents you launch must run in the
    foreground, as that workflow requires: launch them without
-   `run_in_background`. If the Agent tool still answers "Async agent
-   launched", waiting for that agent's completion notification meets the
-   requirement: end your turn and wait. Until it arrives, don't start the
-   next workflow step, launch another agent on the same files, or write the
-   reply in step 3. A spec written after the code, or a
-   skipped review, fails the gate and the unit is not merged.
+   `run_in_background`. Claude Code may still start one in the background
+   (the Agent tool answers "Async agent launched"). **Never end your turn
+   while an agent you launched is still running**: for you, ending the turn
+   hands you back to the orchestrator half done. So, for every subagent
+   (the implementation subagent of each round and every reviewer):
+   a. Give it a name, such as `impl-1` or `review-1-edge`, and run
+      `bash "<skill>/scripts/bg.sh" expect "<wt>" <agent name>` first.
+   b. End its prompt with this line: `Your last step, after your report is
+      written: run bash "<skill>/scripts/bg.sh" done "<wt>" <agent name>
+      (add 1 at the end if you could not finish), then reply with your report.`
+   c. If the Agent call answers "Async agent launched", block on
+      `bash "<skill>/scripts/bg.sh" wait "<wt>" <agent name>`, one per Bash
+      call (each returns within 100 s), again while it prints still running.
+      When it prints ok or failed, the agent's report arrives as its
+      completion notification; work on that report. `done` runs just before
+      the agent's reply, so if the report isn't there yet, call `wait` once
+      more (it returns at once) instead of ending your turn. Until then,
+      don't start the next workflow step, launch another agent on the same
+      files, or write the reply in step 3. An agent can also end without
+      running `done` (turn budget, an error): after 40 replies of still
+      running in a row (about an hour), or once your budget is used up, stop
+      waiting and end your turn; the orchestrator resumes you when the
+      agent's notification reaches it.
+   A spec written after the code, or a skipped review, fails the gate and the
+   unit is not merged.
    Budget: before you start any further fix round, compare `date +%s` with the
    number you kept. Once the budget is used up, start no new round: finish the
    one you are in, record the findings still open in the spec's review log as

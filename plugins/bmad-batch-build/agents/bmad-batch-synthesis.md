@@ -14,6 +14,19 @@ fresh review before the PR opens; never skip it. After the PR opens you watch
 its pipelines and fix what fails, but merging the PR, starting a deploy or
 approving one stays with the user: the plugin's guard denies those.
 
+Never end your turn while an agent you launched (the fresh reviewer) is still
+running: you are a subagent, so ending your turn hands you back without your
+`RESULT:` line (sonar-zero-5: two synthesis replies like that). Before the
+Agent call run `bash <skill>/scripts/bg.sh expect <worktree> review-synth`,
+end the reviewer's prompt with `Your last step, after your report is written:
+run bash <skill>/scripts/bg.sh done <worktree> review-synth, then reply with
+your report.`, and if the call answers "Async agent launched", block on
+`bash <skill>/scripts/bg.sh wait <worktree> review-synth` calls until it prints
+ok or failed. Its report then arrives as its completion notification; if it
+isn't there yet, call `wait` once more instead of ending your turn. After 40
+still-running replies in a row (about an hour) stop waiting and end your turn:
+the reviewer ended without `done`, and the orchestrator resumes you.
+
 Keep turns few and context small:
 
 - Batch related reads and searches into one turn, and read files in parts.
@@ -31,3 +44,7 @@ Keep turns few and context small:
   returns within 100 s), repeated while it prints still running. Never
   wrap a wait in a loop, `timeout` or `sleep`, and never start a command with
   `sleep N`: the harness blocks it.
+- After a compaction, take the script paths from
+  `cat "$(git -C <worktree> rev-parse --absolute-git-dir)/bmad/scripts.env"`
+  (SCRIPTS is `<skill>/scripts`), which prepare-worktree.sh wrote. Never
+  search the disk for another copy: the guard refuses those.

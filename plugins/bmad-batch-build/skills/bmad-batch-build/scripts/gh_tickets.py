@@ -34,6 +34,10 @@ units and their tasks, never a left-out unit's task. When every task in the
 plan was merged each one gets "Closes #n", so GitHub closes them when the PR
 merges (only into the default branch); otherwise "Refs #n", which links
 without closing. Prints the linked numbers and whether close-on-complete is on.
+A story issue that still has open sub-issues outside this PR (a reused story
+with other work under it) gets "Refs #story" even then, because "Closes" would
+close it with that work open; so does one whose sub-issues could not be read.
+The script prints which.
 
 usage: python gh_tickets.py <plan.json> --link-pr <pr> --merged <unit> --unit-pr
 
@@ -136,10 +140,21 @@ def with_work_items(body: str, line: str) -> str:
     return body[:footer] + line + "\n\n" + body[footer:]
 
 
-def work_items_line(plan: dict, merged: set, unit_pr: bool = False):
+def open_sub_issues(story) -> set:
+    """Numbers of the story issue's sub-issues that are still open."""
+    out = gh("api", "--paginate", f"repos/{REPO}/issues/{int(story)}/sub_issues",
+             "--jq", '.[] | select(.state == "open") | .number')
+    return {int(n) for n in out.split()}
+
+
+def work_items_line(plan: dict, merged: set, unit_pr: bool = False, children=None, skipped=None):
     """(the Work items: line, the ids that should close or link, close-on-complete).
     One PR for the run closes everything only when no unit was left out; a
-    unit's own PR (unit_pr) closes its task and only refers to its story."""
+    unit's own PR (unit_pr) closes its task and only refers to its story.
+    With close-on-complete on and `children` (story number -> open sub-issue
+    numbers) given, a story with open sub-issues outside this PR gets "Refs",
+    since "Closes" would close it with work still open; so does a story whose
+    sub-issues could not be read. It goes to `skipped` as (number, others)."""
     tasks = [t for t in plan["tasks"] if t.get("id") is not None and str(t["unit"]) in merged]
     keys = {t["story"] for t in tasks}
     stories = [s["id"] for s in plan["stories"] if s["key"] in keys and s.get("id") is not None]
@@ -149,8 +164,20 @@ def work_items_line(plan: dict, merged: set, unit_pr: bool = False):
         return "Work items: " + ", ".join(parts), [str(t["id"]) for t in tasks], bool(tasks)
     ids = [str(i) for i in stories + [t["id"] for t in tasks]]
     close = len(tasks) == len(plan["tasks"])
-    keyword = "Closes" if close else "Refs"
-    return "Work items: " + ", ".join(f"{keyword} #{i}" for i in ids), ids, close
+    refs = set() if close else set(ids)
+    if close and children is not None:
+        task_ids = {int(t["id"]) for t in tasks}
+        for sid in stories:
+            try:
+                others = sorted(set(children(sid)) - task_ids)
+            except Exception as exc:  # unknown sub-issues: never risk closing the story
+                others = [f"unknown ({exc})"]
+            if others:
+                refs.add(str(sid))
+                if skipped is not None:
+                    skipped.append((sid, others))
+    parts = [f"{'Refs' if i in refs else 'Closes'} #{i}" for i in ids]
+    return "Work items: " + ", ".join(parts), ids, close
 
 
 def link(path: str, pr: str, merged: set, unit_pr: bool = False) -> None:
@@ -158,7 +185,12 @@ def link(path: str, pr: str, merged: set, unit_pr: bool = False) -> None:
         sys.exit("origin is not a GitHub repository")
     with open(path, encoding="utf-8") as f:
         plan = json.load(f)
-    line, ids, close = work_items_line(plan, merged, unit_pr)
+    skipped: list = []
+    line, ids, close = work_items_line(plan, merged, unit_pr, open_sub_issues, skipped)
+    for sid, others in skipped:
+        names = " ".join(o if isinstance(o, str) else f"#{o}" for o in others)
+        print(f"story #{sid} not closed: open sub-issues outside this PR ({names}), "
+              "so it gets Refs instead of Closes")
     if not ids:
         sys.exit("no merged unit has a ticket id")
     info = json.loads(gh("pr", "view", pr, "--repo", REPO, "--json", "body,baseRefName"))
@@ -181,7 +213,7 @@ def link(path: str, pr: str, merged: set, unit_pr: bool = False) -> None:
     print("close-on-complete: on")
     closing = gh("pr", "view", pr, "--repo", REPO, "--json", "closingIssuesReferences",
                  "--jq", ".closingIssuesReferences[].number").split()
-    missing = set(ids) - set(closing)
+    missing = set(ids) - {str(s) for s, _ in skipped} - set(closing)
     if missing:
         sys.exit(f"not linked: {' '.join(sorted(missing))}")
 

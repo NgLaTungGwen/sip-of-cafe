@@ -270,7 +270,10 @@ if want apps || want apps-lint || want apps-test || any_wanted "$(ratchet_rows a
     want apps && run_check apps apps "bun run typecheck"
     if has_ratchet apps; then run_ratchets apps
     elif want apps-lint; then run_check apps-lint apps "bun run lint"; fi
-    want apps-test && run_check apps-test apps "bun test"; }) &
+    # Its own test script when it has one: bun test is bun's own runner and
+    # ignores a vitest.config (threat-intel's "test": "vitest run --coverage"; ti-port).
+    apps_test="bun test"; has_script apps test && apps_test="bun run test"
+    want apps-test && run_check apps-test apps "$apps_test"; }) &
 fi
 if want infra || any_wanted "$(ratchet_rows infra)"; then
   (want infra && run_check infra infra "npm ci --no-audit --no-fund --loglevel=error && npm run typecheck"

@@ -217,6 +217,21 @@ class Profile(Layouts):
         self.assertEqual([c.split(" @ ")[0] for c in calls if c.startswith("bun ")], ["bun run typecheck"])
         self.assertNotIn("apps-test.rc", r.stdout)
 
+    def test_verify_apps_runs_the_apps_test_script_when_it_has_one(self):
+        # ti-port: threat-intel's apps/ tests are "vitest run --coverage", and
+        # bun test is bun's own runner, which ignores vitest.config.
+        write(os.path.join(self.repo, "package.json"), '{"name": "x"}')
+        write(os.path.join(self.repo, "package-lock.json"), "{}")
+        write(os.path.join(self.repo, "apps", "package.json"),
+              '{"name": "web", "scripts": {"test": "vitest run --coverage"}}')
+        write(os.path.join(self.repo, "apps", "bun.lock"), "")
+        os.makedirs(os.path.join(self.repo, "apps", "node_modules"))
+        r, calls = self.run_script("verify.sh", self.repo, "--apps")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        apps = [c.split(" @ ")[0] for c in calls if c.replace("\\", "/").endswith("/apps")]
+        self.assertEqual(apps, ["bun run typecheck", "bun run test"])
+        self.assertIn("apps-test.rc:0", r.stdout)
+
     def fail_on(self, word):
         # The fake npm and bun exit 2 when their arguments contain <word>.
         for tool in ("npm", "bun"):
@@ -462,6 +477,134 @@ class AffectedVerify(Layouts):
         self.assertIn("npm test", self.cmds(calls))
 
 
+class WorktreeDatabase(unittest.TestCase):
+    """1.2: every worktree's test database is cloned from one migrated template
+    per run, since a shared one let parallel suites delete each other's rows
+    (FK, 409 and duplicate-key failures that pass alone). docker and npm are
+    fakes on PATH, so no test reaches a real Postgres."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bin = os.path.join(self.tmp, "bin")
+        self.docker = os.path.join(self.tmp, "docker.txt").replace("\\", "/")
+        self.npm = os.path.join(self.tmp, "npm.txt").replace("\\", "/")
+        write(os.path.join(self.bin, "docker"),
+              f'#!/usr/bin/env bash\necho "${{@: -1}}" >> "{self.docker}"\n'
+              'if [ -n "${FAKE_DOCKER_FAIL:-}" ]; then case "$*" in *"$FAKE_DOCKER_FAIL"*) exit 1 ;; esac; fi\nexit 0\n')
+        write(os.path.join(self.bin, "npm"),
+              f'#!/usr/bin/env bash\necho "npm $* | $DATABASE_URL | $MIGRATION_DATABASE_URL" >> "{self.npm}"\n')
+        for f in ("docker", "npm"):
+            os.chmod(os.path.join(self.bin, f), 0o755)
+        self.repo = os.path.join(self.tmp, "repo").replace("\\", "/")
+        remote = os.path.join(self.tmp, "remote.git")
+        git("init", "-q", "--bare", "-b", "main", remote)
+        git("clone", "-q", remote, self.repo)
+        os.makedirs(os.path.join(self.repo, "_bmad", "custom"))
+        write(os.path.join(self.repo, "package.json"), '{"name": "x", "scripts": {"db:migrate": "m"}}')
+        write(os.path.join(self.repo, ".env"),
+              "DATABASE_URL=postgres://hive_app:a@localhost:55432/hive_factory\n"
+              "MIGRATION_DATABASE_URL=postgres://hive_owner:o@localhost:55432/hive_factory\n")
+        write(os.path.join(self.repo, ".gitignore"), ".env\n_bmad/\n.claude/\n")
+        git("add", "-A", cwd=self.repo)
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init", cwd=self.repo)
+        git("push", "-q", "origin", "HEAD", cwd=self.repo)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_it(self, script, *args, **env):
+        e = dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"], BMAD_DB_RETRY_PAUSE="0",
+                 BMAD_RUNS_DIR=os.path.join(self.tmp, "store"), BMAD_HEAVY_DIR=os.path.join(self.tmp, "heavy"), **env)
+        return subprocess.run([BASH, os.path.join(SCRIPTS, script), *args], capture_output=True, text=True, env=e)
+
+    def calls(self, which=None):
+        p = which or self.docker
+        return open(p, encoding="utf-8").read().splitlines() if os.path.exists(p) else []
+
+    def prepare(self, *extra, **env):
+        r = self.run_it("prepare-worktree.sh", self.repo, "u-1", "feat/u-1", "--no-install", *extra, **env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        wt = os.path.join(self.repo, ".claude", "worktrees", "u-1")
+        return r, open(os.path.join(wt, ".env"), encoding="utf-8").read()
+
+    def profiled(self):
+        py = ["python", os.path.join(SCRIPTS, "profile.py")]
+        subprocess.run(py + ["detect", self.repo, "--write"], check=True, capture_output=True)
+        subprocess.run(py + ["set", self.repo, "database.migrate", '{"dir": ".", "cmd": "npm run db:migrate"}'],
+                       check=True, capture_output=True)
+        prof = json.load(open(os.path.join(self.repo, ".claude", "bmad-batch-project.json"), encoding="utf-8"))
+        self.assertIs(prof["database"]["per_worktree"], True)  # on by default now
+
+    def test_the_template_is_migrated_once_from_the_main_checkout(self):
+        r = self.run_it("db-template.sh", self.repo, "Run-1")
+        self.assertEqual(r.stdout.strip(), "DB-TEMPLATE hive_pb_run_1_template", r.stderr)
+        sql = self.calls()
+        self.assertIn("CREATE DATABASE hive_pb_run_1_template", sql)
+        self.assertIn("GRANT CONNECT ON DATABASE hive_pb_run_1_template TO hive_owner, hive_app", sql)
+        self.assertTrue(any(s.startswith("GRANT CREATE, USAGE ON SCHEMA public TO hive_owner") for s in sql))
+        npm = self.calls(self.npm)
+        self.assertEqual(len(npm), 1)
+        self.assertIn("run db:migrate", npm[0])
+        self.assertIn("hive_app:a@127.0.0.1:55432/hive_pb_run_1_template |", npm[0])
+        self.assertTrue(npm[0].endswith("hive_owner:o@127.0.0.1:55432/hive_pb_run_1_template"), npm[0])
+        r = self.run_it("db-template.sh", self.repo, "Run-1", "--drop")
+        self.assertIn("DROP DATABASE IF EXISTS hive_pb_run_1_template WITH (FORCE)", self.calls())
+
+    def test_no_template_from_a_main_checkout_that_could_hold_newer_migrations(self):
+        write(os.path.join(self.repo, "package.json"), '{"name": "y", "scripts": {"db:migrate": "m"}}')
+        r = self.run_it("db-template.sh", self.repo, "run")
+        self.assertIn("DB-TEMPLATE none: the main checkout has uncommitted changes", r.stdout)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.calls(self.npm), [])
+
+    def test_a_failed_migration_drops_the_template(self):
+        write(os.path.join(self.bin, "npm"), "#!/usr/bin/env bash\necho boom postgres://u:secret@h/x; exit 1\n")
+        r = self.run_it("db-template.sh", self.repo, "run")
+        self.assertIn("DB-TEMPLATE none: the migration failed", r.stdout)
+        self.assertNotIn("secret", r.stderr)
+        self.assertIn("DROP DATABASE IF EXISTS hive_pb_run_template WITH (FORCE)", self.calls()[-1])
+
+    def test_prepare_clones_the_worktree_database_from_the_template(self):
+        r, env = self.prepare("--db-template", "hive_pb_run_template")
+        self.assertEqual(self.calls(), [
+            "DROP DATABASE IF EXISTS hive_pb_u_1_test",
+            "CREATE DATABASE hive_pb_u_1_test TEMPLATE hive_pb_run_template",
+            "GRANT CONNECT ON DATABASE hive_pb_u_1_test TO hive_owner, hive_app"])
+        self.assertIn("cloned from hive_pb_run_template", r.stderr)
+        self.assertIn("DATABASE_URL=postgres://hive_app:a@127.0.0.1:55432/hive_pb_u_1\n", env)
+
+    def test_a_failed_clone_falls_back_to_create_and_migrate(self):
+        # Postgres refuses a template while something is connected to it.
+        r, env = self.prepare("--db-template", "hive_pb_run_template", FAKE_DOCKER_FAIL="TEMPLATE")
+        self.assertEqual(sum("TEMPLATE hive_pb_run_template" in c for c in self.calls()), 3)
+        self.assertIn("the test setup creates and migrates it", r.stderr)
+        self.assertIn("127.0.0.1:55432/hive_pb_u_1\n", env)  # still private; the suite creates it
+
+    def test_a_profiled_project_clones_or_keeps_the_shared_database(self):
+        self.profiled()
+        r, env = self.prepare("--db-template", "tpl")
+        self.assertIn("CREATE DATABASE hive_pb_u_1 TEMPLATE tpl", self.calls())  # no _test suffix by default
+        self.assertIn("DATABASE_URL=postgres://hive_app:a@localhost:55432/hive_pb_u_1\n", env)  # own host kept
+        git("worktree", "remove", "--force", os.path.join(self.repo, ".claude", "worktrees", "u-1"), cwd=self.repo)
+        git("branch", "-D", "feat/u-1", cwd=self.repo)
+        r, env = self.prepare("--db-template", "tpl", FAKE_DOCKER_FAIL="TEMPLATE")
+        self.assertIn("shares the database in .env", r.stderr)
+        self.assertIn("localhost:55432/hive_factory\n", env)
+
+    def test_remove_worktree_drops_the_worktree_database(self):
+        self.prepare("--db-template", "tpl")
+        r = self.run_it("remove-worktree.sh", self.repo, "u-1", "feat/u-1")
+        self.assertIn("DROP DATABASE IF EXISTS hive_pb_u_1_test WITH (FORCE)", self.calls()[-1], r.stderr)
+
+    def test_a_project_without_a_database_never_calls_docker(self):
+        os.remove(os.path.join(self.repo, ".env"))
+        self.assertIn("DB-TEMPLATE none", self.run_it("db-template.sh", self.repo, "run").stdout)
+        r = self.run_it("prepare-worktree.sh", self.repo, "u-1", "feat/u-1", "--no-install", "--db-template", "tpl")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.run_it("remove-worktree.sh", self.repo, "u-1", "feat/u-1")
+        self.assertEqual(self.calls(), [])
+
+
 class LinuxTests(unittest.TestCase):
     """sonar-zero-5: two Linux-only verifier tests (skipIf win32) failed first
     on CI, because the Windows verify host never runs them."""
@@ -589,7 +732,7 @@ class HeavyQueue(unittest.TestCase):
             r = subprocess.run([BASH, os.path.join(SCRIPTS, "heavy.sh"), "echo started"], capture_output=True,
                                text=True, env=env, timeout=60)
         finally:
-            blocker.kill()
+            self.stop_blocker(blocker, d)
         self.assertIn("starting anyway", r.stderr)
         self.assertIn("started", r.stdout)
 
@@ -602,6 +745,8 @@ class HeavyQueue(unittest.TestCase):
         self.assertEqual(out["kind"], "test")
         self.assertGreaterEqual(int(out["weight"]), 2)
         self.assertEqual(self.heavy("--explain", "npm run typecheck").stdout.split()[1], "weight=1")
+        # The apps/ suite of a bun package with a test script (ti-port).
+        self.assertIn("kind=test", self.heavy("--explain", "cd apps && bun run test").stdout)
 
     def test_a_weight_above_the_slots_is_capped(self):
         r = self.heavy("--explain", "--weight", "9", "echo x", env=self.env(BMAD_HEAVY_SLOTS="2"))
@@ -641,9 +786,28 @@ class HeavyQueue(unittest.TestCase):
             self.assertIn("test  weight 2", status)
             self.assertIn("free RAM", status)
         finally:
-            blocker.kill()
-            blocker.wait()  # a zombie still answers kill -0
-        self.assertEqual(self.heavy("--count", env=env).stdout.strip(), "0")
+            self.stop_blocker(blocker, d)
+        # heavy.sh drops the entry once its pid is gone; give it a moment.
+        deadline = time.time() + 30
+        count = self.heavy("--count", env=env).stdout.strip()
+        while count != "0" and time.time() < deadline:
+            time.sleep(0.2)
+            count = self.heavy("--count", env=env).stdout.strip()
+        self.assertEqual(count, "0")
+
+    @staticmethod
+    def stop_blocker(blocker, d):
+        """Ends a blocker and the sleep under it. On Windows, Popen.kill ends
+        bash.exe only: its `sleep 60` lives on under the MSYS pid that the
+        run.<pid> entry records and heavy.sh checks with kill -0, so the pid
+        is killed from bash first."""
+        for f in os.listdir(d):
+            if f.startswith("run."):
+                pid = f.split(".", 1)[1]
+                if pid.isdigit():
+                    subprocess.run([BASH, "-c", f"kill -9 {pid}"], capture_output=True)
+        blocker.kill()
+        blocker.wait()  # a zombie still answers kill -0
 
     def test_a_machine_with_no_memory_left_says_overloaded_instead_of_starting(self):
         env = self.env(BMAD_HEAVY_MAX_WAIT="2", BMAD_HEAVY_POLL="1", BMAD_HEAVY_FLOOR_MB="99999999",
@@ -658,7 +822,7 @@ class HeavyQueue(unittest.TestCase):
                 time.sleep(0.1)
             r = self.heavy("echo started", env=env)
         finally:
-            blocker.kill()
+            self.stop_blocker(blocker, d)
         self.assertEqual(r.returncode, 75)
         self.assertIn("overloaded", r.stderr)
         self.assertNotIn("started", r.stdout)
@@ -728,6 +892,134 @@ class PluginAgents(unittest.TestCase):
             a = open(os.path.join(root, f), encoding="utf-8").read().replace("\r\n", "\n")
             b = open(os.path.join(skill, f), encoding="utf-8").read().replace("\r\n", "\n")
             self.assertEqual(a, b, f)
+
+
+class HeavySchedule(unittest.TestCase):
+    """Priority, heartbeats, backfill and reservations, on a fixed free RAM
+    (BMAD_HEAVY_FREE_MB), with fake run entries and tickets written by bash
+    sleepers so that kill -0 sees their pids."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dir = os.path.join(self.tmp, "h")
+        os.makedirs(self.dir)
+        self.procs = []
+
+    def tearDown(self):
+        for p in self.procs:
+            p.kill()
+            p.wait()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def env(self, free=8000, **kw):
+        return dict(os.environ, BMAD_RUNS_DIR=os.path.join(self.tmp, "s"), BMAD_HEAVY_DIR=self.dir,
+                    BMAD_HEAVY_FREE_MB=str(free), BMAD_HEAVY_SLOTS="8", BMAD_HEAVY_SWAP_PCT="101",
+                    BMAD_HEAVY_POLL="1", BMAD_HEAVY_MAX_WAIT="3", BMAD_HEAVY_HARD_MB="99999999",
+                    **{k: str(v) for k, v in kw.items()})
+
+    def sleeper(self, script, marker):
+        """Runs `script` in a bash that then sleeps, once `marker` exists in the state dir."""
+        p = subprocess.Popen([BASH, "-c", f'd="{self.dir}"; {script}; sleep 60'])
+        self.procs.append(p)
+        for _ in range(100):
+            if any(f.startswith(marker) for f in os.listdir(self.dir)):
+                return p
+            time.sleep(0.1)
+        self.fail(f"the sleeper never wrote {marker}")
+
+    def running(self, mem, age, f0=""):
+        """A running command of weight 1 that started `age` seconds ago."""
+        self.sleeper(f'echo "$$ 1 {mem} $(( $(date +%s) - {age} )) other {f0}" > "$d/run.$$"', "run.")
+
+    def waiting(self, mem, age=0, priority=False):
+        """A live ticket that arrived `age` seconds ago and needs `mem` MB."""
+        name = "wait.0." if priority else "wait."
+        self.sleeper(f'echo "1 {mem} {int(priority)}" > "$d/need.$$"; '
+                     f'echo $$ > "$d/{name}$(( $(date +%s) - {age} ))000000000.$$"', "wait.")
+
+    def heavy(self, *args, env):
+        return subprocess.run([BASH, os.path.join(SCRIPTS, "heavy.sh"), *args], capture_output=True, text=True,
+                              env=env, timeout=120)
+
+    def test_a_priority_command_goes_before_the_queue(self):
+        self.running(0, 3600)
+        self.waiting(100)   # fits, so it is not waiting on RAM: nothing may backfill past it
+        self.assertEqual(self.heavy("echo started", env=self.env()).returncode, 75)
+        r = self.heavy("--priority", "echo started", env=self.env())
+        self.assertEqual((r.returncode, r.stdout), (0, "started\n"), r.stderr)
+        self.assertIn("priority=1", self.heavy("--explain", "--priority", "echo x", env=self.env()).stdout)
+
+    def test_a_ticket_nobody_touches_is_dropped(self):
+        # Its pid is alive, but its waiter stopped polling 5 minutes ago.
+        self.running(0, 3600)
+        self.waiting(100)
+        ticket = [os.path.join(self.dir, f) for f in os.listdir(self.dir) if f.startswith("wait.")][0]
+        old = time.time() - 300
+        os.utime(ticket, (old, old))
+        r = self.heavy("echo started", env=self.env())
+        self.assertEqual((r.returncode, r.stdout), (0, "started\n"), r.stderr)
+        self.assertFalse(os.path.exists(ticket))
+
+    def test_a_small_command_backfills_past_one_waiting_for_ram(self):
+        self.running(0, 3600)
+        self.waiting(50000)  # needs far more than the 8000 MB free
+        r = self.heavy("echo started", env=self.env(BMAD_HEAVY_AGING=600))
+        self.assertEqual((r.returncode, r.stdout), (0, "started\n"), r.stderr)
+        self.assertIn("starting ahead of 1", r.stderr)
+
+    def test_no_backfill_once_the_head_has_waited_long_enough(self):
+        self.running(0, 3600)
+        self.waiting(50000, age=2000)
+        self.assertEqual(self.heavy("echo started", env=self.env(BMAD_HEAVY_AGING=1000)).returncode, 75)
+
+    def test_no_backfill_past_a_priority_command(self):
+        self.running(0, 3600)
+        self.waiting(50000, priority=True)
+        self.assertEqual(self.heavy("echo started", env=self.env()).returncode, 75)
+
+    def test_memory_a_running_command_already_took_is_not_reserved_again(self):
+        # 2500 MB wanted + 2048 floor out of 6000 free. A 4000 MB command that
+        # started 80 s ago is mostly in the free figure already.
+        self.running(4000, 80)
+        r = self.heavy("echo started", env=self.env(free=6000))
+        self.assertEqual((r.returncode, r.stdout), (0, "started\n"), r.stderr)
+
+    def test_a_command_that_just_started_is_still_reserved(self):
+        self.running(4000, 0)
+        r = self.heavy("echo started", env=self.env(free=6000))
+        self.assertEqual(r.returncode, 75, r.stderr)
+
+    def test_what_free_memory_fell_since_a_start_counts_as_taken(self):
+        # Started just now with 9000 MB free; 6000 free now: 3000 of its 4000 are taken.
+        self.running(4000, 0, f0=9000)
+        r = self.heavy("echo started", env=self.env(free=6000))
+        self.assertEqual((r.returncode, r.stdout), (0, "started\n"), r.stderr)
+
+
+def _git_bash_without_setsid():
+    if not BASH:
+        return False
+    r = subprocess.run([BASH, "-c", '! command -v setsid && command -v taskkill && [ -r /proc/$$/winpid ]'],
+                       capture_output=True)
+    return r.returncode == 0
+
+
+class HeavyWindowsTree(unittest.TestCase):
+    @unittest.skipUnless(_git_bash_without_setsid(), "needs Git Bash: taskkill and /proc/<pid>/winpid, no setsid")
+    def test_the_time_limit_ends_the_commands_children(self):
+        # Git Bash has no setsid; timeout ended only the bash, and what it started lived on.
+        tmp = tempfile.mkdtemp()
+        child = os.path.join(tmp, "child").replace("\\", "/")
+        env = dict(os.environ, BMAD_RUNS_DIR=os.path.join(tmp, "s"), BMAD_HEAVY_DIR=os.path.join(tmp, "h"),
+                   BMAD_HEAVY_TIMEOUT="3")
+        r = subprocess.run([BASH, os.path.join(SCRIPTS, "heavy.sh"), f"sleep 307 & echo $! > '{child}'; wait"],
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 124, r.stderr)
+        alive = subprocess.run([BASH, "-c", f"sleep 1; kill -0 $(cat '{child}')"], capture_output=True)
+        if alive.returncode == 0:
+            subprocess.run([BASH, "-c", f"kill -9 $(cat '{child}')"])
+        self.assertNotEqual(alive.returncode, 0, "the command's child outlived the time limit")
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

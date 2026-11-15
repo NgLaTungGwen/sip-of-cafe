@@ -35,6 +35,9 @@ round then runs the cheaper way for itself, by the same rule as a whole run:
     parallel wave = max(unit minutes) x queue factor + 50 (merge into the
                     integration branch and verify it)
     run total     = sum of wave times + 30 (preparation and the final verify)
+    lane total    = the lane steps + 30 + synthesis (merge, verify, PR: the
+                    median min_synthesis of recorded runs with workers, 60
+                    until there are three)
 
 A wave of 2 to 4 units runs in parallel when that is more than the margin
 faster (20 min, 40 when --busy), a tie going to lane. A wave of 5 or more is
@@ -53,7 +56,10 @@ brings a coder and up to four reviewers, and Claude Code allows 20 subagents at
 once per session, so 5 workers already got launches refused; and on 2026-10-26
 runs of 12, 9 and 5 parallel workers at the same time stalled the machine-wide
 build queue for hours. Other active runs are sessions that ran the skill and
-wrote their log in the last 15 minutes.
+wrote their log in the last 15 minutes. The cap also fits the RAM: at most
+(MemAvailable - 2048 MB) / the RAM one unit peaks at (3000 MB, or the 90th
+percentile of heavy.sh's measured test-suite peaks, or BMAD_UNIT_PEAK_MB),
+and at least 1; the plan's "parallel cap" line says which limit applied.
 
 Unit minutes. With "items", a unit takes 40 min plus 2.2 min per item, plus 30
 min per 1000 lines of every file over 2500 lines (sonar-zero-5, 2026-11-07:
@@ -64,11 +70,14 @@ each row's unit_minutes) from the first measurement on: (n x measured median +
 3 x prior) / (n + 3), first over all projects, then over this project's own
 runs (--project, else the folder name of --root).
 
-A single number hides the tail, so every estimate also comes with a p80: unit
-times scaled by the measured p80/p50 ratio of recorded units (1.6 until there
-are 5), run through the same schedule. sonar-zero-5 was estimated at 6 h and
-took 13.4 h. Each unit gets a budget, twice its estimate (and at least 60 min
-over it); straggler.py compares a running unit with it.
+A single number hides the tail, so every estimate also comes with a p80. Once
+5 recorded runs of the chosen mode had workers, it is the estimate times the
+ceil((n+1) x 0.8)-th smallest of their active minutes (wall minus user wait)
+over estimate, at most 5x; the units' p80s use the same factor. Until then,
+unit times scaled by the measured p80/p50 ratio of recorded units (1.6 until
+there are 5), run through the same schedule. sonar-zero-5 was estimated at 6 h
+and took 13.4 h. Each unit gets a budget, twice its estimate, at least 60 min
+over it and 30 min past its p80; straggler.py compares a running unit with it.
 
 A batch run pays a fixed cost per unit (worktree, install, spec, plan, coder,
 reviewers, gate) and per parallel wave (merge and verify), which only pays off
@@ -106,7 +115,9 @@ and, when one applies, an Advice line. Writes the schedule back into plan.json
 ("waves", "mode", "estimate", "estimate_p80", "unit_estimates", ...).
 
 --accuracy compares recorded units with their estimate (the one the plan gave
-when recorded, else today's model) and says whether the estimates run low.
+when recorded, else today's model) and says whether the estimates run low,
+then whole runs per mode: active minutes over the estimate, for runs that had
+workers.
 """
 import json
 import math
@@ -120,6 +131,11 @@ WARM = 10        # saved per lane unit after the first
 MERGE = 50       # a parallel wave's merge and verify
 RUN = 30         # preparation and the final verify, once per run
 MAX_PARALLEL = 4     # workers in one parallel wave (Claude Code's 20-subagent limit)
+RESERVE_MB = 2048    # RAM the machine keeps for itself when capping workers by memory
+UNIT_PEAK_MB = 3000  # RAM one worker's unit peaks at (its suite, dev server, DB), unless measured
+SYNTH = 60           # minutes synthesis takes to merge and verify a lane, unless recorded (median 56, 36 runs)
+SPREAD_CAP = 5.0     # the most a p80 factor may be (lane runs measured 4.75x on 2026-11-15)
+MIN_RATIOS = 5       # recorded runs of a mode before its own p80 replaces the factor
 K = 3                # recorded runs count against this many prior ones
 BASE_ITEMS = 40      # minutes before the first item (worktree, install, spec, plan)
 PER_ITEM = 2.2      # minutes per item (sonar-zero-5: 21 -> 85 min, 46 -> 140 min)
@@ -195,7 +211,7 @@ def calibration(project=None, rows=None):
             ratios += [x / m for x in got]
     spread = SPREAD
     if len(ratios) >= 5:
-        q = min(max(quantile(ratios, 0.8), 1.2), 3.0)
+        q = min(max(quantile(ratios, 0.8), 1.2), SPREAD_CAP)
         spread = (len(ratios) * q + K * SPREAD) / (len(ratios) + K)
     return {"size": size, "source": source, "per_item": per_item,
             "per_item_source": f"measured n={len(g)}" if g else "default", "spread": round(spread, 2),
@@ -225,8 +241,55 @@ def unit_minutes(u, model, root=None):
     return max(30, round(t))
 
 
-def budget(minutes):
-    return max(round(BUDGET * minutes), minutes + 60)
+def budget(minutes, p80=None):
+    """Twice the estimate and at least an hour over it, and never less than
+    half an hour past the p80: straggler.py says Slow past the p80 and
+    Straggler past the budget, so a budget under the p80 skips Slow."""
+    return max(round(BUDGET * minutes), minutes + 60, round(p80) + 30 if p80 else 0)
+
+
+def order_stat(values, q=0.8):
+    """The ceil((n+1) q)-th smallest value: a p80 that n samples cover with
+    80% confidence for the next one (conformal quantile). For n up to 8 that
+    is the largest value."""
+    s = sorted(values)
+    return s[min(math.ceil((len(s) + 1) * q), len(s)) - 1]
+
+
+def run_ratios(rows, project=None):
+    """Per mode, each recorded run's active minutes over its estimate. Active
+    is wall minus the time the run waited for the user (a negative wait counts
+    as none); only runs that had workers count, so a run built directly or
+    stopped at the split does not."""
+    out = {}
+    for r in rows:
+        m = re.search(r"Mode: (\w+) \(≈(\d+) min", r.get("mode") or "")
+        if not m or not r.get("workers") or not r.get("min_wall") or int(m.group(2)) <= 0:
+            continue
+        if project and r.get("project") != project:
+            continue
+        active = r["min_wall"] - max(r.get("min_user_wait") or 0, 0)
+        if active > 0:
+            out.setdefault(m.group(1), []).append(active / int(m.group(2)))
+    return out
+
+
+def mode_spread(mode, rows, fallback):
+    """The p80 factor for a run of this mode: the order statistic of its
+    recorded actual/estimate ratios once there are MIN_RATIOS of them, else
+    the unit spread. Returns (factor, source)."""
+    got = run_ratios(rows).get(mode, [])
+    if len(got) < MIN_RATIOS:
+        return fallback, f"unit spread ({len(got)} {mode} run(s) recorded, {MIN_RATIOS} needed)"
+    q = min(max(order_stat(got), 1.0), SPREAD_CAP)
+    return round(q, 2), f"order statistic of {len(got)} {mode} run(s)"
+
+
+def synthesis_minutes(rows):
+    """Median synthesis minutes of the recorded runs that had workers, once
+    there are three; else SYNTH."""
+    got = [r["min_synthesis"] for r in rows if r.get("workers") and (r.get("min_synthesis") or 0) > 0]
+    return round(statistics.median(got)) if len(got) >= 3 else SYNTH
 
 
 def suite_minutes(root):
@@ -372,11 +435,80 @@ def invokes(line):
         and str((b.get("input") or {}).get("skill", "")).startswith("bmad-batch-build") for b in c)
 
 
-def cap_for(other_runs):
-    return MAX_PARALLEL if other_runs == 0 else (3 if other_runs == 1 else 2)
+def cap_for(other_runs, avail_mb=None, peak_mb=UNIT_PEAK_MB):
+    """Workers per wave: the CPU-side cap (fewer with other active runs), and
+    with avail_mb also no more than (avail_mb - RESERVE_MB) / peak_mb, at least 1."""
+    cpu = MAX_PARALLEL if other_runs == 0 else (3 if other_runs == 1 else 2)
+    if avail_mb is None:
+        return cpu
+    return max(1, min(cpu, (avail_mb - RESERVE_MB) // max(peak_mb, 1)))
 
 
-def plan(units, busy=False, minutes=None, max_par=MAX_PARALLEL, times=None, queue=None, heavy=HEAVY_SHARE):
+def mem_available_mb():
+    """RAM the machine can still give, in MB, or None when it can't be read.
+    BMAD_MEM_AVAILABLE_MB overrides it."""
+    v = os.environ.get("BMAD_MEM_AVAILABLE_MB")
+    if v:
+        return int(v)
+    try:
+        with open("/proc/meminfo") as fh:
+            info = dict(line.split(":", 1) for line in fh if ":" in line)
+        kb = info.get("MemAvailable") or info.get("MemFree")  # Cygwin/MSYS have only MemFree
+        return int(kb.split()[0]) // 1024 if kb else None
+    except (OSError, ValueError):
+        pass
+    if os.name == "nt":
+        import ctypes
+
+        class Status(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        s = Status()
+        s.dwLength = ctypes.sizeof(Status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(s)):
+            return int(s.ullAvailPhys // 1048576)
+    return None
+
+
+def unit_peak_mb():
+    """What one unit's worker peaks at: BMAD_UNIT_PEAK_MB, else the 90th
+    percentile of heavy.sh's recorded test-suite peaks (peaks.test, measured
+    only where systemd scopes work), once there are three, else UNIT_PEAK_MB.
+    Returns (MB, source)."""
+    v = os.environ.get("BMAD_UNIT_PEAK_MB")
+    if v:
+        return int(v), "BMAD_UNIT_PEAK_MB"
+    path = os.path.join(os.environ.get("BMAD_HEAVY_DIR") or os.path.expanduser("~/.cache/bmad-heavy"), "peaks.test")
+    try:
+        with open(path) as fh:
+            got = [int(x) for x in fh.read().split() if x.isdigit()]
+    except OSError:
+        got = []
+    if len(got) >= 3:
+        return max(quantile(got, 0.9), 1000), f"measured, {len(got)} suites"
+    return UNIT_PEAK_MB, "default"
+
+
+def parallel_cap(others):
+    """(cap, reason) for this machine now: the CPU-side cap, lowered by RAM."""
+    cpu = cap_for(others)
+    avail = mem_available_mb()
+    reason = f"{others} other active run(s)"
+    if avail is None:
+        return cpu, reason + "; RAM not measured"
+    peak, source = unit_peak_mb()
+    cap = cap_for(others, avail, peak)
+    ram = f"RAM {avail} MB available - {RESERVE_MB} reserve, ~{peak} MB per unit ({source})"
+    if cap < cpu:
+        return cap, f"capped by RAM: {ram}; {reason} allow {cpu}"
+    return cap, f"{reason}; {ram} allows {max(1, (avail - RESERVE_MB) // peak)}"
+
+
+def plan(units, busy=False, minutes=None, max_par=MAX_PARALLEL, times=None, queue=None, heavy=HEAVY_SHARE,
+         synth=SYNTH):
     minutes = minutes or DEFAULT
     t = times or {u["id"]: minutes[u["size"]] for u in units}
     queue = queue or (lambda k: 1.0)
@@ -397,7 +529,10 @@ def plan(units, busy=False, minutes=None, max_par=MAX_PARALLEL, times=None, queu
         total += wt
         first = False
     order = [u for w in waves for u in w]
-    lane_total = sum(t[u["id"]] for u in order) - WARM * (len(order) - 1) + RUN
+    # A lane still ends in synthesis (merge the lane branch, verify, open the
+    # PR), which the lane total left out. A parallel wave already carries it as
+    # MERGE. The per-wave lane-or-parallel choice above is left as it was.
+    lane_total = sum(t[u["id"]] for u in order) - WARM * (len(order) - 1) + RUN + synth
     independent = len(levels) == 1 and len(waves) == 1
     parallel_total = (round(max(t.values()) * (1 + heavy * (queue(len(units)) - 1))) + MERGE + RUN) if independent else None
     kinds = {w["run"] for w in schedule}
@@ -566,13 +701,14 @@ def accuracy(project=None, rows=None):
     for size in DEFAULT:
         if size in by_size:
             lines.append(f"  {size}: n={len(by_size[size])}, median {statistics.median(by_size[size]):.2f}x")
-    runs = []
-    for r in read_jsonl("runs.jsonl") if rows is None else rows:
-        m = re.search(r"Mode: \w+ \(≈(\d+) min", r.get("mode") or "")
-        if m and r.get("min_wall") and (not project or r.get("project") == project):
-            runs.append(r["min_wall"] / int(m.group(1)))
-    if runs:
-        lines.append(f"  whole runs: {len(runs)} with an estimate, wall minutes/estimate median {statistics.median(runs):.2f}x")
+    by_mode = run_ratios(read_jsonl("runs.jsonl") if rows is None else rows, project)
+    if by_mode:
+        n_runs = sum(len(v) for v in by_mode.values())
+        lines.append(f"  whole runs: {n_runs} with workers and an estimate, active minutes (wall - user wait)/estimate:")
+        for mode in sorted(by_mode):
+            got = by_mode[mode]
+            p80 = f", p80 {order_stat(got):.2f}x" if len(got) >= MIN_RATIOS else f", p80 needs {MIN_RATIOS} runs"
+            lines.append(f"    {mode}: n={len(got)}, median {statistics.median(got):.2f}x{p80}")
     return lines
 
 
@@ -593,24 +729,37 @@ def main(args):
     units = data["units"]
     root = opt(args, "--root")
     project = opt(args, "--project") or (os.path.basename(os.path.normpath(root)) if root else None)
-    model = calibration(project)
+    rows = read_jsonl("runs.jsonl")
+    model = calibration(project, rows)
     others = other_active_runs()
-    max_par = int(opt(args, "--max-parallel", cap_for(others)))
+    if "--max-parallel" in args:
+        max_par, cap_why = int(opt(args, "--max-parallel")), "--max-parallel"
+    else:
+        max_par, cap_why = parallel_cap(others)
     for later, earlier, f in chain_same_file(units):
         print(f"Chained: unit {later} now depends on unit {earlier}: both edit {f}, so they run in turn.")
     t = {u["id"]: unit_minutes(u, model, root) for u in units}
-    t80 = {i: round(m * model["spread"]) for i, m in t.items()}
     queue = contention(others)
     heavy = heavy_share(units, t, suite_minutes(root))
     busy = "--busy" in args or others > 0
-    result = plan(units, busy=busy, max_par=max_par, times=t, queue=queue, heavy=heavy)
-    p80 = plan(units, busy=busy, max_par=max_par, times=t80, queue=queue, heavy=heavy)["estimate"]
-    print(f"parallel cap: {max_par} workers per wave ({others} other active run(s))")
+    synth = synthesis_minutes(rows)
+    result = plan(units, busy=busy, max_par=max_par, times=t, queue=queue, heavy=heavy, synth=synth)
+    # The p80 of a mode with enough recorded runs is their order statistic;
+    # until then the unit spread, run through the same schedule.
+    spread, spread_src = mode_spread(result["mode"], rows, model["spread"])
+    t80 = {i: round(m * spread) for i, m in t.items()}
+    if spread_src.startswith("order"):
+        p80 = round(result["estimate"] * spread)
+    else:
+        p80 = plan(units, busy=busy, max_par=max_par, times=t80, queue=queue, heavy=heavy, synth=synth)["estimate"]
+    print(f"parallel cap: {max_par} workers per wave ({cap_why})")
     for i, w in enumerate(result["waves"], 1):
         print(f"wave {i}: units {', '.join(map(str, w['units']))} — {w['run']}, ≈{w['minutes']} min")
     print("unit minutes: " + ", ".join(f"{s} {model['size'][s]} ({model['source'][s]})" for s in DEFAULT)
-          + f"; per item {model['per_item']:.1f} ({model['per_item_source']}); p80/p50 {model['spread']}")
-    print("estimates: " + ", ".join(f"unit {u['id']} ≈{t[u['id']]} min (budget {budget(t[u['id']])})" for u in units))
+          + f"; per item {model['per_item']:.1f} ({model['per_item_source']}); p80 factor {spread} ({spread_src})"
+          + f"; synthesis of a lane ≈{synth} min")
+    print("estimates: " + ", ".join(f"unit {u['id']} ≈{t[u['id']]} min (budget {budget(t[u['id']], t80[u['id']])})"
+                                    for u in units))
     path_ids, path_min = critical_path(units, t)
     print(f"Critical path: {' → '.join(map(str, path_ids))} ≈{path_min} min, the least the run can take.")
     risks = stragglers(units, t)
@@ -629,7 +778,8 @@ def main(args):
     data.update({"waves": result["waves"], "mode": result["mode"], "estimate": result["estimate"],
                  "estimate_p80": p80, "unit_minutes_used": model["size"], "advice": advice, "split": split,
                  "critical_path": {"units": path_ids, "minutes": path_min}, "stragglers": risks,
-                 "unit_estimates": {str(u["id"]): {"p50": t[u["id"]], "p80": t80[u["id"]], "budget": budget(t[u["id"]])}
+                 "unit_estimates": {str(u["id"]): {"p50": t[u["id"]], "p80": t80[u["id"]],
+                                                   "budget": budget(t[u["id"]], t80[u["id"]])}
                                     for u in units}})
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)

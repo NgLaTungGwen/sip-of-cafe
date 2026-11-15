@@ -590,6 +590,8 @@ th.num { text-align: right; }
           {label: "Slowest worker", value: minFmt(r.min_slowest_worker)},
           {label: "Synthesis", value: minFmt(r.min_synthesis)},
           {label: "Waiting for you", value: minFmt(r.min_user_wait)},
+          {label: "  on questions", value: r.min_ask != null ? minFmt(r.min_ask) + (r.questions ? " (" + r.questions + " asked)" : "") : "–"},
+          {label: "  before typed replies", value: r.min_typed != null ? minFmt(r.min_typed) : "–"},
           {label: "Everything else", value: minFmt(r.min_rest)},
           {label: "Workers", value: r.workers != null ? String(r.workers) : "–"},
           {label: "Cost", value: usdFmt(r.usd || 0)},

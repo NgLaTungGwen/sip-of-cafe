@@ -7,7 +7,8 @@
 #
 # <since> is HEAD when this synthesis started, or the head the last review
 # covered, to review only the fixes made after it. The unit branches merged
-# since then are left out. A resolution is what `git show --remerge-diff`
+# since then are left out, and so is what a merge of origin/<base> brought
+# in: only HEAD's first-parent line counts. A resolution is what `git show --remerge-diff`
 # shows: the merge as committed against git's own automatic merge, so a
 # clean merge adds nothing. The diff goes to <git dir>/bmad/synthesis.diff,
 # out of the working tree, which must stay clean. Prints one line:
@@ -23,11 +24,20 @@ out="$gd/bmad/synthesis.diff"
 : > "$out"
 c=0 m=0 units=()
 [ $# -gt 0 ] && units=(--not "$@")
-for rev in $(git -C "$wt" rev-list --reverse --no-merges "$since..HEAD" "${units[@]}"); do
+# Only HEAD's own line (--first-parent): a merge of origin/<base> brings in
+# the base's commits and merges, which are neither synthesis's work nor its
+# resolutions (db-pool-error-handler counted them with 0 resolved merges).
+# The base ref is left out too, in case that merge was a fast-forward; a
+# plain local base is not, since synthesis may be working on it.
+. "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
+base=$(base_ref "$wt") not_base=()
+# ^<ref>, ahead of the units' --not, which would flip it back.
+case $base in origin/*) not_base=("^$base") ;; esac
+for rev in $(git -C "$wt" rev-list --reverse --first-parent --no-merges "$since..HEAD" "${not_base[@]}" "${units[@]}"); do
   git -C "$wt" show --format='=== commit %h %s' "$rev" >> "$out"
   c=$((c + 1))
 done
-for rev in $(git -C "$wt" rev-list --reverse --merges "$since..HEAD"); do
+for rev in $(git -C "$wt" rev-list --reverse --first-parent --merges "$since..HEAD" "${not_base[@]}"); do
   d=$(git -C "$wt" show --remerge-diff --format= "$rev")
   [ -n "$d" ] || continue
   { git -C "$wt" log -1 --format='=== resolved merge %h %s' "$rev"; printf '%s\n' "$d"; } >> "$out"

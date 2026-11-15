@@ -126,7 +126,7 @@ if [ -n "$installed" ] && [ "$has_profile" = 1 ]; then
     [ -n "$cmd" ] || continue
     git diff --quiet "$installed" -- "$d/package-lock.json" "$d/bun.lock" "$d/bun.lockb" "$d/pnpm-lock.yaml" \
       "$d/yarn.lock" "$d/package.json" "$d/requirements.txt" "$d/pyproject.toml" "$d/go.sum" "$d/Cargo.lock" && continue
-    bash "$heavy" "cd '$wt/$d' && $cmd > /dev/null" || { need=1; deps="$deps $d-failed"; }
+    bash "$heavy" --priority "cd '$wt/$d' && $cmd > /dev/null" || { need=1; deps="$deps $d-failed"; }
     deps="$deps $d"
   done <<< "$(profile_get "$wt" install)"
   echo "DEPS ${deps:+reinstalled:}${deps:-unchanged}"
@@ -137,15 +137,15 @@ fi
 if [ -n "$installed" ]; then
   deps=""
   if ! git diff --quiet "$installed" -- package-lock.json; then
-    bash "$heavy" "npm ci --no-audit --no-fund --loglevel=error > /dev/null" || { need=1; deps="$deps npm-ci-failed"; }
+    bash "$heavy" --priority "npm ci --no-audit --no-fund --loglevel=error > /dev/null" || { need=1; deps="$deps npm-ci-failed"; }
     deps="$deps npm"
   fi
   if [ -d packages/contracts ] && { ! git diff --quiet "$installed" -- packages/contracts || [[ $deps == *npm* ]]; }; then
-    bash "$heavy" "npm --workspace @hive/contracts run build > /dev/null" || { need=1; deps="$deps contracts-build-failed"; }
+    bash "$heavy" --priority "npm --workspace @hive/contracts run build > /dev/null" || { need=1; deps="$deps contracts-build-failed"; }
     deps="$deps contracts-build"
   fi
   if [ -f apps/bun.lock ] && ! git diff --quiet "$installed" -- apps/bun.lock; then
-    bash "$heavy" "cd apps && bun install --frozen-lockfile > /dev/null" || { need=1; deps="$deps bun-failed"; }
+    bash "$heavy" --priority "cd apps && bun install --frozen-lockfile > /dev/null" || { need=1; deps="$deps bun-failed"; }
     deps="$deps bun"
   fi
   # Packages without a root lockfile (lib-packages.sh): each folder whose
@@ -154,7 +154,7 @@ if [ -n "$installed" ]; then
   for d in $(package_dirs .); do
     [ -d "$d/node_modules" ] || continue
     git diff --quiet "$installed" -- "$d/package-lock.json" "$d/bun.lock" "$d/bun.lockb" "$d/pnpm-lock.yaml" "$d/yarn.lock" && continue
-    bash "$heavy" "cd '$d' && $(install_cmd "$(pm_of "$d")") > /dev/null" || { need=1; deps="$deps $d-failed"; }
+    bash "$heavy" --priority "cd '$d' && $(install_cmd "$(pm_of "$d")") > /dev/null" || { need=1; deps="$deps $d-failed"; }
     deps="$deps $d"
   done
   echo "DEPS ${deps:+reinstalled:}${deps:-unchanged}"

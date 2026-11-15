@@ -240,7 +240,7 @@ class PlanEstimates(unittest.TestCase):
         self.assertIsNone(waves.long_run({"waves": [{"units": [1], "run": "lane"}]}, 900))
 
     def test_accuracy_says_whether_estimates_run_low(self):
-        rows = [{"project": "a", "mode": "Mode: waves (≈100 min; x)", "min_wall": 250,
+        rows = [{"project": "a", "mode": "Mode: waves (≈100 min; x)", "min_wall": 250, "workers": 1,
                  "unit_minutes": [{"id": 1, "size": "M", "min": 250, "est": 100},
                                   {"id": 2, "size": "S", "min": 120}]}]
         text = "\n".join(waves.accuracy(rows=rows))
@@ -535,9 +535,42 @@ class BgWait(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("job: still running", r.stdout)
 
+    def test_a_worker_waits_on_its_subagent_through_expect_and_done(self):
+        # A subagent that ends its turn to wait is handed back, so a worker
+        # blocks on the subagent's done file instead.
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        wt = tempfile.mkdtemp().replace("\\", "/")
+        subprocess.run(["git", "init", "-q", wt], check=True)
+        bg = os.path.join(SCRIPTS, "bg.sh")
+
+        def sh(*args):
+            return subprocess.run([bash, bg, *args], capture_output=True, text=True, timeout=60)
+
+        try:
+            self.assertEqual(sh("expect", wt, "review-1").returncode, 0)
+            # expect leaves the pid marker that keeps wait from answering
+            # "not started" once its 30 s start grace is over.
+            gd = subprocess.run(["git", "-C", wt, "rev-parse", "--absolute-git-dir"], capture_output=True,
+                                text=True).stdout.strip()
+            self.assertTrue(os.path.exists(os.path.join(gd, "bmad", "review-1.pid")))
+            r = sh("wait", wt, "review-1", "1")
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("review-1: still running", r.stdout)
+            self.assertEqual(sh("done", wt, "review-1").returncode, 0)
+            r = sh("wait", wt, "review-1")
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, "review-1: ok"), r.stderr)
+            sh("expect", wt, "impl-2")
+            sh("done", wt, "impl-2", "1")
+            r = sh("wait", wt, "impl-2")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("impl-2: failed (rc 1)", r.stdout)
+            self.assertNotIn("No such file", r.stderr)  # no log to tail for an agent
+        finally:
+            shutil.rmtree(wt, ignore_errors=True)
+
 
 class PrepareWorktree(unittest.TestCase):
-    def pinned(self, with_api, extra=(), with_apps=False, graph=False):
+    def pinned(self, with_api, extra=(), with_apps=False, graph=False, apps_pkg="", profile=None):
         bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
         root = tempfile.mkdtemp().replace("\\", "/")
         os.makedirs(os.path.join(root, "_bmad", "custom"))
@@ -547,7 +580,8 @@ class PrepareWorktree(unittest.TestCase):
             open(os.path.join(root, "api", "package.json"), "w").close()
         if with_apps:
             os.makedirs(os.path.join(root, "apps"))
-            open(os.path.join(root, "apps", "package.json"), "w").close()
+            with open(os.path.join(root, "apps", "package.json"), "w") as f:
+                f.write(apps_pkg)
             open(os.path.join(root, "apps", "bun.lock"), "w").close()
         open(os.path.join(root, "package.json"), "w").close()
         git = ["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t"]
@@ -555,6 +589,9 @@ class PrepareWorktree(unittest.TestCase):
         subprocess.run(git + ["add", "package.json"] + (["api"] if with_api else [])
                        + (["apps"] if with_apps else []), check=True)
         subprocess.run(git + ["commit", "-q", "-m", "init"], check=True)
+        if profile is not None:
+            with open(os.path.join(root, ".claude", "bmad-batch-project.json"), "w") as f:
+                json.dump(profile, f)
         if graph:
             os.makedirs(os.path.join(root, "graphify-out", "cache"))
             for f in ("graph.json", "GRAPH_REPORT.md", os.path.join("cache", "big.bin")):
@@ -590,6 +627,36 @@ class PrepareWorktree(unittest.TestCase):
         self.tomllib_ok(toml)
         wt, toml = self.pinned(with_api=True)
         self.assertNotIn(wt + "/apps", toml)
+
+    def test_handoff_runs_vitest_in_a_bun_apps_that_declares_it(self):
+        # ti-port: bun test is bun's own runner and ignored vitest.config
+        # (no jsdom, no coverage thresholds); 5 workers worked around it.
+        pkg = '{"scripts": {"test": "vitest run --coverage"}, "devDependencies": {"vitest": "^4"}}'
+        wt, toml = self.pinned(with_api=True, with_apps=True, apps_pkg=pkg)
+        self.assertIn("cd " + wt + "/apps && bunx vitest run <files>", toml)
+        self.assertIn("cd " + wt + "/apps && bun run test`", toml)
+        self.assertNotIn("bun test", toml)
+        self.tomllib_ok(toml)
+
+    def test_the_apps_suite_is_its_test_script_when_it_has_one(self):
+        # hive-factory's apps "test" is "bun test"; running the script keeps
+        # whatever it really is, as verify.sh does.
+        pkg = '{"scripts": {"test": "bun test --coverage"}}'
+        wt, toml = self.pinned(with_api=True, with_apps=True, apps_pkg=pkg)
+        self.assertIn("cd " + wt + "/apps && bun run test`", toml)
+        self.assertIn("cd " + wt + "/apps && bun run test <files>", toml)
+        self.assertNotIn("bun test <files>", toml)
+
+    def test_a_profile_with_commands_gets_no_apps_clause(self):
+        # The profile already names where and how apps/ is checked.
+        prof = {"base": "main", "install": [], "checks": [],
+                "suite": {"dir": "apps", "cmd": "bun run test"},
+                "targeted": {"dir": "apps", "test": "bunx vitest run <files>", "typecheck": "bun run typecheck"}}
+        wt, toml = self.pinned(with_api=True, with_apps=True, profile=prof)
+        self.assertNotIn("Files under apps/", toml)
+        self.assertNotIn(" apps-suite", toml)
+        self.assertIn("cd " + wt + "/apps && bunx vitest run <files>", toml)
+        self.tomllib_ok(toml)
 
     def test_every_subagent_gets_the_current_scripts_and_the_run_rules(self):
         # sonar-zero-5: coders used another project's or an old version's
@@ -645,6 +712,67 @@ class PrepareWorktree(unittest.TestCase):
         except ImportError:
             return
         tomllib.loads(toml)
+
+    def test_script_paths_survive_compaction_in_the_git_dir(self):
+        # ti-port: implementers lost the heavy.sh/bg.sh paths after compaction
+        # and ran stale copies, which the guard refused 6 times.
+        wt, toml = self.pinned(with_api=False)
+        gd = subprocess.run(["git", "-C", wt, "rev-parse", "--absolute-git-dir"],
+                            capture_output=True, text=True).stdout.strip()
+        env = open(os.path.join(gd, "bmad", "scripts.env"), encoding="utf-8").read()
+        import re
+        found = dict(re.findall(r"^(\w+)='(.*)'$", env, re.M))
+        self.assertEqual(set(found), {"HEAVY", "BG", "LCOV", "APP_CHECK", "SCRIPTS"})
+        for k, f in (("HEAVY", "heavy.sh"), ("BG", "bg.sh"), ("LCOV", "lcov-gaps.py")):
+            self.assertTrue(found[k].endswith("/" + f), found[k])
+            self.assertTrue(os.path.basename(found[k]) == f)
+        import tomllib
+        doc = tomllib.loads(toml)["workflow"]
+        lookup = f'cat "$(git -C {wt} rev-parse --absolute-git-dir)/bmad/scripts.env"'
+        self.assertIn(lookup, doc["implementation_handoff"])
+        self.assertIn(lookup, " ".join(doc["persistent_facts"]))
+        st = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True).stdout
+        self.assertNotIn("scripts.env", st)
+        # The agent files, both copies, say where to look.
+        for d in (os.path.join(SKILL_DIR, "agents"),
+                  os.path.join(os.path.dirname(os.path.dirname(SKILL_DIR)), "agents")):
+            for f in ("haiku-implementer.md", "bmad-batch-worker.md", "bmad-batch-synthesis.md"):
+                text = open(os.path.join(d, f), encoding="utf-8").read()
+                self.assertIn("rev-parse --absolute-git-dir)/bmad/scripts.env", text, f)
+
+    def test_review_layers_are_sized_by_risk(self):
+        # 2.2: the blind hunter's finding floor gave 854 findings, 60% low and
+        # 3 high. 2.3: small units get edge-case and verification-gap only, the
+        # intent auditor (56% rejected, no high) only L units or CHANGED
+        # interfaces, and the two cheaper layers run on Sonnet.
+        _, toml = self.pinned(with_api=False)
+        import tomllib
+        doc = tomllib.loads(toml)["workflow"]
+        layers = {l["id"]: l for l in doc["review_layers"]}
+        self.assertEqual(set(layers), {"blind-hunter", "intent-alignment"})  # the other two keep their defaults
+        bh, ia = layers["blind-hunter"], layers["intent-alignment"]
+        for l in (bh, ia):
+            self.assertTrue(l["name"] and "{diff_file}" in l["instruction"])
+            self.assertIn("model: sonnet", l["instruction"])
+            self.assertIn("do not spawn subagents of your own", l["instruction"])
+        self.assertNotIn("floor", bh["instruction"])
+        self.assertNotIn("do not stop with an empty list", bh["instruction"])
+        self.assertIn("return an empty list", bh["instruction"])
+        self.assertIn("Size: S", bh["when"])
+        self.assertIn("fewer than 400 changed lines", bh["when"])
+        for w in ("contract", "migration", "auth"):
+            self.assertIn(w, bh["when"])
+        self.assertIn("With no Size line, run it", bh["when"])
+        self.assertIn("Size: L", ia["when"])
+        self.assertIn("CHANGED", ia["when"])
+        self.assertIn("{verbatim_intent}", ia["instruction"])
+        facts = " ".join(doc["persistent_facts"])
+        self.assertIn("This replaces step-04's rule that all review subagents run at the same model", facts)
+        self.assertIn("Verification Gap Reviewer at the session model", facts)
+        # The size the gates read reaches the worker.
+        worker = open(os.path.join(SKILL_DIR, "references", "worker.md"), encoding="utf-8").read()
+        self.assertIn("Size: <size>", worker)
+        self.assertIn("--db-template <template>", worker)
 
     def test_build_is_not_banned_when_the_project_requires_it(self):
         # An unconditional "Never run npm run build" made workers skip a build
@@ -723,6 +851,156 @@ class Metrics(unittest.TestCase):
         own = [r for r in runs if r["installation_id"] != "other"][0]
         self.assertEqual(own["project"], "ClientSecretProject")  # own rows keep their names
 
+    def test_two_runs_of_one_session_stay_two_rows(self):
+        # The old dataset row merged the session's runs; the new rows replace it.
+        inst = self.m.installation_id()
+        self.m.write_jsonl(os.path.join(self.store, "metrics", "runs.jsonl"),
+                           [{"installation_id": inst, "session": "s1", "slug": "merged", "start": "a"}])
+        second = dict(self.ROW, slug="client-feature-y", start="2026-10-27T05:00:00Z", min_ask=4, min_typed=2,
+                      questions=3)
+        with open(os.path.join(self.store, "runs.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(second) + "\n")
+        self.m.import_bundles([])
+        runs = self.m.read_jsonl(os.path.join(self.store, "metrics", "runs.jsonl"))
+        self.assertEqual(sorted(r["slug"] for r in runs), ["client-feature-x", "client-feature-y"])
+        self.assertEqual([(r["min_ask"], r["min_typed"], r["questions"]) for r in runs if r["slug"].endswith("y")],
+                         [(4, 2, 3)])
+        # Exported, the two slugs stay apart but hashed.
+        slugs = [r["slug"] for r in self.m.bundle()["runs"]]
+        self.assertEqual(len(set(slugs)), 2)
+        self.assertTrue(all(s.startswith("r-") for s in slugs))
+
+
+class RunsPerSession(unittest.TestCase):
+    """One session can hold several runs. Rows were keyed by session alone and
+    the main span ran from the first invocation to the last synthesis result,
+    so a second run overwrote the first (ti-ux-perf-orgs, qa-postgres-b2s
+    lost) or merged with it (24847c3e held four runs in one row)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.session = os.path.join(self.dir, "s1.jsonl")
+        subs = os.path.join(self.dir, "s1", "subagents")
+        os.makedirs(subs)
+        runs = "D:/store/runs/proj"
+        perm = result(10, "ok", "2026-10-26T12:15:00Z", error=False)
+        perm["permissionDecision"] = {"decision": "accept", "source": "user_temporary"}
+        write_jsonl(self.session, [
+            {"type": "user", "timestamp": "2026-10-26T10:00:00Z",
+             "message": {"content": "<command-name>/bmad-batch-build</command-name>"}},
+            call(1, "Bash", {"command": 'python "D:/s/scripts/run_dir.py" alpha --root D:/repo'}, "2026-10-26T10:01:00Z"),
+            call(2, "Write", {"file_path": f"{runs}/alpha/alpha.md", "content": "x"}, "2026-10-26T10:02:00Z"),
+            call(3, "AskUserQuestion", {"questions": [{"question": "a"}, {"question": "b"}]}, "2026-10-26T10:03:00Z"),
+            result(3, "answered", "2026-10-26T10:13:00Z", error=False),
+            call(4, "Agent", {"description": "Unit 1 worker", "prompt": "Project root: D:/repo/.claude/worktrees/alpha-1"},
+                 "2026-10-26T10:14:00Z"),
+            result(4, "Async agent launched", "2026-10-26T10:14:00Z", error=False),
+            {"type": "user", "timestamp": "2026-10-26T10:20:00Z", "message": {"content": "go on"}},
+            call(5, "Agent", {"description": "Final synthesis", "prompt": "merge alpha"}, "2026-10-26T11:00:00Z"),
+            result(5, "RESULT: pr", "2026-10-26T11:30:00Z", error=False),
+            # A second batch, asked for in plain words: no new invocation.
+            {"type": "user", "timestamp": "2026-10-26T11:50:00Z", "message": {"content": "now the next batch"}},
+            call(6, "Bash", {"command": 'python "D:/s/scripts/run_dir.py" beta --root D:/repo'}, "2026-10-26T12:00:00Z"),
+            call(7, "Write", {"file_path": f"{runs}/beta/beta.md", "content": "x"}, "2026-10-26T12:01:00Z"),
+            call(8, "Agent", {"description": "Unit 1 worker", "prompt": "Project root: D:/repo/.claude/worktrees/beta-1"},
+                 "2026-10-26T12:02:00Z"),
+            result(8, "Async agent launched", "2026-10-26T12:02:00Z", error=False),
+            call(10, "Bash", {"command": "rm x"}, "2026-10-26T12:10:00Z"),
+            perm,
+            call(9, "Agent", {"description": "beta synthesis", "prompt": "merge"}, "2026-10-26T12:30:00Z"),
+            result(9, "RESULT: pr", "2026-10-26T13:00:00Z", error=False),
+        ])
+
+        def agent(name, meta, start, end, first="x"):
+            write_jsonl(os.path.join(subs, name + ".jsonl"), [
+                {"type": "user", "timestamp": start, "message": {"content": first}},
+                {"type": "user", "timestamp": end, "message": {"content": "done"}}])
+            json.dump(meta, open(os.path.join(subs, name + ".meta.json"), "w"))
+
+        agent("agent-wa", {"agentType": "bmad-batch-worker", "toolUseId": "t4"},
+              "2026-10-26T10:14:00Z", "2026-10-26T10:50:00Z")
+        agent("agent-sa", {"agentType": "bmad-batch-synthesis", "toolUseId": "t5"},
+              "2026-10-26T11:00:00Z", "2026-10-26T11:40:00Z")
+        agent("agent-wb", {"agentType": "bmad-batch-worker", "toolUseId": "t8"},
+              "2026-10-26T12:02:00Z", "2026-10-26T12:25:00Z")
+        with open(os.path.join(subs, "agent-wb.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(call(50, "Agent", {"description": "implement", "prompt": "x"},
+                                     "2026-10-26T12:05:00Z")) + "\n")
+        agent("agent-hb", {"agentType": "haiku-implementer", "toolUseId": "t50"},
+              "2026-10-26T12:05:00Z", "2026-10-26T12:20:00Z")
+        agent("agent-sb", {"agentType": "bmad-batch-synthesis", "toolUseId": "t9"},
+              "2026-10-26T12:30:00Z", "2026-10-26T13:00:00Z")
+        self.cost = load("cost_report_runs", "cost-report.py")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def row(self, slug):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.cost.report([self.session], slug)[0]
+
+    def test_each_run_gets_its_own_span_and_agents(self):
+        runs = self.cost.runs_in(self.cost.load(self.session))
+        self.assertEqual([r["slug"] for r in runs], ["alpha", "beta"])
+        self.assertEqual(runs[0]["start"], 0)  # the invocation, not the run file
+        a, b = self.row("alpha"), self.row("beta")
+        # alpha: 10:00 to its synthesis agent's end at 11:40.
+        self.assertEqual((a["min_wall"], a["workers"], a["min_synthesis"]), (100, 1, 40))
+        # beta starts at its run file (12:00) and ends at its own synthesis result.
+        self.assertEqual((b["min_wall"], b["workers"], b["min_synthesis"]), (60, 1, 30))
+        self.assertEqual(b["start"], "2026-10-26T12:00:00Z")
+        # The coder its worker launched goes with beta, not alpha.
+        self.assertIn("haiku", b["usd_by_role"])
+        self.assertNotIn("haiku", a["usd_by_role"])
+        self.assertEqual(a["session_runs"], ["alpha", "beta"])
+        # Without a slug, the whole session as before.
+        self.assertEqual(self.row(None)["workers"], 2)
+
+    def test_user_wait_splits_into_questions_and_typed(self):
+        a, b = self.row("alpha"), self.row("beta")
+        self.assertEqual((a["min_ask"], a["min_typed"], a["questions"], a["min_user_wait"]), (10, 6, 2, 16))
+        # A permission prompt the user answered counts as asking.
+        self.assertEqual((b["min_ask"], b["min_typed"], b["questions"]), (5, 0, 0))
+
+    def test_rows_are_kept_per_run(self):
+        store = os.path.join(self.dir, "store")
+        with mock.patch.dict(os.environ, {"BMAD_RUNS_DIR": store}):
+            for slug in ("alpha", "beta", "alpha"):
+                self.cost.save_row({"session": "s1", "slug": slug, "start": "x", "usd": 1})
+            # A row from before slugs were keyed stays as it is.
+            self.cost.save_row({"session": "s0", "start": "w"})
+            rows = self.cost.load_rows()
+        self.assertEqual(sorted((r["session"], r.get("slug")) for r in rows),
+                         [("s0", None), ("s1", "alpha"), ("s1", "beta")])
+        # An old row, written before session_runs, is recorded again once by
+        # --collect, but not by the quick sweep after --record.
+        self.assertFalse(self.cost.is_current([{"slug": "alpha", "session_mtime": 10}], 5))
+        self.assertTrue(self.cost.is_current([{"slug": "alpha", "session_mtime": 10}], 5, migrate=False))
+        new = [{"slug": "alpha", "session_mtime": 10, "session_runs": ["alpha", "beta"]},
+               {"slug": "beta", "session_mtime": 4, "session_runs": ["alpha", "beta"]}]
+        self.assertTrue(self.cost.is_current(new, 5))
+        self.assertFalse(self.cost.is_current(new[:1], 5))  # beta has no row yet
+
+    def test_each_run_gets_its_own_journal(self):
+        store = os.path.join(self.dir, "store")
+        with mock.patch.dict(os.environ, {"BMAD_RUNS_DIR": store}):
+            for slug, other in (("beta", "alpha"), ("alpha", "beta")):
+                row = self.row(slug)
+                self.cost.add_journal(row, self.session, slug, None)
+                j = self.cost.journal.build(self.session, slug, None, store,
+                                            *self.cost.RUN_PARTS[(self.session, slug)])
+                stamps = [t["start"] for t in j["timeline"]]
+                self.assertTrue(os.path.exists(os.path.join(store, "journals", f"s1-{slug}.md")))
+                # Only this run's agents: beta's from 12:00, alpha's before.
+                self.assertEqual(len(stamps), 2, stamps)  # its worker and its synthesis
+                for s in stamps + [j["start"].replace("T", " ")]:
+                    self.assertEqual(s >= "2026-10-26 12", slug == "beta", (slug, s))
+
+    def test_collect_finds_every_run(self):
+        invoked, slugs, _, _ = self.cost.session_info(self.session)
+        self.assertTrue(invoked)
+        self.assertEqual(slugs, ["alpha", "beta"])
+
 
 class Setup(unittest.TestCase):
     """setup.sh resolves a project without asking: ignore rule, base branch,
@@ -773,6 +1051,34 @@ class Setup(unittest.TestCase):
         self.assertIn("PR gh", r.stdout)
         shutil.rmtree(root, ignore_errors=True)
         shutil.rmtree(stub, ignore_errors=True)
+
+    def test_fork_mode_warning(self):
+        # Fork mode starts every subagent in the background, so a worker that
+        # ends its turn to wait is handed back (sonar-zero-5: 14 resumes).
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        root = tempfile.mkdtemp().replace("\\", "/")
+        os.makedirs(os.path.join(root, "_bmad", "scripts"))
+        open(os.path.join(root, "_bmad", "scripts", "render_skill.py"), "w").close()
+        os.makedirs(os.path.join(root, ".claude", "skills", "bmad-build-auto"))
+        open(os.path.join(root, ".claude", "skills", "bmad-build-auto", "SKILL.md"), "w").close()
+        subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+        try:
+            for value, want in ((None, "FORK on (CLAUDE_CODE_FORK_SUBAGENT is unset)"),
+                                ("1", "FORK on (CLAUDE_CODE_FORK_SUBAGENT is 1)"), ("0", "FORK off")):
+                env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_FORK_SUBAGENT"}
+                if value is not None:
+                    env["CLAUDE_CODE_FORK_SUBAGENT"] = value
+                r = subprocess.run([bash, os.path.join(SCRIPTS, "setup.sh"), root], capture_output=True,
+                                   text=True, env=env)
+                self.assertIn(want, r.stdout, r.stdout + r.stderr)
+                self.assertIn("SETUP ok", r.stdout)  # a warning, never a block
+                fork = [ln for ln in r.stdout.splitlines() if ln.startswith("FORK")][0]
+                if value != "0":
+                    self.assertIn('"CLAUDE_CODE_FORK_SUBAGENT": "0"', fork)
+                # bg.sh runs on background Bash calls, which this setting turns off.
+                self.assertNotIn("DISABLE_BACKGROUND_TASKS", fork)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_lapsed_az_sign_in_turns_ado_tickets_off(self):
         # `az account show` passes on a cached profile after the sign-in lapsed;
@@ -926,12 +1232,18 @@ class Setup(unittest.TestCase):
                                   ("repos/acme/app/issues/5/sub_issues", {"sub_issue_id": 1012}),
                                   ("repos/acme/app/issues/10/sub_issues", {"sub_issue_id": 1013})])
 
-    def link_case(self, merged, base="main", closing=None):
-        """Runs link() on a two-unit plan; returns (stdout, the body written, the calls, exit code)."""
+    def link_case(self, merged, base="main", closing=None, open_subs="4\n5"):
+        """Runs link() on a two-unit plan; returns (stdout, the body written, the calls, exit code).
+        `open_subs` is what the story's open sub-issues query prints, or an
+        exception it raises."""
         tickets = load("gh_tickets", "gh_tickets.py")
         written = []
 
         def replies(args, stdin):
+            if any(a.endswith("/issues/3/sub_issues") for a in args):
+                if isinstance(open_subs, Exception):
+                    raise open_subs
+                return open_subs
             if args[:2] == ("pr", "view") and "body,baseRefName" in args:
                 return json.dumps({"body": "Summary\n\n🤖 Generated with x", "baseRefName": base})
             if args[:2] == ("pr", "edit"):
@@ -973,6 +1285,24 @@ class Setup(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("close-on-complete: off (the PR targets develop", out)
         self.assertFalse(any("closingIssuesReferences" in a for a, _ in calls))
+
+    def test_gh_story_with_other_open_sub_issues_is_not_closed(self):
+        # db-pool-error-handler: a reused story with open tasks outside the run
+        # was closed by the run's PR (the ADO side; GitHub had the same bug).
+        out, body, _, code = self.link_case(["1", "2"], closing=["4", "5"], open_subs="4\n5\n7")
+        self.assertEqual(code, 0)
+        self.assertIn("Work items: Refs #3, Closes #4, Closes #5\n", body)
+        self.assertIn("story #3 not closed: open sub-issues outside this PR (#7)", out)
+        # The query failing never risks closing the story.
+        out, body, _, code = self.link_case(["1", "2"], closing=["4", "5"],
+                                            open_subs=RuntimeError("gh api failed"))
+        self.assertEqual(code, 0)
+        self.assertIn("Work items: Refs #3, Closes #4, Closes #5\n", body)
+        self.assertIn("story #3 not closed", out)
+        # Only the run's own sub-issues open: the story closes with them.
+        _, body, calls, _ = self.link_case(["1", "2"], closing=["3", "4", "5"])
+        self.assertIn("Work items: Closes #3, Closes #4, Closes #5\n", body)
+        self.assertTrue(any("repos/acme/app/issues/3/sub_issues" in a for a, _ in calls))
 
     def test_gh_link_missing_reference(self):
         _, _, _, code = self.link_case(["1", "2"], closing=["3", "4"])
@@ -1496,6 +1826,43 @@ class SynthesisDiff(unittest.TestCase):
         status = subprocess.run(["git", "-C", root, "status", "--porcelain"], capture_output=True, text=True).stdout
         self.assertEqual(status, "")
 
+    def test_a_merge_of_the_base_adds_nothing(self):
+        # db-pool-error-handler: merging origin/<base> counted the base's own
+        # commits as synthesis commits, with 0 resolved merges.
+        root, git = git_repo({"a.txt": "one\n"})
+
+        def commit(path, body, msg):
+            with open(os.path.join(root, path), "w", newline="\n") as f:
+                f.write(body)
+            subprocess.run(git + ["add", path], check=True)
+            subprocess.run(git + ["commit", "-q", "-m", msg], check=True)
+        subprocess.run(git + ["checkout", "-q", "-b", "u1", "main"], check=True)
+        commit("u1.txt", "unit file\n", "feat: u1")
+        # The base moves on meanwhile, with a commit and a merge of its own.
+        subprocess.run(git + ["checkout", "-q", "-b", "up", "main"], check=True)
+        commit("base.txt", "base work\n", "feat: base work")
+        subprocess.run(git + ["checkout", "-q", "-b", "side", "up"], check=True)
+        commit("side.txt", "side work\n", "feat: side work")
+        subprocess.run(git + ["checkout", "-q", "up"], check=True)
+        subprocess.run(git + ["merge", "-q", "--no-ff", "side", "-m", "Merge PR side"], check=True)
+        subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "up"], check=True)
+        subprocess.run(git + ["checkout", "-q", "main"], check=True)
+        start = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+        def run():
+            return subprocess.run([bash_path(), os.path.join(SCRIPTS, "synthesis-diff.sh"), root, start, "u1"],
+                                  capture_output=True, text=True).stdout.strip()
+        subprocess.run(git + ["merge", "-q", "--no-ff", "u1", "-m", "merge: u1"], check=True)
+        subprocess.run(git + ["merge", "-q", "--no-ff", "origin/main", "-m", "merge: origin/main"], check=True)
+        self.assertEqual(run(), "SYNTH-DIFF none")
+        commit("c.txt", "repair\n", "fix(merge): repair")
+        self.assertIn("1 commits, 0 resolved merges", run())
+        with open(os.path.join(root, ".git", "bmad", "synthesis.diff"), encoding="utf-8") as f:
+            diff = f.read()
+        self.assertIn("fix(merge): repair", diff)
+        self.assertNotIn("base work", diff)
+        self.assertNotIn("side work", diff)
+
 
 class ReviewFindings(unittest.TestCase):
     def test_only_fixed_findings_are_listed(self):
@@ -1647,6 +2014,9 @@ class Guard(unittest.TestCase):
         self.assertIsNotNone(why)
         self.assertIn("0.12.12", why)
         self.assertIn(SCRIPTS.replace("\\", "/") + "/heavy.sh", why)
+        # ti-port: after a compaction the refused agent did not know where the
+        # current paths were; the refusal names the file that keeps them.
+        self.assertIn("rev-parse --absolute-git-dir)/bmad/scripts.env", why)
         self.assertIsNotNone(self.bash(f"bash /x/.claude/backups/bmad-batch-build-20261025-v070/skill/scripts/bg.sh wait . v"))
         self.assertIsNone(self.bash(f"bash {same}/scripts/heavy.sh 'npm test'"))
         self.assertIsNone(self.bash(f"bash '{SCRIPTS}/heavy.sh' 'npm test'"))
@@ -1670,10 +2040,15 @@ class Guard(unittest.TestCase):
         other = tempfile.mkdtemp(dir=os.path.dirname(SCRIPTS))
         self.addCleanup(shutil.rmtree, other, True)
         # Not under /tmp either: the guard allows /tmp/ (Git Bash's temp folder),
-        # which on Linux is where this test's repository itself sits.
-        outside = tempfile.mkdtemp(dir=os.path.dirname(SCRIPTS)).replace("\\", "/")
-        self.addCleanup(shutil.rmtree, outside, True)
-        patch = mock.patch.dict(os.environ, {"TEMP": other, "TMP": other, "TMPDIR": other})
+        # which on Linux is where this test's repository itself sits. Nor next
+        # to the skill's scripts: run from a worktree (.claude/worktrees/<x>/)
+        # or from the enhancer's store worktree, that is an allowed place. The
+        # guard reads only the path, so it need not exist.
+        drive = os.path.splitdrive(SCRIPTS)[0]
+        outside = f"{drive}/bmad-guard-outside-{os.getpid()}"
+        # Its own run store too, so the user's store never decides the answer.
+        patch = mock.patch.dict(os.environ, {"TEMP": other, "TMP": other, "TMPDIR": other,
+                                             "BMAD_RUNS_DIR": os.path.join(other, "store")})
         patch.start()
         self.addCleanup(patch.stop)
         api = f"{self.wt}/api"
@@ -1981,6 +2356,25 @@ class TicketsUnitPr(unittest.TestCase):
         self.assertEqual(ado.link_targets(self.PLAN, {"1"}), ([10], [11], False))
         self.assertEqual(ado.link_targets(self.PLAN, {"1", "2"}), ([10], [11, 12], True))
 
+    def test_ado_story_with_other_open_tasks_is_not_closed(self):
+        """A reused story with open tasks outside the run stays unlinked when
+        close-on-complete is on (db-pool-error-handler, qa-postgres-b2s)."""
+        ado = load("ado_tickets", "ado_tickets.py")
+        skipped = []
+        self.assertEqual(ado.link_targets(self.PLAN, {"1", "2"}, children=lambda s: {11, 12, 15},
+                                          skipped=skipped), ([], [11, 12], True))
+        self.assertEqual(skipped, [(10, [15])])
+        self.assertEqual(ado.link_targets(self.PLAN, {"1", "2"}, children=lambda s: {11, 12}),
+                         ([10], [11, 12], True))
+        self.assertEqual(ado.link_targets(self.PLAN, {"1"}, children=lambda s: {11, 12, 15}),
+                         ([10], [11], False))
+
+        def fails(_):
+            raise RuntimeError("az boards query failed")
+        skipped = []
+        self.assertEqual(ado.link_targets(self.PLAN, {"1", "2"}, children=fails, skipped=skipped)[0], [])
+        self.assertEqual(skipped[0][0], 10)
+
     def test_github(self):
         gh = load("gh_tickets", "gh_tickets.py")
         self.assertEqual(gh.work_items_line(self.PLAN, {"2"}, unit_pr=True),
@@ -2048,14 +2442,14 @@ class Affected(unittest.TestCase):
         out = affected.tests(root, "abc123", ["api/src/a.ts", "apps/src/b.ts", "README.md"])
         cmds = [(d, c) for _, d, c, _ in out]
         self.assertEqual(cmds, [("api", "npx vitest run --changed abc123 --passWithNoTests --reporter=dot"),
-                                ("apps", "bun test ./src/b.test.ts ./src/__tests__/b.spec.tsx")])
+                                ("apps", "bunx vitest run ./src/b.test.ts ./src/__tests__/b.spec.tsx")])
         # A source with no test beside it, and docs only: nothing to run.
         self.assertEqual(affected.tests(root, "abc123", ["apps/src/c.ts"])[0][0], "NONE")
         self.assertEqual(affected.tests(root, "abc123", ["docs/x.md"])[0][0], "NONE")
 
     def test_a_force_full_path_or_an_unknown_runner_runs_the_full_suite(self):
         root = self.workspaces()
-        full = [("RUN", ".", "npm test"), ("RUN", "apps", "bun test")]
+        full = [("RUN", ".", "npm test"), ("RUN", "apps", "bun run test")]
         out = affected.tests(root, "abc123", ["api/src/a.ts", "packages/contracts/index.ts"])
         self.assertEqual([o[:3] for o in out], full)
         self.assertIn("packages/contracts/index.ts", out[0][3])
@@ -2079,6 +2473,129 @@ class Affected(unittest.TestCase):
         ok, msg = affected.db(root)
         self.assertFalse(ok)
         self.assertIn("DOWN", msg)
+
+
+
+def lane_run(ratio, est=100, wait=0, workers=1, mode="lane"):
+    """A recorded run whose active minutes are `ratio` times its estimate."""
+    return {"project": "p", "mode": f"Mode: {mode} (≈{est} min; x)", "min_wall": round(ratio * est) + max(wait, 0),
+            "min_user_wait": wait, "workers": workers}
+
+
+class Scheduling(unittest.TestCase):
+    """The RAM cap, the lane's synthesis term and the p80 from recorded runs."""
+
+    def test_the_cap_also_fits_the_ram(self):
+        self.assertEqual(waves.cap_for(0, 99999, 3000), 4)          # RAM allows more than the CPU cap
+        self.assertEqual(waves.cap_for(0, 9000, 3000), 2)           # (9000 - 2048) / 3000
+        self.assertEqual(waves.cap_for(0, 1000, 3000), 1)           # never 0
+        self.assertEqual(waves.cap_for(2, 99999, 3000), 2)          # other runs still count
+        with mock.patch.dict(os.environ, {"BMAD_MEM_AVAILABLE_MB": "9000", "BMAD_UNIT_PEAK_MB": "3000"}):
+            cap, why = waves.parallel_cap(0)
+        self.assertEqual(cap, 2)
+        self.assertIn("capped by RAM", why)
+        self.assertIn("9000 MB", why)
+
+    def test_the_unit_peak_is_a_default_until_suites_were_measured(self):
+        d = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"BMAD_HEAVY_DIR": d}):
+            os.environ.pop("BMAD_UNIT_PEAK_MB", None)
+            self.assertEqual(waves.unit_peak_mb(), (waves.UNIT_PEAK_MB, "default"))
+            with open(os.path.join(d, "peaks.test"), "w") as f:
+                f.write("4000\n5000\n6000\n")
+            self.assertEqual(waves.unit_peak_mb()[0], 6000)
+
+    def test_the_plan_line_says_why_the_cap_is_what_it_is(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "plan.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"units": [unit(i) for i in range(1, 5)]}, f)
+        env = dict(os.environ, BMAD_RUNS_DIR=d, BMAD_MEM_AVAILABLE_MB="8200", BMAD_UNIT_PEAK_MB="3000")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "plan-waves.py"), path, "--root", d],
+                           capture_output=True, text=True, encoding="utf-8", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("parallel cap: 2 workers per wave (capped by RAM", r.stdout)
+
+    def test_a_lane_total_includes_synthesis(self):
+        units = [unit(1, "S"), unit(2, "S")]
+        with_synth, without = waves.plan(units), waves.plan(units, synth=0)
+        self.assertEqual(with_synth["lane"] - without["lane"], waves.SYNTH)
+        self.assertEqual(with_synth["mode"], "lane")
+        self.assertEqual(with_synth["estimate"], with_synth["lane"])
+        # A parallel wave's MERGE already covers it: the parallel estimate is unchanged.
+        three = [unit(1), unit(2), unit(3)]
+        self.assertEqual(waves.plan(three)["parallel"], waves.plan(three, synth=0)["parallel"])
+
+    def test_synthesis_minutes_come_from_recorded_runs(self):
+        self.assertEqual(waves.synthesis_minutes([]), waves.SYNTH)
+        rows = [{"workers": 2, "min_synthesis": m} for m in (20, 40, 90)] + [{"workers": 0, "min_synthesis": 900}]
+        self.assertEqual(waves.synthesis_minutes(rows), 40)
+
+    def test_the_p80_is_the_order_statistic(self):
+        self.assertEqual(waves.order_stat(list(range(1, 11))), 9)    # ceil(11 x 0.8) = 9th of 10
+        self.assertEqual(waves.order_stat([1, 2, 3, 4, 5]), 5)       # small n: the largest
+        self.assertEqual(waves.order_stat(list(range(1, 21))), 17)   # ceil(21 x 0.8) = 17th
+
+    def test_a_mode_needs_five_runs_before_its_own_p80(self):
+        four = [lane_run(r) for r in (1.0, 1.5, 2.0, 4.0)]
+        self.assertEqual(waves.mode_spread("lane", four, 1.6)[0], 1.6)
+        five = four + [lane_run(1.2)]
+        self.assertEqual(waves.mode_spread("lane", five, 1.6)[0], 4.0)
+        self.assertEqual(waves.mode_spread("waves", five, 1.6)[0], 1.6)  # per mode
+        self.assertEqual(waves.mode_spread("lane", five + [lane_run(9.0)] * 3, 1.6)[0], waves.SPREAD_CAP)
+
+    def test_run_ratios_use_active_minutes_of_runs_with_workers(self):
+        rows = [lane_run(2.0, wait=300), lane_run(9.0, workers=0), lane_run(1.0, wait=-36)]
+        self.assertEqual(waves.run_ratios(rows), {"lane": [2.0, 1.0]})
+
+    def test_accuracy_reports_whole_runs_per_mode(self):
+        rows = [{"project": "p", "unit_minutes": [{"id": 1, "size": "M", "min": 100}]}] + \
+               [lane_run(r) for r in (1, 2, 3, 4, 5)] + [lane_run(0.5, mode="waves"), lane_run(7, workers=0)]
+        text = "\n".join(waves.accuracy(rows=rows))
+        self.assertIn("whole runs: 6 with workers", text)
+        self.assertIn("lane: n=5, median 3.00x, p80 5.00x", text)
+        self.assertIn("waves: n=1, median 0.50x, p80 needs 5 runs", text)
+
+    def test_the_plan_uses_the_mode_p80_and_budgets_cover_it(self):
+        d = tempfile.mkdtemp()
+        write_jsonl(os.path.join(d, "runs.jsonl"), [lane_run(r) for r in (1.0, 1.2, 1.5, 2.0, 3.0)])
+        path = os.path.join(d, "plan.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"units": [unit(1), unit(2, deps=[1])]}, f)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "plan-waves.py"), path, "--root", d],
+                           capture_output=True, text=True, encoding="utf-8", env=dict(os.environ, BMAD_RUNS_DIR=d))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        saved = json.load(open(path, encoding="utf-8"))
+        self.assertEqual(saved["mode"], "lane")
+        self.assertEqual(saved["estimate_p80"], round(saved["estimate"] * 3.0))
+        self.assertIn("order statistic of 5 lane run(s)", r.stdout)
+        for e in saved["unit_estimates"].values():
+            self.assertEqual(e["p80"], round(e["p50"] * 3.0))
+            self.assertGreaterEqual(e["budget"], e["p80"] + 30)
+
+    def test_a_budget_stays_past_the_p80(self):
+        self.assertEqual(waves.budget(100), 200)
+        self.assertEqual(waves.budget(100, 300), 330)
+        self.assertEqual(waves.budget(100, 120), 200)
+
+    def test_straggler_takes_a_budget_under_the_p80_as_the_p80(self):
+        old = {"unit_estimates": {"1": {"p50": 100, "p80": 300, "budget": 200}}}
+        self.assertEqual(straggler.check(old, {1: 250}), [])   # past the old budget, not past the p80
+        self.assertEqual([lvl for lvl, _ in straggler.check(old, {1: 310})], ["straggler"])
+
+    def test_cost_report_finds_the_plan_under_another_project(self):
+        # --collect passed the session's folder (the home folder), not the
+        # checkout the run was planned in, so the unit estimates were lost.
+        cost = load("cost_report_any", "cost-report.py")
+        run_dir = load("run_dir_any", "run_dir.py")
+        store = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"BMAD_RUNS_DIR": store}):
+            folder = run_dir.run_dir(os.path.join(tempfile.mkdtemp(), "hive"), "s2", create=True)
+            with open(os.path.join(folder, "s2-plan.json"), "w", encoding="utf-8") as f:
+                json.dump({"units": [unit(1)], "unit_estimates": {"1": {"p50": 104, "p80": 176, "budget": 208}}}, f)
+            got = cost.unit_minutes({"worker_spans": [{"unit": 1, "start": "a", "min": 45}]}, "s2",
+                                    os.path.join(tempfile.mkdtemp(), "Quy"))
+        self.assertEqual(got, [{"id": 1, "size": "M", "min": 45, "est": 104}])
 
 
 if __name__ == "__main__":

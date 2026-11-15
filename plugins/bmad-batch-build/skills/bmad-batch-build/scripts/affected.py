@@ -24,7 +24,7 @@ Vitest workspaces get `vitest run --changed <rev>`, jest ones
 `jest --changedSince=<rev>`, bun ones the changed test files and the test
 files beside the changed sources. A FORCE_FULL path, or a changed workspace
 with no runner this knows, runs the full suite (the profile's, or `npm test`
-at the root) and every bun workspace's `bun test`.
+at the root) and every bun workspace's own suite (bun_cmds).
 
 `db` exits 1 with a message when the project has a database (the profile's
 "database", or a postgres DATABASE_URL in .env) and its port does not answer.
@@ -197,9 +197,25 @@ def runner_of(wt, d):
         return "vitest"
     if "jest" in deps:
         return "jest"
-    if prof_mod.pm_of(os.path.join(wt, d)) == "bun":
-        return "bun"
     return None
+
+
+def bun_cmds(wt, d):
+    """(command for some test files, the workspace's full suite) in a bun
+    workspace, as prepare-worktree.sh and verify.sh choose them: bunx vitest
+    when it declares vitest (bun test is bun's own runner and ignores
+    vitest.config), its test script when it has one, bare bun test otherwise."""
+    try:
+        with open(os.path.join(wt, d, "package.json"), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+    has_test = bool((read_json(os.path.join(wt, d, "package.json")).get("scripts") or {}).get("test"))
+    if '"vitest"' in text:
+        return "bunx vitest run", "bun run test"
+    if has_test:
+        return "bun run test", "bun run test"
+    return "bun test", "bun test"
 
 
 def is_test(path):
@@ -230,10 +246,11 @@ def full_suite(wt):
     p = prof_mod.load(wt)
     suite = (p or {}).get("suite") if p is not None else {"dir": ".", "cmd": "npm test"}
     out = [(suite.get("dir") or ".", suite["cmd"])] if suite and suite.get("cmd") else []
-    for d in sorted(os.listdir(wt)) if os.path.isdir(wt) else []:
+    # A profile's suite is the whole suite: it already says where apps/ is tested.
+    for d in sorted(os.listdir(wt)) if os.path.isdir(wt) and p is None else []:
         if d not in prof_mod.SKIP and not d.startswith(".") and os.path.exists(os.path.join(wt, d, "package.json")) \
                 and prof_mod.pm_of(os.path.join(wt, d)) == "bun" and all(x[0] != d for x in out):
-            out.append((d, "bun test"))
+            out.append((d, bun_cmds(wt, d)[1]))
     return out
 
 
@@ -275,7 +292,7 @@ def tests(wt, base, files):
                     if os.path.exists(os.path.join(wt, t)) and t not in picked:
                         picked.append(t)
             if picked:
-                out.append(("RUN", ws, "bun test " + " ".join("./" + rel(t) for t in picked),
+                out.append(("RUN", ws, bun_cmds(wt, ws)[0] + " " + " ".join("./" + rel(t) for t in picked),
                             f"{ws}/: the changed test files and the ones beside {summary(fs)}"))
     return out or [("NONE", f"no test file is affected by {summary(code)}")]
 

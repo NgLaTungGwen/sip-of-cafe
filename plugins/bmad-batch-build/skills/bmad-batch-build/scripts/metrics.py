@@ -14,13 +14,13 @@ export writes one bundle (schema SCHEMA) of this machine's runs and heavy
 commands, keyed by a random installation id (<store>/installation-id), never
 the host name. It keeps the numbers: cost, time, tokens, workers, review and
 journal counts, skill version, CPUs and RAM. It drops paths, commands, branch
-names and error text, and hashes the project name. --include-text adds back
+names and error text, and hashes the project name and the run slug. --include-text adds back
 the agents' skill-issue reports and journal details, which are what the
 enhancer learns from; only the person exporting decides that. Nothing is sent
 anywhere: the person shares the file.
 
 import merges bundles into <store>/metrics/runs.jsonl and events.jsonl, one
-row per (installation, session) and per heavy command, newest bundle winning.
+row per (installation, session, slug) and per heavy command, newest bundle winning.
 It also refreshes this machine's own rows there, with project names and text,
 so a dashboard reads one dataset in one format. Nothing runs import on its
 own: run it (after cost-report.py --collect) before reading the dataset, and
@@ -39,7 +39,7 @@ SCHEMA = 1
 
 # Numeric and categorical fields copied from a runs.jsonl row as they are.
 KEEP = ["start", "usd", "usd_by_role", "usd_idle_max", "mtok_in", "ktok_out", "mtok_w1h_subagents",
-        "min_wall", "min_user_wait", "min_slowest_worker", "min_synthesis", "min_rest", "workers",
+        "min_wall", "min_user_wait", "min_ask", "min_typed", "questions", "min_slowest_worker", "min_synthesis", "min_rest", "workers",
         "units_reviewed", "units_haiku", "first_review_high_medium", "units_with_high",
         "fix_merge_commits", "max_turns", "by_role", "turn_budget_hit", "system_map",
         "skill_version", "version_exact"]
@@ -119,8 +119,10 @@ def run_row(r, inst, text, clear, names=()):
         "pr_opened": bool(re.match(r"https?://", (j.get("outcome") or {}).get("pr") or "")),
         "skill_issue_count": len(r.get("skill_issues") or []),
     })
-    if clear:
-        out["slug"] = r.get("slug")
+    # The slug tells runs of one session apart (the row key); other machines
+    # see it hashed, like the project.
+    out["slug"] = r.get("slug") if clear or not r.get("slug") else \
+        "r-" + hashlib.sha256(f"{inst}:{r.get('slug')}".encode()).hexdigest()[:10]
     if text:
         out["skill_issues"] = [scrub(s, names) for s in r.get("skill_issues") or []]
         out["journal_items"] = [{"bucket": i.get("bucket"), "who": i.get("who"), "count": i.get("count"),
@@ -198,8 +200,15 @@ def import_bundles(paths):
             print(f"import: skipped {p}: schema {b.get('schema')}, this script reads {SCHEMA}")
             continue
         bundles.append(b)
+    # A run is (installation, session, slug): one session can hold several runs.
+    # Each bundle replaces every row of the sessions it carries, so an older
+    # row that merged several runs of one session under one key goes. A row
+    # without a slug keys as before.
     for b in bundles:
-        runs = merge(runs, b["runs"], lambda r: (r["installation_id"], r["session"]))
+        carried = {(r["installation_id"], r.get("session")) for r in b["runs"]}
+        runs = [r for r in runs if (r["installation_id"], r.get("session")) not in carried]
+    for b in bundles:
+        runs = merge(runs, b["runs"], lambda r: (r["installation_id"], r.get("session"), r.get("slug")))
         events = merge(events, b["events"], lambda e: (e["installation_id"], e["end"], e["tool"], e["sec"]))
     write_jsonl(runs_path, runs)
     write_jsonl(events_path, events)

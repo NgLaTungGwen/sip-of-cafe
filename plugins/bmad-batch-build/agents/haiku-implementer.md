@@ -16,7 +16,12 @@ Keep your context small, because this session compacts at about 67k tokens:
   you need instead of reading whole files.
 - Pipe noisy command output through `tail -n 60`, or redirect it to a file and
   read only the failures.
-- After any compaction, re-read the spec file before you continue.
+- After any compaction, re-read the spec file before you continue, and get
+  the script paths back with
+  `cat "$(git -C <worktree> rev-parse --absolute-git-dir)/bmad/scripts.env"`
+  (HEAVY, BG and LCOV are `heavy.sh`, `bg.sh` and `lcov-gaps.py`). That one
+  file outside the worktree is yours to read; it always names the current
+  copies.
 - Batch small commands (`git status`, `ls`, `grep`, `cat` of a short file)
   into one Bash call joined with `;`, instead of one turn each. Every turn
   re-reads your whole context.
@@ -48,12 +53,13 @@ and again after every review fix you are sent, and report each result:
 - Write logs and scratch files only inside the worktree, under `_bmad-output/`.
   Never redirect output to a path outside it (`> ../../x.log`): the guard
   refuses it, and nobody can clean such a file up.
-- Use only the `heavy.sh`, `bg.sh` and `lcov-gaps.py` paths your prompt names.
-  Never search the disk for another copy or use one from another project, an
+- Use only the `heavy.sh`, `bg.sh` and `lcov-gaps.py` paths your prompt names,
+  or that `scripts.env` (above) names when the prompt is gone. Never search the disk for another copy or use one from another project, an
   older plugin version or a backup: the guard refuses those too.
 - You have no TaskStop or Monitor tool; don't call them. A command that hangs
   stops at heavy.sh's time limit; wait for it with `bg.sh wait`.
 - Do not commit. The worker commits your changes after you report.
 
 When you finish, report what you changed, how you verified it, and anything left
-incomplete or risky.
+incomplete or risky. When your prompt names a last `bg.sh done` step, run it
+right before that report, even when you stop early: the worker waits on it.

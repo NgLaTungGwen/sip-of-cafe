@@ -28,10 +28,15 @@ git -C "$root" worktree remove "$wt" 2>/dev/null || {
   rm -rf "$wt"
   git -C "$root" worktree prune
 }
-# The private test database prepare-worktree.sh routed this worktree to.
-db="hive_pb_$(printf '%s' "$name" | tr -c 'a-zA-Z0-9\n' '_' | tr 'A-Z' 'a-z')_test"
-if grep -q '^DATABASE_URL=postgres' "$root/.env" 2>/dev/null; then
-  docker exec hive-postgres psql -U postgres -qc "drop database if exists $db" || echo "could not drop $db" >&2
+# The private test database prepare-worktree.sh cloned or routed this worktree
+# to (lib-db.sh). Nothing to drop for a project without one.
+here=$(dirname "${BASH_SOURCE[0]}")
+. "$here/lib-profile.sh"
+. "$here/lib-db.sh"
+mode=$(db_mode "$root")
+if [ "$mode" != none ]; then
+  db="hive_pb_$(db_ident "$name")$(db_suffix "$root" "$mode")"
+  db_drop "$root" "$db" || echo "could not drop $db" >&2
 fi
 
 # -d refuses a branch that is not merged. After a squash-merged PR every unit

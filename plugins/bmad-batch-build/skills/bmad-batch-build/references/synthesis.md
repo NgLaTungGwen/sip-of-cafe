@@ -23,6 +23,10 @@ the workers at the start of the run:
 - `<final>` is `yes` for the last synthesis of the run, which opens the PR,
   and `no` between waves.
 
+Never name a test database in the prompt: the integration worktree's `.env`
+already points at its own (`hive_pb_<name>_test`), and the prompt below says
+so. A dispatch that named `hive_factory_test` sent synthesis to the shared one.
+
 Merge-script output, interface lines and the state file keep the agent's own
 reading small: it opens a spec or a file only where a check points at it.
 
@@ -63,6 +67,12 @@ per unit <unit n: #task id>. If ticket creation failed: "none: <error>". With ti
 off (setup said so): "off".
 
 PR tool: `<pr>` (from the run's setup: az, gh or none).
+
+Test database: the one `<iwt>/.env` names (its DATABASE_URL, which the
+suite routes to `<that name>_test` in hive-factory), private to this
+worktree. Never point a run at a shared one such as `hive_factory_test`, and
+never set DATABASE_URL or TEST_DATABASE_URL by hand: other worktrees' suites
+would delete your rows.
 
 Read `<iwt>/AGENTS.md` first. Then record where your own work starts:
 `git -C <iwt> rev-parse HEAD` is `<start>`; write it into `<state>`.
@@ -128,7 +138,8 @@ Commit each repair as its own `fix(merge): ...` commit.
 ## 3. Verify
 
 `verify.sh` runs build + typecheck, the test suite, the `apps/` typecheck, lint and
-`bun test` suite (installing `apps/` first when it has no `node_modules`), and the
+test suite (`bun run test` when `apps/package.json` has a test script, otherwise
+`bun test`; installing `apps/` first when it has no `node_modules`), and the
 `infra/` typecheck at the same time; in a project with a profile
 (`.claude/bmad-batch-project.json`) it runs the profile's checks instead and
 ignores `--apps` and `--infra`. Either way it also runs the count ratchets the
@@ -158,7 +169,7 @@ It often takes longer than the 10 minutes one Bash call may run, so start it
 in the background (`--no-test` is still there to skip the suites by hand):
 
 ```bash
-bash "<skill>/scripts/bg.sh" run "<iwt>" verify "bash '<skill>/scripts/heavy.sh' --weight 3 \"bash '<skill>/scripts/verify.sh' '<iwt>' [--full] [--no-test]\""
+bash "<skill>/scripts/bg.sh" run "<iwt>" verify "bash '<skill>/scripts/heavy.sh' --priority --weight 6 --mem 5000 \"bash '<skill>/scripts/verify.sh' '<iwt>' [--full] [--no-test]\""
 ```
 
 as a Bash call with `run_in_background: true`, then
@@ -175,10 +186,12 @@ didn't return 0.
 reuses it (`cached: <check>`) and runs only what failed or never ran. A fix
 commit makes a new tree, so after it the checks the diff selects run again.
 While fixing, re-run only what failed: the failing test files
-(`cd api && npx vitest run <files>`, `cd apps && bun test <files>`), or the one
-check, `verify.sh '<iwt>' --only <check>` the same way as above. Then run the
-verify above once more after the last fix, before the PR; with nothing
-committed since the last green verify, it is all cache hits and takes
+(`cd api && npx vitest run <files>`; in `apps/`, `cd apps && bunx vitest run <files>`
+when `apps/package.json` declares vitest, `cd apps && bun run test <files>` when it
+has a test script, and `cd apps && bun test <files>` only when it has neither),
+or the one check, `verify.sh '<iwt>' --only <check>` the same way as above.
+Then run the verify above once more after the last fix, before the PR; with
+nothing committed since the last green verify, it is all cache hits and takes
 seconds, so don't skip it. Anything that may take over 10 minutes goes through `bg.sh`
 the same way; never wrap a wait in a loop, `timeout` or `sleep`.
 
@@ -239,8 +252,9 @@ It writes the diff into the worktree's git dir and prints its path.
 means you changed nothing beyond clean merges: note `REVIEW: none (no
 synthesis changes)` and go on. Otherwise launch one reviewer with `Agent`
 (`subagent_type: general-purpose`, `model: opus`, foreground), with this
-prompt. If the call answers "Async agent launched", end your turn and wait for
-its completion notification; never write the section 6 reply while it runs
+prompt. If the call answers "Async agent launched", don't end your turn: wait
+on its `bg.sh` done file as your agent file says, then read its completion
+notification; never write the section 6 reply while it runs
 (two synthesis agents ended without `RESULT:` that way in sonar-zero-5):
 
 ```text
@@ -334,13 +348,17 @@ python "<skill>/scripts/<tickets script>" "<tickets json>" --link-pr <pr id> --m
 
 It links the PR to the merged units' stories and tasks, never to a left-out
 unit's task, because that work isn't in this PR. When no unit was left out it
-also turns on close-on-complete. It prints the linked IDs and whether
+also turns on close-on-complete, and then leaves out a story that still has
+open tasks outside this PR (it prints `story #<id> not linked`): name that
+story in the PR description instead. It prints the linked IDs and whether
 close-on-complete is on, and exits non-zero if an ID didn't link. The `az`
 calls take up to a minute each.
 
 With `gh_tickets.py` the links are the PR description's `Work items:` line,
 which the script rewrites: `Closes #n` for each issue when no unit was left
-out, so GitHub closes them when the PR merges, otherwise `Refs #n`. GitHub
+out, so GitHub closes them when the PR merges, otherwise `Refs #n`. A story
+issue that still has open sub-issues outside this PR gets `Refs` even then
+(it prints `story #<n> not closed`), so its other work keeps it open. GitHub
 closes issues only on merges into the default branch; for a PR into another
 branch the script says close-on-complete is off.
 
