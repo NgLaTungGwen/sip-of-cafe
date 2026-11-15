@@ -163,7 +163,9 @@ class Profile(Layouts):
 
     def test_prepare_worktree_pins_the_profile_commands(self):
         wt, toml, env = self.prepared(with_profile=True)
-        self.assertIn("&& npm run test'", toml)
+        # The unit runs its affected tests; the profile's suite only on a force-full path.
+        self.assertIn("affected-tests.sh " + wt.replace("\\", "/"), toml.replace("\\", "/"))
+        self.assertIn("&& npm run test`", toml)
         self.assertIn("/u-1/app && npx vitest run <files> --reporter=dot", toml)
         self.assertNotIn("/u-1 && npm test", toml)
         # The base is the profile's (origin/HEAD is develop here), and the
@@ -306,10 +308,158 @@ jobs:
 
     def test_prepare_worktree_without_a_profile_keeps_the_original_commands(self):
         wt, toml, env = self.prepared(with_profile=False)
-        self.assertIn("/u-1 && npm test'", toml)
+        self.assertIn("/u-1 && npm test`", toml)
         import tomllib
         tomllib.loads(toml)  # still valid TOML
         self.assertIn("127.0.0.1:55432", env)
+
+
+class AffectedVerify(Layouts):
+    """verify.sh runs only what the branch changed, never the same passed check
+    twice on one tree, and fails when the test database is down (run evidence:
+    a 9-minute verify for a YAML-only change, verify run 4 times in one
+    synthesis, 12 DB suite files skipped while verify said ok)."""
+
+    def repo_on_origin(self, apps=True):
+        remote = os.path.join(self.tmp, "remote.git")
+        git("init", "-q", "--bare", "-b", "main", remote)
+        git("clone", "-q", remote, self.repo)
+        write(os.path.join(self.repo, "package.json"), '{"name": "x"}')
+        write(os.path.join(self.repo, "package-lock.json"), "{}")
+        write(os.path.join(self.repo, "api", "src", "a.ts"), "export const a = 1\n")
+        write(os.path.join(self.repo, "README.md"), "x\n")
+        if apps:
+            write(os.path.join(self.repo, "apps", "package.json"), '{"name": "web"}')
+            write(os.path.join(self.repo, "apps", "bun.lock"), "")
+            write(os.path.join(self.repo, "apps", "src", "b.ts"), "export const b = 1\n")
+        write(os.path.join(self.repo, ".gitignore"), "node_modules/\n.env\n")
+        self.commit("init")
+        git("push", "-q", "origin", "HEAD", cwd=self.repo)
+        os.makedirs(os.path.join(self.repo, "apps", "node_modules"), exist_ok=True)
+
+    def commit(self, msg):
+        git("add", "-A", cwd=self.repo)
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", msg, cwd=self.repo)
+
+    def cmds(self, calls):
+        return [c.split(" @ ")[0] for c in calls]
+
+    def verify(self, *args):
+        if os.path.exists(self.calls):
+            os.remove(self.calls)
+        return self.run_script("verify.sh", self.repo, *args)
+
+    def test_a_docs_and_yaml_change_runs_no_check(self):
+        self.repo_on_origin()
+        write(os.path.join(self.repo, "README.md"), "changed\n")
+        write(os.path.join(self.repo, "pipeline", "ci.yml"), "jobs: []\n")
+        self.commit("docs")
+        r, calls = self.verify("--apps")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(calls, [])
+        self.assertIn("only docs, YAML or scripts changed", r.stdout)
+        self.assertIn("no checks selected", r.stdout)
+
+    def test_an_api_change_runs_the_root_checks_and_not_apps(self):
+        self.repo_on_origin()
+        write(os.path.join(self.repo, "api", "src", "a.ts"), "export const a = 2\n")
+        self.commit("api")
+        r, calls = self.verify("--apps")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(sorted(self.cmds(calls)), ["npm run build", "npm run typecheck", "npm test"])
+        self.assertIn("run  test: changed: api/src/a.ts", r.stdout)
+        self.assertIn("skip apps-test: nothing under apps/ changed", r.stdout)
+
+    def test_an_apps_change_checks_apps_even_without_the_flag(self):
+        self.repo_on_origin()
+        write(os.path.join(self.repo, "apps", "src", "b.ts"), "export const b = 2\n")
+        self.commit("apps")
+        r, calls = self.verify()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.cmds(calls), ["bun run typecheck", "bun test"])
+        self.assertIn("skip test: nothing outside apps/, infra/ changed", r.stdout)
+
+    def test_a_lockfile_or_full_forces_everything(self):
+        self.repo_on_origin()
+        write(os.path.join(self.repo, "package-lock.json"), '{"v": 2}')
+        self.commit("deps")
+        r, calls = self.verify()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(sorted(self.cmds(calls)),
+                         ["bun run typecheck", "bun test", "npm run build", "npm run typecheck", "npm test"])
+        self.assertIn("forces the full run changed: package-lock.json", r.stdout)
+        # --full on a docs-only change runs everything too (the cache aside: a
+        # new commit is a new tree).
+        write(os.path.join(self.repo, "README.md"), "changed\n")
+        self.commit("docs")
+        r, calls = self.verify("--full")
+        self.assertIn("npm test", self.cmds(calls))
+
+    def test_a_passed_check_is_not_run_twice_on_the_same_tree(self):
+        self.repo_on_origin(apps=False)
+        write(os.path.join(self.repo, "api", "src", "a.ts"), "export const a = 2\n")
+        self.commit("api")
+        self.fail_on("typecheck")
+        r, calls = self.verify()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("build-typecheck.rc:2", r.stdout)
+        r, calls = self.verify()
+        # The failed check runs again, the passed one is reused.
+        self.assertEqual(sorted(self.cmds(calls)), ["npm run build", "npm run typecheck"])
+        self.assertIn("cached: test", r.stdout)
+        self.assertIn("test.rc:0", r.stdout)
+        # Uncommitted changes turn the cache off.
+        write(os.path.join(self.repo, "api", "src", "c.ts"), "x\n")
+        r, calls = self.verify()
+        self.assertIn("npm test", self.cmds(calls))
+        self.assertIn("cache: off", r.stdout)
+        # --only re-runs just the named check.
+        os.remove(os.path.join(self.repo, "api", "src", "c.ts"))
+        r, calls = self.verify("--only", "build-typecheck")
+        self.assertEqual(sorted(self.cmds(calls)), ["npm run build", "npm run typecheck"])
+        self.assertNotIn("test.rc", r.stdout)
+
+    def fail_on(self, word):
+        Profile.fail_on(self, word)
+
+    def test_a_known_base_failure_is_named(self):
+        self.repo_on_origin(apps=False)
+        write(os.path.join(self.repo, "api", "src", "a.ts"), "export const a = 2\n")
+        self.commit("api")
+        subprocess.run(["python", os.path.join(SCRIPTS, "affected.py"), "known", self.repo, "--base", "origin/main",
+                        "test", "flaky clock test, fails on main too"], check=True, capture_output=True)
+        self.fail_on("test")
+        r, _ = self.verify()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("known-on-base: test (origin/main", r.stdout)
+        self.assertIn("flaky clock test", r.stdout)
+
+    def test_a_database_that_does_not_answer_fails_the_verify(self):
+        import socket
+        self.repo_on_origin(apps=False)
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        write(os.path.join(self.repo, ".env"), f"DATABASE_URL=postgres://u:p@localhost:{port}/app\n")
+        write(os.path.join(self.repo, "api", "src", "a.ts"), "export const a = 2\n")
+        self.commit("api")
+        r, calls = self.verify()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("database.rc:1", r.stdout)
+        self.assertIn(f"nothing answers at 127.0.0.1:{port}", r.stdout)
+        self.assertNotIn("npm test", self.cmds(calls))
+        self.assertIn("npm run build", self.cmds(calls))
+        # With the port answering, the suite runs.
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", port))
+        srv.listen(5)
+        try:
+            r, calls = self.verify()
+        finally:
+            srv.close()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("npm test", self.cmds(calls))
 
 
 class LinuxTests(unittest.TestCase):

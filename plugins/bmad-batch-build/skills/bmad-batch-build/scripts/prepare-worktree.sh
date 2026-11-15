@@ -181,8 +181,16 @@ if s=$(profile_get "$root" targeted); then
   t_tc=$(printf '%s\n' "$s" | awk -F'\t' '$1=="typecheck"{print $2}')
 fi
 # The suite part of the testing fact, or what to do when there is no suite.
+# A unit runs only the tests its change affects (affected-tests.sh, from the
+# commit the worktree starts at); the full suite runs once, in synthesis,
+# unless the unit touches a path that can break any test.
+affected="$scripts/affected-tests.sh" start=$(git -C "$wt" rev-parse HEAD)
+apps_full=""
+if [ -f "$wt/apps/package.json" ] && { [ -f "$wt/apps/bun.lock" ] || [ -f "$wt/apps/bun.lockb" ]; }; then
+  apps_full=" and \`cd $wt/apps && bun test\`"
+fi
 if [ -n "$suite_cmd" ]; then
-  suite_fact="The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the full suite exactly once; the full suite is the only check you run. Run that full suite off the critical path: as soon as the implementation subagent returns, start \`bash $bg run $wt suite \\\"bash $heavy 'cd $suite_dir && $suite_cmd'\\\"\` as a Bash call with run_in_background: true, and launch the review straight away. Before review triage, run \`bash $bg wait $wt suite\` (again while it prints still running) and triage a failure like any other review finding. After a suite failure, send the fix to a new implementation subagent, which re-runs only the failing files."
+  suite_fact="The spec's Verification section lists the targeted test files, the typecheck of each touched workspace, and the affected tests exactly once; the affected tests are the only check you run. They are the tests this unit's change reaches, not the full suite: synthesis runs the full suite once, for the whole run. Run them off the critical path: as soon as the implementation subagent returns, start \`bash $bg run $wt suite \\\"bash $heavy 'bash $affected $wt $start'\\\"\` as a Bash call with run_in_background: true, and launch the review straight away. It runs \`vitest run --changed $start\` in each touched vitest workspace, in a bun workspace the changed test files and those beside the changed sources, and prints what it chose and why. When the unit touches a path that can break any test (packages/contracts, migrations, test setup, vitest or tsconfig config, a package.json or lockfile, the project profile), it runs the full suite instead (\`cd $suite_dir && $suite_cmd\`$apps_full); do not start the full suite by hand. Before review triage, run \`bash $bg wait $wt suite\` (again while it prints still running) and triage a failure like any other review finding. After a failure, send the fix to a new implementation subagent, which re-runs only the failing files."
 else
   suite_fact="This project has no full test suite to run (its project profile lists none, for example because AGENTS.md forbids running tests): skip the full-suite step. A workflow step that asks for a passing test per row, such as the Matrix Test Audit, is met by tracing each row to the code that satisfies it, and the spec says so."
 fi
@@ -204,10 +212,8 @@ if [ -f "$wt/apps/package.json" ] && { [ -f "$wt/apps/bun.lock" ] || [ -f "$wt/a
     apps_clause=" Files under apps/ are checked inside apps/ with bun, never npm or npx: test files with \`cd $wt/apps && bun test <files>\`, and the typecheck through the queue with \`bash $heavy 'cd $wt/apps && bun run typecheck'\`."
   fi
 fi
-# The root suite never reaches apps/ (sonar-zero-5 units 6 and 7 ran it by hand).
-if [ -n "$apps_clause" ] && [ -n "$suite_cmd" ]; then
-  suite_fact="$suite_fact If this unit changed files under apps/, run the apps/ suite the same way beside it: \`bash $bg run $wt apps-suite \\\"bash $heavy 'cd $wt/apps && bun test'\\\"\` and \`bash $bg wait $wt apps-suite\`; it is a full suite too, and the root one does not reach apps/."
-fi
+# The root suite never reaches apps/ (sonar-zero-5 units 6 and 7 ran it by
+# hand): the affected run covers apps/ changes itself, so there is no second job.
 [ -n "$t_test" ] || t_test="the project's test command, limited to those files"
 [ -n "$t_tc" ] || t_tc="the project's typecheck or build check"
 
@@ -240,7 +246,7 @@ Launch a subagent with no prior conversation context, using the \`${impl_type}\`
 >
 > Read {spec_file} fully and implement it. The spec is the sole source of truth. Load every file listed in its frontmatter \`context:\` before you start.
 >
-> You own the targeted checks; the parent does not repeat them. $t_clause the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $checks && $t_tc'\`).$apps_clause Run them again after every review fix you are sent. Report each result.
+> You own the targeted checks; the parent does not repeat them. $t_clause the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $checks && $t_tc'\`).$apps_clause Run them again after every review fix you are sent. Report each result. Leave whole test suites to the parent: it runs the tests your change affects once you return.
 >
 > Use only these copies of the skill's scripts: \`$heavy\`, \`$bg\` and, to read coverage, \`python $lcov <lcov file> <path part>\`. Never call TaskStop or Monitor; you cannot use them. Write logs and scratch files only inside $wt (under _bmad-output/). Do not commit: the parent commits your work.
 >

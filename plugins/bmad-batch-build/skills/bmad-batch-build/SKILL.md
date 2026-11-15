@@ -31,7 +31,7 @@ other cases: when a worker doesn't build, and when synthesis reports `stuck`
 Two rules shape the flow, because most of a run is waiting:
 
 - **Keep long waits out of large contexts.** An agent that sits idle past its
-  cache TTL pays to re-write its whole context. So installs and the full suite
+  cache TTL pays to re-write its whole context. So installs and the unit tests
   run in the background while the worker plans and reviews, the Haiku coder
   (small context, cheap tokens) does the waiting for the install, and you keep
   your own context thin: you never read product code, `Explore` maps it.

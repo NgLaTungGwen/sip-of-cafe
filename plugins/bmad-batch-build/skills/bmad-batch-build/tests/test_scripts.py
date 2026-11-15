@@ -583,8 +583,10 @@ class PrepareWorktree(unittest.TestCase):
         self.assertIn("cd " + wt + "/apps && bun run typecheck", toml)
         self.assertIn("cd " + wt + "/api && npx vitest run", toml)  # api files keep theirs
         # The root suite never reaches apps/ (sonar-zero-5 units 6 and 7).
-        self.assertIn("cd " + wt + "/apps && bun test'", toml)
-        self.assertIn(" apps-suite", toml)
+        # The affected run covers apps/ too: one job, the apps suite only when forced.
+        self.assertIn("cd " + wt + "/apps && bun test`", toml)
+        self.assertNotIn(" apps-suite", toml)
+        self.assertIn("affected-tests.sh " + wt, toml)
         self.tomllib_ok(toml)
         wt, toml = self.pinned(with_api=True)
         self.assertNotIn(wt + "/apps", toml)
@@ -1986,6 +1988,98 @@ class TicketsUnitPr(unittest.TestCase):
         self.assertEqual(gh.work_items_line(self.PLAN, {"2"})[0], "Work items: Refs #10, Refs #12")
         self.assertEqual(gh.work_items_line(self.PLAN, {"1", "2"})[0],
                          "Work items: Closes #10, Closes #11, Closes #12")
+
+affected = load("affected", "affected.py")
+
+
+class Affected(unittest.TestCase):
+    """What a change affects (affected.py): the selection verify.sh and the
+    worker's test run share, with its one force-full list."""
+
+    def test_force_full_inert_and_code_paths(self):
+        for p in ("packages/contracts/src/x.ts", "api/db/migrations/001.sql", "api/vitest.config.ts",
+                  "tsconfig.base.json", "apps/tsconfig.json", "apps/bun.lock", "package-lock.json",
+                  "api/test/global-cleanup.ts", "api/test/setup.ts", ".claude/bmad-batch-project.json",
+                  "api/package.json"):
+            self.assertEqual(affected.kind_of(p), "force", p)
+        for p in ("README.md", "docs/a.png", "pipeline/pr.yml", ".github/workflows/ci.yaml", "scripts/x.sh"):
+            self.assertEqual(affected.kind_of(p), "inert", p)
+        for p in ("api/src/x.ts", "apps/src/page.tsx", "api/test/user.test.ts"):
+            self.assertEqual(affected.kind_of(p), "code", p)
+
+    ROWS = [("build-typecheck", ".", "check"), ("test", ".", "test"), ("apps", "apps", "check"),
+            ("apps-test", "apps", "test"), ("ratchet-x", ".", "ratchet")]
+
+    def picked(self, files, **kw):
+        mode, out = affected.select(self.ROWS, files, separate=["apps", "infra"], **kw)
+        return mode[0], [name for what, name, _, _ in out if what == "select"]
+
+    def test_selection_follows_the_diff(self):
+        self.assertEqual(self.picked(["README.md", "scripts/a.sh"]), ("diff", []))
+        self.assertEqual(self.picked(["pipeline/pr.yml"]), ("diff", ["ratchet-x"]))
+        self.assertEqual(self.picked(["api/src/a.ts"]), ("diff", ["build-typecheck", "test", "ratchet-x"]))
+        self.assertEqual(self.picked(["apps/src/b.ts"]), ("diff", ["apps", "apps-test"]))
+        self.assertEqual(self.picked(["apps/src/b.ts"], notest=True), ("diff", ["apps"]))
+        self.assertEqual(self.picked(["apps/src/b.ts"], only=["test"]), ("diff", ["test"]))
+
+    def test_force_full_and_no_diff(self):
+        everything = [r[0] for r in self.ROWS]
+        self.assertEqual(self.picked(["README.md", "packages/contracts/a.ts"]), ("full", everything))
+        self.assertEqual(self.picked(["README.md"], full=True), ("full", everything))
+        # No diff to read: as before, apps/ only with --apps.
+        self.assertEqual(self.picked(None), ("nodiff", ["build-typecheck", "test", "ratchet-x"]))
+        self.assertEqual(self.picked(None, flags=["apps"]), ("nodiff", everything))
+
+    def workspaces(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        files = {"package.json": "{}", "api/package.json": '{"devDependencies": {"vitest": "2"}}',
+                 "api/src/a.ts": "", "apps/package.json": "{}", "apps/bun.lock": "", "apps/src/b.ts": "",
+                 "apps/src/b.test.ts": "", "apps/src/__tests__/b.spec.tsx": "", "apps/src/c.ts": "",
+                 "lib/package.json": "{}", "lib/x.ts": ""}
+        for rel, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+            with open(os.path.join(root, rel), "w") as fh:
+                fh.write(text)
+        return root
+
+    def test_a_unit_runs_only_its_affected_tests(self):
+        root = self.workspaces()
+        out = affected.tests(root, "abc123", ["api/src/a.ts", "apps/src/b.ts", "README.md"])
+        cmds = [(d, c) for _, d, c, _ in out]
+        self.assertEqual(cmds, [("api", "npx vitest run --changed abc123 --passWithNoTests --reporter=dot"),
+                                ("apps", "bun test ./src/b.test.ts ./src/__tests__/b.spec.tsx")])
+        # A source with no test beside it, and docs only: nothing to run.
+        self.assertEqual(affected.tests(root, "abc123", ["apps/src/c.ts"])[0][0], "NONE")
+        self.assertEqual(affected.tests(root, "abc123", ["docs/x.md"])[0][0], "NONE")
+
+    def test_a_force_full_path_or_an_unknown_runner_runs_the_full_suite(self):
+        root = self.workspaces()
+        full = [("RUN", ".", "npm test"), ("RUN", "apps", "bun test")]
+        out = affected.tests(root, "abc123", ["api/src/a.ts", "packages/contracts/index.ts"])
+        self.assertEqual([o[:3] for o in out], full)
+        self.assertIn("packages/contracts/index.ts", out[0][3])
+        self.assertEqual([o[:3] for o in affected.tests(root, "abc123", ["lib/x.ts"])], full)
+
+    def test_db_probe(self):
+        import socket
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        self.assertTrue(affected.db(root)[0])  # no database at all
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        with open(os.path.join(root, ".env"), "w") as fh:
+            fh.write(f"DATABASE_URL=postgres://u:p@localhost:{port}/db\n")
+        try:
+            self.assertEqual(affected.db(root), (True, f"database: ok 127.0.0.1:{port}"))
+        finally:
+            srv.close()
+        ok, msg = affected.db(root)
+        self.assertFalse(ok)
+        self.assertIn("DOWN", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

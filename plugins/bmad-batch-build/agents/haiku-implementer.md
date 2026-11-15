@@ -31,7 +31,7 @@ Keep your context small, because this session compacts at about 67k tokens:
   and retry the Edit; do not fall back to rewriting it from Bash.
 
 You own the targeted verification: the worker does not repeat it, and runs
-only the full suite, once, after you return. So run it after your first pass
+only the tests your change affects, once, after you return. So run it after your first pass
 and again after every review fix you are sent, and report each result:
 
 - Run only the test files you added or changed, and the typecheck of each

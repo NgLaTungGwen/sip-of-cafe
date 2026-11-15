@@ -20,11 +20,21 @@ The same file takes two waits off the worker's critical path:
   Haiku coder waits for the install (`bg.sh wait <wt> install`) before its
   first command. Its context is still tiny then, so a long wait costs little
   even when its cache expires.
-- **Full suite during review.** The worker starts the full DB suite in the
-  background as soon as the coder returns and launches the review at once, so
-  the suite and the reviewers run side by side. It reads the suite's result
-  before triage. One idle gap instead of two in a row, on the agent with the
-  largest context.
+- **Affected tests during review.** The worker starts the unit's affected
+  tests in the background as soon as the coder returns and launches the
+  review at once, so the tests and the reviewers run side by side. It reads
+  their result before triage. One idle gap instead of two in a row, on the
+  agent with the largest context.
+- **Only the tests the change reaches.** `scripts/affected-tests.sh`, pinned
+  with the commit the worktree started at, runs `vitest run --changed <start>`
+  in each touched vitest workspace (jest: `--changedSince`), and in a bun
+  workspace such as `apps/` the changed test files and the ones beside the
+  changed sources. It runs the full suite (and `apps/`'s `bun test`) only when
+  the unit touches a path that can break any test: `affected.py`'s
+  `FORCE_FULL` list (packages/contracts, migrations, test setup, vitest,
+  vite, jest or tsconfig config, a package.json or lockfile, the profile), or
+  a workspace whose runner it doesn't know. The full suite runs once, in
+  synthesis.
 
 ## Dispatch prompt
 
