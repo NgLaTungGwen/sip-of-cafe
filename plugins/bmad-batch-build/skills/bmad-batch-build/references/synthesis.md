@@ -33,6 +33,12 @@ reading small: it opens a spec or a file only where a check points at it.
 `<rules file>` is `review-classes.md` in the project's runs folder, the parent
 of `<runs>`: the kinds of mistake reviewers made units fix, across runs.
 
+`<intake>` is `<runs>/<slug>-intake.md`, the run's frozen intake, or `none`
+for a run without one; then the prompt's Intake lines and section 3c are left
+out. `<runs>` and `<slug>` are the run's, as in SKILL.md. `<iface>` is
+`<runs>/<slug>-interface-changes.md`, the interface changes approved after
+the freeze (it may not exist), or `none` without an intake.
+
 `<ci ignore>` is the profile's `ci.ignore` joined with commas (`Acceptance`
 for hive-factory, which has no profile), or empty. `<ci timeout>` is its
 `ci.timeout` in minutes, 60 by default.
@@ -43,12 +49,23 @@ You are the synthesis agent for a BMAD batch build.
 
 Integration worktree: `<iwt>`. Work only inside it. Run every shell command as
 `cd <iwt> && ...`. Never touch `<root>` (the main checkout) or another
-worktree. The one file outside it you may write is the state file
-`<state>`.
+worktree. The files outside it you may write are the state file `<state>`
+and, in a run with an intake, the scenario files `<runs>/scenarios/` and
+`<runs>/<slug>-scenarios.json` (section 3c).
 
 New branch: `<new branch>`. Final: `<final>`. Skill scripts: `<skill>/scripts`.
 
 Run goal: <one paragraph from the approved split>
+
+Intake: `<intake>`. When it is not `none`, its Goal, Non-goals and Acceptance
+criteria are the run's agreed intent: when a conflict or a repair means
+choosing what the code should do, decide by them, not by the raw prompt or a
+unit's own reading. Print them with
+`python "<skill>/scripts/intake.py" unit "<intake>" <n>` for the units
+involved. Its Verification scenarios are for section 3c only.
+Interface changes: `<iface>`. `python "<skill>/scripts/intake.py" iface show "<iface>"`
+prints the approved changes to the pinned interfaces, or none; the agreed
+shape of an interface is its Shared interfaces line with these applied.
 
 Units in the run so far, in dependency order. This is the whole run, every
 earlier wave included; the PR, the ticket links and the drift check cover all
@@ -95,7 +112,8 @@ Leave out `--installed` when `<installed>` is `none`. The script merges with `--
 any branch already in `HEAD`, and stops at the first conflict with
 `CONFLICT <branch>` and the conflicted files (exit 3). Resolve that conflict so
 both units' intent survives: read both specs, but only the parts about the
-conflicted files. Never drop a unit's change silently. Commit the merge, then
+conflicted files, and, with an intake, the Goal, Non-goals and the two units'
+acceptance criteria. Never drop a unit's change silently. Commit the merge, then
 run the same command again; it carries on from the next branch.
 
 `REJECTED <branch>` (exit 5) is not a conflict: the merge worked and git
@@ -126,7 +144,8 @@ Then the checks only you can do, which parallel branches have broken here
 before:
 
 - **Agreed interfaces.** Compare every unit's `agreed` and `built` interfaces
-  above, earlier waves included. Start with any marked `CHANGED`, and then check that each provider and
+  above, earlier waves included, with the approved changes from `iface show`
+  applied. Start with any marked `CHANGED`, and then check that each provider and
   consumer match exactly (routes, payloads, types and method signatures). Fix
   whichever side drifted from the agreed shape.
 - **Duplicate or overlapping methods.** Two units may each add the same port,
@@ -282,6 +301,64 @@ commit that was reviewed and verified. It selects from the whole branch's
 diff and reuses what already passed on that tree, so a review fix costs only
 the checks its tree needs.
 
+**Escapes.** While you verify and review, every wave, keep a list of escapes
+in `<state>`: a verify failure or a 3b finding you fixed (or left open) in
+files a unit owns, of a kind that unit's own affected tests or review should
+have caught (its own test fails, its own typecheck breaks, a bug inside its
+own change). A break that only the combination of units causes (two units'
+code meeting, a merge conflict, a known-on-base failure) is not an escape.
+One line each: `<unit>: <what>`.
+
+## 3c. Holdout scenarios and changed assertions
+
+Only when Final is `yes`, after the last green verify.
+
+**Scenarios.** With an intake, run
+`python "<skill>/scripts/intake.py" scenarios "<intake>"`. It prints the
+`SC-n: Given ... When ... Then ...` lines. The workers never saw them; they
+check the merged result against the agreed behaviour. For each one:
+
+1. Write it as one scratch test, with the Write tool, under
+   `<runs>/scenarios/` (for example `<runs>/scenarios/sc-1.test.ts`), in the
+   project's test framework, exercising the behaviour through its public
+   surface (a route, a command, an exported function). That folder is the
+   copy you keep. It is never committed and never goes into the PR.
+2. To run it, copy it into the worktree at a path the project's test runner
+   finds, under a name that starts with `zz-scenario-`, add that path to
+   `$(git -C <iwt> rev-parse --git-path info/exclude)`, run only that file
+   (the targeted test command, through `heavy.sh`), then delete the copy and
+   check that `git -C <iwt> status --porcelain` is empty.
+3. Its result is `pass` or `fail`. A scenario that cannot be automated here
+   (it needs a person, a real third-party service, another machine) is
+   `skip`, with the reason in its note. Don't fix code for a failing
+   scenario: it goes into the PR's notes and `SCENARIOS:`, for the user.
+
+**Changed assertions.** Run, from any directory:
+
+```bash
+python "<skill>/scripts/assert-guard.py" "<iwt>" <origin/base>
+```
+
+It prints `ASSERT-EDIT <file>:<line> <removed text>` for each assertion the
+branch removed or changed in a test file (moved lines don't count), then
+`assert-guard: N edits`, and exits 1 when N > 0. That does not block the PR,
+but every hit must be justified: read the line's change and say why the
+expectation had to change (the behaviour changed on purpose, per an AC; the
+test asserted on an implementation detail). An edit you cannot justify is a
+weakened test: restore it and fix the code instead.
+
+Write `<runs>/<slug>-scenarios.json` with the Write tool, also without an
+intake (an empty `scenarios` list then):
+
+```json
+{"scenarios": [{"id": "SC-1", "result": "pass", "cmd": "<the command you ran>", "note": "<what it showed, or why skipped>"}],
+ "pass_rate": 0.75, "assert_edits": 2, "escapes": [{"unit": "U1", "what": "<what>"}]}
+```
+
+`pass_rate` is pass / (pass + fail), or `null` when none ran. `assert_edits`
+is the N assert-guard printed. `escapes` is the list kept in `<state>`, with
+the unit as `U<n>`.
+
 **Final `no`:** when every check is green, skip sections 4 and 5. Update
 `<state>` with what is merged and verified, then reply with `RESULT:
 wave-green` in the reply format of section 6 (`PR: none`, `TICKETS: none`).
@@ -302,6 +379,9 @@ Once every check is green and Final is `yes`:
 2. Under "What changed", give one bullet per unit, aggregated by behaviour.
 3. If any units were left out, add a `## Not included` section that lists them
    with their blocking condition.
+   If assert-guard found any hits (section 3c), add a `## Changed assertions`
+   section: one bullet per hit, `<file>:<line>` and why it changed. A failing
+   scenario goes under the notes, with its Given/When/Then.
 4. Keep the description under 4000 characters.
 5. Add a `Work items:` line that lists the stories and the merged units'
    tasks as `#id`, so a reviewer can click through.
@@ -415,6 +495,9 @@ REPAIRS: <one line per fix(merge) commit, or none>
 VERIFY: <each check and its pass or fail result>
 REVIEW: <rounds, findings fixed, findings left open; or none (no synthesis changes)>
 RULES: <each proposed check: the kind of mistake, how many times, the rule; or none>
+SCENARIOS: <pass>/<pass + fail> passed, <n> skipped (<the failing and skipped SC ids>); or none (no intake, or Final no)
+ASSERT EDITS: <N from assert-guard, each <file>:<line> justified in the PR; or 0>
+ESCAPES: <count>: <unit: what, one per `;`>; or 0
 CI: <green | red after <n> fix rounds: <check>, <cause> | pending after <n> min | approval: <pipeline> | none (no PR or no pipelines)>
 NOTES: <anything the user must know, or none>
 SKILL ISSUES: <each time a skill script, its settings or these instructions

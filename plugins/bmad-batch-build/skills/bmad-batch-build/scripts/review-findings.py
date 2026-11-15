@@ -16,13 +16,14 @@ made and fixed says what a lint rule or a type could have caught. Final
 synthesis groups these lines into kinds of mistake (references/synthesis.md).
 
 Workers also write the action in brackets (`[patch]` in backticks), as the
-severity is; both forms are read.
+severity is; both forms are read. The layer is `(blind)` or, since the
+pinned toml asks for it, a tag such as `[edge-case]`.
 """
 import os
 import re
 import sys
 
-FINDING = re.compile(r"^\s*-\s*`\[([\w-]+)\]`\s*`\[?([\w-]+)\]?`\s*(?:\(([\w-]+)\))?\s*(.*)$")
+FINDING = re.compile(r"^\s*-\s*`\[([\w-]+)\]`\s*`\[?([\w-]+)\]?`\s*(?:[(\[]([\w-]+)[)\]])?\s*(.*)$")
 
 
 def findings(path):

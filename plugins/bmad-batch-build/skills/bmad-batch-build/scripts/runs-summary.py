@@ -36,6 +36,38 @@ def fmt(v, unit=""):
     return f"{v:.1f}{unit}" if isinstance(v, float) and not v.is_integer() else f"{v:.0f}{unit}"
 
 
+def pct(v):
+    return "-" if v is None else f"{v * 100:.0f}%"
+
+
+def intake_section(rows):
+    """Runs with an intake against runs without, medians per run. A run
+    without one has no gate, so its whole user wait and question count stand
+    in for the 'after the gate' columns (marked with *)."""
+    groups = [("with intake", [r for r in rows if r.get("intake")]),
+              ("without", [r for r in rows if not r.get("intake")])]
+    if not groups[0][1]:
+        return []
+    lines = ["", "Intake, medians per run (* without an intake: the whole run, there is no gate)",
+             f"{'':12} {'runs':>4} {'intake':>6} {'q gate':>6} {'q after':>7} {'wait gate':>9} {'wait after':>10} "
+             f"{'intent rej':>10} {'fix(merge)':>10} {'scen pass':>9} {'escapes':>7}"]
+    for label, rs in groups:
+        if not rs:
+            continue
+        gated = label == "with intake"
+        q_after = med(r.get("questions_after_gate") if gated else r.get("questions") for r in rs)
+        w_after = med(r.get("wait_min_after_gate") if gated else r.get("min_user_wait") for r in rs)
+        star = "" if gated else "*"
+        lines.append(
+            f"{label:12} {len(rs):4} {fmt(med(r.get('intake_min') for r in rs), 'm'):>6} "
+            f"{fmt(med(r.get('questions_at_gate') for r in rs)):>6} {fmt(q_after) + star:>7} "
+            f"{fmt(med(r.get('wait_min_gate') for r in rs), 'm'):>9} {fmt(w_after, 'm') + star:>10} "
+            f"{pct(med(r.get('intent_auditor_reject_rate') for r in rs)):>10} "
+            f"{fmt(med(r.get('fix_merge_commits') for r in rs)):>10} "
+            f"{pct(med(r.get('scenario_pass_rate') for r in rs)):>9} {fmt(med(r.get('escape_count') for r in rs)):>7}")
+    return lines
+
+
 def shape(detail):
     """A problem's detail with the run-specific parts (ids, numbers, paths,
     quoted text) taken out, so the same problem in two runs compares equal."""
@@ -87,7 +119,8 @@ def main(args):
     for row in rows:
         by_version[row.get("skill_version") or "?"].append(row)
     head = (f"{'version':14} {'runs':>4} {'$/run':>6} {'wall-user':>9} {'slowest wkr':>11} {'synth':>6} "
-            f"{'rest':>5} {'reviewed':>8} {'hi+med':>6} {'fix(merge)':>10} {'1h writes':>9} {'budget hit':>10}")
+            f"{'rest':>5} {'reviewed':>8} {'hi+med':>6} {'fix(merge)':>10} {'1h writes':>9} {'budget hit':>10} "
+            f"{'intake':>6} {'q after':>7} {'intent rej':>10} {'scen pass':>9}")
     if rows:
         lines += ["Medians per run (minutes exclude user wait)", head]
     for version, rs in sorted(by_version.items()):
@@ -100,7 +133,11 @@ def main(args):
             f"{fmt(med(r['min_rest'] for r in rs), 'm'):>5} {f'{reviewed}/{units}':>8} "
             f"{fmt(med(r['first_review_high_medium'] for r in rs)):>6} {fmt(med(r['fix_merge_commits'] for r in rs)):>10} "
             f"{sum(1 for r in rs if r['mtok_w1h_subagents'] > 0)}/{len(rs):<7} "
-            f"{sum(1 for r in rs if r['turn_budget_hit']):>10}")
+            f"{sum(1 for r in rs if r['turn_budget_hit']):>10} "
+            f"{fmt(med(r.get('intake_min') for r in rs), 'm'):>6} {fmt(med(r.get('questions_after_gate') for r in rs)):>7} "
+            f"{pct(med(r.get('intent_auditor_reject_rate') for r in rs)):>10} "
+            f"{pct(med(r.get('scenario_pass_rate') for r in rs)):>9}")
+    lines += intake_section(rows)
     # Code discovery: lookups and context size per role, medians per run.
     roles = ("explore", "worker", "haiku", "synthesis")
     with_roles = [r for r in rows if r.get("by_role")]

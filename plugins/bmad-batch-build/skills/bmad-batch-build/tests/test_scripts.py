@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -2596,6 +2597,690 @@ class Scheduling(unittest.TestCase):
             got = cost.unit_minutes({"worker_spans": [{"unit": 1, "start": "a", "min": 45}]}, "s2",
                                     os.path.join(tempfile.mkdtemp(), "Quy"))
         self.assertEqual(got, [{"id": 1, "size": "M", "min": 45, "est": 104}])
+
+
+FILLED_INTAKE = {
+    "Goal": "Show live counts on the dashboard.",
+    "Non-goals": "- No new charts.",
+    "Acceptance criteria": "- AC-1: Given a visit When the page loads Then the count shows\n"
+                           "- AC-2: Given no visits When the page loads Then it shows 0",
+    "Shared interfaces": "- GET /api/counts: none -> {total: number} | owner U1",
+    "Units": "- U1 Counts endpoint | size M | risk med | depends on: - | touches: api/src/counts.ts, api/src/routes.ts"
+             " | ACs: AC-1 | items: 3\n"
+             "  kind change\n"
+             "- U2 Counts widget | size S | risk low | depends on: U1 (imports the counts type) | touches: "
+             "web/src/Counts.tsx | ACs: AC-1, AC-2 | items: 2",
+    "Coupling map": "U2 needs U1's type, so it runs after it.",
+    "Verification scenarios": "- SC-1: Given HOLDOUT-SECRET-SCENARIO When it runs Then it passes",
+}
+
+
+class Intake(unittest.TestCase):
+    def setUp(self):
+        self.runs = tempfile.mkdtemp()
+        self.addCleanup(self.cleanup)
+        self.intake_mod = load("intake_mod", "intake.py")
+
+    def cleanup(self):
+        for dirpath, _, files in os.walk(self.runs):
+            for f in files:
+                os.chmod(os.path.join(dirpath, f), 0o666)
+        shutil.rmtree(self.runs, ignore_errors=True)
+
+    def run_intake(self, *args):
+        return subprocess.run([sys.executable, os.path.join(SCRIPTS, "intake.py"), *args],
+                              capture_output=True, encoding="utf-8")
+
+    def new(self, slug="demo", prompt="Add live counts.\n## Goal\nSOURCE-PROMPT-MARKER\n"):
+        pf = os.path.join(self.runs, "prompt.txt")
+        with open(pf, "w", encoding="utf-8") as f:
+            f.write(prompt)
+        r = self.run_intake("new", self.runs, slug, "--prompt-file", pf)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return os.path.join(self.runs, f"{slug}-intake.md")
+
+    def fill(self, path, **over):
+        text = open(path, encoding="utf-8").read()
+        for name, value in {**FILLED_INTAKE, **over}.items():
+            text = self.intake_mod.replace_body(text, name, value)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def ready(self):
+        path = self.new()
+        self.fill(path)
+        self.assertEqual(self.run_intake("check", path).stdout.strip(), "READY")
+        return path
+
+    def test_new_keeps_the_prompt_verbatim_marks_the_run_and_refuses_to_overwrite(self):
+        path = self.new()
+        self.assertIn("Add live counts.\n## Goal\nSOURCE-PROMPT-MARKER\n", open(path, encoding="utf-8").read())
+        self.assertRegex(open(os.path.join(self.runs, "demo.md"), encoding="utf-8").read(),
+                         r"INTAKE start \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+        pf = os.path.join(self.runs, "prompt.txt")
+        self.assertEqual(self.run_intake("new", self.runs, "demo", "--prompt-file", pf).returncode, 1)
+
+    def test_readiness_stops_a_vague_intake_with_missing_lines(self):
+        path = self.new()
+        r = self.run_intake("check", path)
+        self.assertEqual(r.returncode, 2)
+        lines = r.stdout.splitlines()
+        self.assertEqual(lines[0], "NOT READY")
+        self.assertTrue(any("Goal" in ln for ln in lines[1:]))
+        self.assertTrue(any("no unit" in ln for ln in lines[1:]))
+        self.assertTrue(all(ln.startswith("MISSING: ") for ln in lines[1:]))
+        # A half-filled one names each gap.
+        self.fill(path, Units="- U1 Endpoint | size M | risk <low/med/high> | depends on: U7 | touches: a.ts | ACs: AC-9",
+                  **{"Shared interfaces": "- GET /x: a -> b"})
+        out = self.run_intake("check", path).stdout
+        for want in ("U1 has no risk", "U1 names AC-9", "U1 depends on U7", "GET /x has no owner unit"):
+            self.assertIn(want, out)
+        self.assertEqual(self.run_intake("freeze", path).returncode, 2)
+        self.assertEqual(self.run_intake("to-plan", path, os.path.join(self.runs, "demo-plan.json")).returncode, 2)
+
+    def test_a_question_timeout_applies_the_default_into_assumptions(self):
+        path = self.ready()
+        r = self.run_intake("asked", path, "--count", "3")
+        self.assertEqual(r.returncode, 0)
+        r = self.run_intake("defaults", path, "--question", "Migration", "--took", "Edit in place")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = open(path, encoding="utf-8").read()
+        assumptions = self.intake_mod.body(text, "Assumptions and defaults applied")
+        self.assertEqual(assumptions, "- TIMEOUT: Migration: took Edit in place")
+        run = open(os.path.join(self.runs, "demo.md"), encoding="utf-8").read()
+        self.assertRegex(run, r"INTAKE questions 3 \d{4}-")
+        self.assertIn("TIMEOUT: Migration: took Edit in place", run)
+        self.assertEqual(self.run_intake("check", path).returncode, 0)
+
+    def test_freeze_verify_amend_and_a_second_freeze(self):
+        path = self.ready()
+        self.assertEqual(self.run_intake("verify", path).stdout.strip(), "NOT FROZEN")
+        self.assertEqual(self.run_intake("verify", path).returncode, 3)
+        self.assertEqual(self.run_intake("amend", path, "--reason", "r", "--text", "t").returncode, 1)
+        r = self.run_intake("freeze", path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("INTAKE approved", open(os.path.join(self.runs, "demo.md"), encoding="utf-8").read())
+        self.assertFalse(os.access(path, os.W_OK))
+        self.assertEqual(self.run_intake("verify", path).stdout.strip(), "FROZEN ok")
+        # amend lands under Changes after approval and keeps the hash.
+        r = self.run_intake("amend", path, "--reason", "user asked", "--text", "U2 also shows a spinner")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.access(path, os.W_OK))
+        text = open(path, encoding="utf-8").read()
+        changes = self.intake_mod.body(text, "Changes after approval")
+        self.assertRegex(changes, r"^- \d{4}-\S+ U2 also shows a spinner \(reason: user asked\)$")
+        self.assertEqual(self.run_intake("verify", path).stdout.strip(), "FROZEN ok")
+        # Before freeze only.
+        self.assertEqual(self.run_intake("defaults", path, "--question", "q", "--took", "o").returncode, 1)
+        self.assertEqual(self.run_intake("set-mode", path, "Mode: lane", "--reason", "r").returncode, 1)
+        self.assertEqual(self.run_intake("freeze", path).returncode, 1)
+        # A direct edit of the frozen part is caught.
+        os.chmod(path, 0o666)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text.replace("Show live counts", "Show live and past counts"))
+        r = self.run_intake("verify", path)
+        self.assertEqual((r.returncode, r.stdout.strip()), (1, "FROZEN changed"))
+
+    def test_iface_add_and_show_with_concurrent_appends(self):
+        f = os.path.join(self.runs, "demo-interface-changes.md")
+        r = self.run_intake("iface", "show", f)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "none"))
+        r = self.run_intake("iface", "add", f, "--unit", "1", "--iface", "GET /api/counts",
+                            "--change", "{total} -> {total, today}", "--reason", "the widget needs today")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout.strip(), r"^- \S+Z U1 GET /api/counts: \{total\} -> \{total, today\} "
+                                           r"\(reason: the widget needs today\)$")
+        loop = ("import subprocess, sys\n"
+                "for i in range(15):\n"
+                "    subprocess.run([sys.executable, sys.argv[1], 'iface', 'add', sys.argv[2], '--unit', sys.argv[3],"
+                " '--iface', 'sym%d' % i, '--change', 'a -> b', '--reason', 'r'], check=True)\n")
+        procs = [subprocess.Popen([sys.executable, "-c", loop, os.path.join(SCRIPTS, "intake.py"), f, u],
+                                  stdout=subprocess.DEVNULL)
+                 for u in ("U2", "3")]
+        self.assertEqual([p.wait(timeout=240) for p in procs], [0, 0])
+        lines = self.run_intake("iface", "show", f).stdout.splitlines()
+        self.assertEqual(len(lines), 31)
+        self.assertTrue(all(re.fullmatch(r"- \S+Z U\d .+: .+ \(reason: .+\)", ln) for ln in lines), lines)
+        self.assertEqual(sum(" U2 " in ln for ln in lines), 15)
+        self.assertEqual(sum(" U3 " in ln for ln in lines), 15)
+        self.assertFalse(os.path.exists(f + ".lock"))
+
+    def test_to_plan_feeds_plan_waves_and_prints_set_mode(self):
+        path = self.ready()
+        plan = os.path.join(self.runs, "demo-plan.json")
+        with open(plan, "w", encoding="utf-8") as f:
+            json.dump({"units": [{"id": 1, "title": "old", "size": "S", "branch": "feat/demo-1"}], "keep": 1}, f)
+        r = self.run_intake("to-plan", path, plan)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.load(open(plan, encoding="utf-8"))
+        self.assertEqual(data["keep"], 1)
+        u1, u2 = data["units"]
+        self.assertEqual((u1["id"], u1["size"], u1["risk"], u1["branch"], u1["items"]), ("1", "M", "med", "feat/demo-1", 3))
+        self.assertEqual(u1["files"], ["api/src/counts.ts", "api/src/routes.ts"])
+        self.assertEqual(u2["depends_on"], [{"id": "1", "reason": "imports the counts type"}])
+        self.assertEqual(u2["acs"], ["AC-1", "AC-2"])
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "plan-waves.py"), plan, "--max-parallel", "4"],
+                           capture_output=True, encoding="utf-8",
+                           env={**os.environ, "BMAD_RUNS_DIR": self.runs})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        mode = [ln for ln in r.stdout.splitlines() if ln.startswith("Mode: ")]
+        self.assertEqual(len(mode), 1)
+        self.assertIn("2←1 (imports the counts type)", mode[0])
+        cmd = [ln for ln in r.stdout.splitlines() if ln.startswith("Set mode: ")]
+        self.assertEqual(len(cmd), 1)
+        self.assertIn("intake.py set-mode ", cmd[0])
+        self.assertIn(path.replace("\\", "/"), cmd[0])
+        self.assertIn("'" + mode[0] + "' --reason 'plan-waves.py chose ", cmd[0])
+        data = json.load(open(plan, encoding="utf-8"))
+        self.assertEqual([u["id"] for u in data["units"]], [1, 2])
+        self.assertEqual(data["units"][1]["depends_on"], [1])
+        self.assertEqual(data["units"][1]["risk"], "low")
+        self.assertEqual(data["units"][1]["acs"], ["AC-1", "AC-2"])
+        self.assertIn("1", data["unit_estimates"])
+        # The pasted command fills Mode decision.
+        r = self.run_intake("set-mode", path, mode[0], "--reason", "chosen by plan-waves")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.intake_mod.body(open(path, encoding="utf-8").read(), "Mode decision"),
+                         mode[0] + "\nReason: chosen by plan-waves")
+
+    def test_plan_waves_takes_an_xl_unit_and_keeps_old_plans(self):
+        units = waves.normalize([{"id": "U1", "title": "a", "size": "xl", "depends_on": []},
+                                 {"id": 2, "title": "b", "size": "S", "depends_on": [1], "reason": "old"}])
+        self.assertEqual([(u["id"], u["size"], u["depends_on"]) for u in units], [(1, "XL", []), (2, "S", [1])])
+        self.assertEqual(units[1]["reason"], "old")
+        self.assertEqual(waves.unit_minutes(units[0], waves.calibration(rows=[])), 160)
+        self.assertTrue(any("XL" in s for s in waves.too_big(units)))
+
+    def test_unit_prints_the_worker_view_without_scenarios_or_prompt(self):
+        path = self.ready()
+        r = self.run_intake("unit", path, "U2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = r.stdout
+        for want in ("Show live counts", "No new charts", "GET /api/counts", "U2 Counts widget",
+                     "AC-1: Given a visit", "AC-2: Given no visits"):
+            self.assertIn(want, out)
+        for never in ("HOLDOUT-SECRET-SCENARIO", "SC-1", "SOURCE-PROMPT-MARKER", "Add live counts"):
+            self.assertNotIn(never, out)
+        self.assertNotIn("AC-2", self.run_intake("unit", path, "1").stdout)
+        self.assertEqual(self.run_intake("unit", path, "U9").returncode, 1)
+        self.assertIn("HOLDOUT-SECRET-SCENARIO", self.run_intake("scenarios", path).stdout)
+
+
+INTAKE_SPEC = """# spec
+
+## Review Triage Log
+
+### 2026-10-26 — Review pass
+- findings: high 1, medium 2
+  - `[medium]` `patch` `[intent-alignment]` AC-2 not covered — fixed: test added.
+  - `[low]` `reject` [intent-alignment] Not in the ACs.
+  - `[low]` `[dismissed]` `[intent-alignment]` Already covered by AC-1.
+  - `[medium]` `defer` [intent-alignment] Later story.
+  - `[high]` `patch` `[edge-case]` Null from the API — fixed.
+  - `[low]` `reject` (blind) Older row without a tag.
+
+## Spec Change Log
+- `[low]` `reject` [intent-alignment] Outside the triage log, not counted.
+"""
+
+
+class IntakeMetrics(unittest.TestCase):
+    """The intake stage's fields on a run row (references/metrics.md): the
+    question round and the approval split the user's questions and wait at
+    the gate, the intent auditor's reject rate comes from tagged triage rows,
+    and the holdout scenarios from <slug>-scenarios.json."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.store = os.path.join(self.dir, "store")
+        self.root = os.path.join(self.dir, "repo")
+        self.env = mock.patch.dict(os.environ, {"BMAD_RUNS_DIR": self.store})
+        self.env.start()
+        self.session = os.path.join(self.dir, "s1.jsonl")
+        subs = os.path.join(self.dir, "s1", "subagents")
+        os.makedirs(subs)
+        self.spec = os.path.join(self.dir, "spec-u1.md")
+        with open(self.spec, "w", encoding="utf-8") as fh:
+            fh.write(INTAKE_SPEC)
+        self.cost = load("cost_report_intake", "cost-report.py")
+        self.runs = self.cost.run_dir.run_dir(self.root, "gamma", create=True)
+        write_jsonl(self.session, [
+            {"type": "user", "timestamp": "2026-10-26T10:00:00Z",
+             "message": {"content": "<command-name>/bmad-batch-build</command-name>"}},
+            call(1, "Bash", {"command": 'python "D:/s/scripts/run_dir.py" gamma --root D:/repo'}, "2026-10-26T10:01:00Z"),
+            call(2, "Write", {"file_path": f"{self.runs}/gamma.md", "content": "x"}, "2026-10-26T10:02:00Z"),
+            # The question round (2 questions, 5 min), then the approval (1, 3 min).
+            call(3, "AskUserQuestion", {"questions": [{"question": "a"}, {"question": "b"}]}, "2026-10-26T10:03:00Z"),
+            result(3, "answered", "2026-10-26T10:08:00Z", error=False),
+            call(4, "AskUserQuestion", {"questions": [{"question": "approve?"}]}, "2026-10-26T10:09:00Z"),
+            result(4, "approved", "2026-10-26T10:12:00Z", error=False),
+            call(5, "Bash", {"command": 'python "D:/s/scripts/intake.py" freeze D:/store/gamma-intake.md'},
+                 "2026-10-26T10:13:00Z"),
+            result(5, "frozen", "2026-10-26T10:13:00Z", error=False),
+            call(6, "Agent", {"description": "Unit 1 worker", "prompt": "Project root: D:/repo/.claude/worktrees/gamma-1"},
+                 "2026-10-26T10:14:00Z"),
+            result(6, "Async agent launched", "2026-10-26T10:14:00Z", error=False),
+            # After the gate: a nudge (6 min typed) and a blocker question (4 min).
+            {"type": "user", "timestamp": "2026-10-26T10:20:00Z", "message": {"content": "go on"}},
+            call(7, "AskUserQuestion", {"questions": [{"question": "blocked"}]}, "2026-10-26T10:30:00Z"),
+            result(7, "skip it", "2026-10-26T10:34:00Z", error=False),
+            call(8, "Agent", {"description": "gamma synthesis", "prompt": "merge"}, "2026-10-26T10:40:00Z"),
+            result(8, "RESULT: pr", "2026-10-26T11:00:00Z", error=False),
+        ])
+        worker = os.path.join(subs, "agent-w1")
+        write_jsonl(worker + ".jsonl", [
+            {"type": "user", "timestamp": "2026-10-26T10:14:00Z",
+             "message": {"content": "You are a Build Auto worker for one unit.\nUnit: 1"}},
+            {"type": "assistant", "timestamp": "2026-10-26T10:38:00Z", "message": {"id": "w9", "content": [
+                {"type": "text", "text": f"SPEC: {self.spec}\nSTATUS: done\n"}]}},
+        ])
+        json.dump({"agentType": "bmad-batch-worker", "toolUseId": "t6"}, open(worker + ".meta.json", "w"))
+        self.run_file("INTAKE start 2026-10-26T10:02:30Z\nINTAKE questions 2 2026-10-26T10:03:00Z\n"
+                      "INTAKE approved 2026-10-26T10:12:30Z\n")
+        with open(os.path.join(self.runs, "gamma-intake.md"), "w", encoding="utf-8") as fh:
+            fh.write("# Intake: gamma\n")
+        with open(os.path.join(self.runs, "gamma-scenarios.json"), "w", encoding="utf-8") as fh:
+            json.dump({"scenarios": [{"id": "SC-1", "result": "pass"}, {"id": "SC-2", "result": "fail"}],
+                       "pass_rate": 0.5, "assert_edits": 1, "escapes": [{"unit": "U1", "what": "x"}]}, fh)
+
+    def tearDown(self):
+        self.env.stop()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def run_file(self, text):
+        with open(os.path.join(self.runs, "gamma.md"), "w", encoding="utf-8") as fh:
+            fh.write("# gamma\nMode: lane\n" + text)
+
+    def row(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            row = self.cost.report([self.session], "gamma")[0]
+        return self.cost.intake_facts(row, self.session, "gamma", self.root)
+
+    def test_questions_and_wait_split_at_the_approval(self):
+        r = self.row()
+        self.assertTrue(r["intake"])
+        self.assertEqual(r["intake_min"], 10)
+        self.assertEqual((r["questions"], r["min_ask"], r["min_typed"]), (4, 12, 6))
+        # The approval call, answered just before INTAKE approved, counts at the gate.
+        self.assertEqual((r["questions_at_gate"], r["questions_after_gate"]), (3, 1))
+        self.assertEqual((r["wait_min_gate"], r["wait_min_after_gate"]), (8, 10))
+        self.assertEqual(r["wait_min_gate"] + r["wait_min_after_gate"], r["min_ask"] + r["min_typed"])
+
+    def test_a_clock_that_is_off_falls_back_to_the_freeze_line(self):
+        # The approval a day early (outside the run's span): by time, nothing
+        # would be at the gate; by the order of the log, the first two calls are.
+        for approved in ("2026-10-25T00:00:00Z", "2026-10-26T10:00:00"):
+            self.run_file(f"INTAKE start 2026-10-26T10:02:30Z\n- INTAKE approved {approved}\n")
+            r = self.row()
+            self.assertEqual((r["questions_at_gate"], r["questions_after_gate"]), (3, 1), approved)
+            self.assertEqual((r["wait_min_gate"], r["wait_min_after_gate"]), (8, 10), approved)
+            self.assertIsNone(r["intake_min"])  # an approval before the start is no duration
+
+    def test_scenarios_file(self):
+        r = self.row()
+        self.assertEqual((r["scenario_pass_rate"], r["assert_edits"], r["escape_count"]), (0.5, 1, 1))
+        os.remove(os.path.join(self.runs, "gamma-scenarios.json"))
+        r = self.row()
+        self.assertEqual((r["scenario_pass_rate"], r["assert_edits"], r["escape_count"]), (None, None, None))
+
+    def test_reject_rate_from_tagged_triage_rows(self):
+        r = self.row()
+        # 4 intent-alignment rows in the triage log: reject and dismissed are
+        # rejected, patch and defer are not; the untagged (blind) row and the
+        # row outside the log are not counted.
+        self.assertEqual(r["layer_findings"], {"intent-alignment": {"total": 4, "rejected": 2},
+                                               "edge-case": {"total": 1, "rejected": 0}})
+        self.assertEqual(r["intent_auditor_reject_rate"], 0.5)
+        self.assertEqual(r["fix_merge_commits"], 0)
+
+    def test_a_run_without_intake_has_nulls(self):
+        os.remove(os.path.join(self.runs, "gamma-intake.md"))
+        os.remove(os.path.join(self.runs, "gamma-scenarios.json"))
+        r = self.row()
+        self.assertFalse(r["intake"])
+        for k in ("intake_min", "questions_at_gate", "questions_after_gate", "wait_min_gate",
+                  "wait_min_after_gate", "scenario_pass_rate", "assert_edits", "escape_count"):
+            self.assertIsNone(r[k], k)
+        # A spec without tagged rows has no rate.
+        with open(self.spec, "w", encoding="utf-8") as fh:
+            fh.write(SPEC.format(extra=""))
+        r = self.row()
+        self.assertIsNone(r["intent_auditor_reject_rate"])
+        self.assertIsNone(r["layer_findings"])
+
+    def test_exported_and_summarised(self):
+        r = self.row()
+        r.update({"session": "s1", "slug": "gamma", "skill_version": "0.17.0", "turn_budget_hit": [],
+                  "mtok_w1h_subagents": 1, "project": "repo"})
+        old = dict(r, slug="old", intake=False, questions=2, min_user_wait=9,
+                   **{k: None for k in self.cost.INTAKE_FIELDS})
+        with open(os.path.join(self.store, "runs.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(old) + "\n" + json.dumps(r) + "\n")
+        m = load("metrics_intake", "metrics.py")
+        run = [x for x in m.bundle()["runs"] if x["intake"]][0]
+        self.assertEqual((run["questions_after_gate"], run["wait_min_gate"], run["intent_auditor_reject_rate"],
+                          run["scenario_pass_rate"], run["escape_count"]), (1, 8, 0.5, 0.5, 1))
+        summary = load("runs_summary_intake", "runs-summary.py")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            summary.main([])
+        text = out.getvalue()
+        self.assertIn("Intake, medians per run", text)
+        with_line = next(line for line in text.splitlines() if line.startswith("with intake"))
+        self.assertEqual(with_line.split()[2:9], ["1", "10m", "3", "1", "8m", "10m", "50%"])
+        without = next(line for line in text.splitlines() if line.startswith("without"))
+        self.assertIn("2*", without)
+        self.assertIn("9m*", without)
+
+
+# A minimal intake in the contract's format (references: intake-contract,
+# 0.17.0). Parsers key on the ## headings.
+INTAKE_MD = """# Intake: demo
+
+## Source prompt
+Add a total to the invoice API.
+
+## Goal
+Invoices return their total.
+
+## Non-goals
+- Currency conversion.
+
+## Acceptance criteria
+- AC-1: Given an invoice with two lines, When it is fetched, Then total is their sum.
+
+## Shared interfaces
+- InvoiceDto: {id, lines} -> {id, lines, total} | owner U1
+
+## Units
+- U1 Invoice total | size M | risk med | depends on: - | touches: api/src/invoice.ts | ACs: AC-1 | items: 2
+
+## Coupling map
+U1 alone.
+
+## Mode decision
+parallel: one unit
+
+## Verification scenarios
+- SC-1: Given an invoice with lines 2 and 3, When GET /invoices/1, Then total is 5.
+
+## Assumptions and defaults applied
+- none
+
+## Open risks
+- none
+
+## Changes after approval
+"""
+INTAKE_PY = os.path.join(SCRIPTS, "intake.py")
+
+
+def write_intake(d=None):
+    d = d or tempfile.mkdtemp().replace("\\", "/")
+    path = d + "/demo-intake.md"
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(INTAKE_MD)
+    return path
+
+
+class IntakeReview(unittest.TestCase):
+    """0.17.0: review layers go by the intake's Risk:, the intent auditor reads
+    the intake instead of the raw prompt, and triage rows carry layer tags."""
+    pinned = PrepareWorktree.pinned
+    tomllib_ok = PrepareWorktree.tomllib_ok
+
+    def layers(self, toml):
+        import tomllib
+        doc = tomllib.loads(toml)["workflow"]
+        return doc, {l["id"]: l for l in doc["review_layers"]}
+
+    def test_when_lines_go_by_risk_and_keep_the_size_rules_without_one(self):
+        _, toml = self.pinned(with_api=False)
+        self.tomllib_ok(toml)
+        doc, layers = self.layers(toml)
+        bh, ia = layers["blind-hunter"]["when"], layers["intent-alignment"]["when"]
+        # low: edge-case and verification-gap only (they keep their defaults).
+        self.assertNotIn("edge-case-hunter", layers)
+        self.assertIn("`Risk: low`, skip this layer", bh)
+        self.assertIn("`Risk: med` or `Risk: high`", bh)
+        self.assertIn("`Risk: high`", ia)
+        self.assertIn("interface", ia.split("`Risk: high`")[0])  # an interface change, at any risk
+        # No Risk line: the 0.16.0 size rules, word for word.
+        self.assertIn("With no Risk line", bh)
+        self.assertIn("Size: S", bh)
+        self.assertIn("With no Size line, run it", bh)
+        self.assertIn("with no Risk line, the 0.16.0 rule", ia)
+        self.assertIn("Size: L", ia)
+        facts = " ".join(doc["persistent_facts"])
+        self.assertIn("reads the `Risk:` line of your worker prompt", facts)
+
+    def test_every_triage_row_carries_its_layer_tag(self):
+        _, toml = self.pinned(with_api=False)
+        doc, _ = self.layers(toml)
+        facts = " ".join(doc["persistent_facts"])
+        for tag in ("[blind-hunter]", "[edge-case]", "[verification-gap]", "[intent-alignment]"):
+            self.assertIn(tag, facts)
+        self.assertIn("`[medium]` `patch` [edge-case]", facts)
+
+    def test_review_findings_reads_a_bracketed_layer_tag(self):
+        d = tempfile.mkdtemp()
+        spec = os.path.join(d, "spec-u3.md")
+        with open(spec, "w", encoding="utf-8") as f:
+            f.write("# s\n\n## Review Triage Log\n\n### 2026-11-15 - Review pass\n"
+                    "- `[high]` `patch` [edge-case] Empty list crashes - fixed.\n")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "review-findings.py"), spec],
+                           capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip().split("\t")[:3], ["spec-u3", "high", "edge-case"], r.stdout)
+
+    def test_without_intake_nothing_intake_related_is_written(self):
+        wt, toml = self.pinned(with_api=False)
+        self.assertNotIn("intake.py", toml)
+        self.assertNotIn("blocked-interface", toml)
+        _, layers = self.layers(toml)
+        self.assertIn("{verbatim_intent}", layers["intent-alignment"]["instruction"])
+        gd = subprocess.run(["git", "-C", wt, "rev-parse", "--absolute-git-dir"],
+                            capture_output=True, text=True).stdout.strip()
+        env = open(os.path.join(gd, "bmad", "scripts.env"), encoding="utf-8").read()
+        self.assertNotIn("INTAKE=", env)
+        self.assertNotIn("IFACE=", env)
+
+    def test_an_intake_feeds_the_auditor_and_the_interface_broadcast(self):
+        d = tempfile.mkdtemp().replace("\\", "/") + "/runs dir"  # a space, as in real paths
+        os.makedirs(d)
+        intake = write_intake(d)
+        wt, toml = self.pinned(with_api=False, extra=("--intake", intake, "--unit", "U1"))
+        self.tomllib_ok(toml)
+        doc, layers = self.layers(toml)
+        facts = " ".join(doc["persistent_facts"])
+        mine = SCRIPTS.replace(chr(92), "/")
+        self.assertIn(f'python "{mine}/intake.py" unit "{intake}" 1', facts)
+        self.assertIn("replaces step-04's definition of {verbatim_intent}", facts)
+        iface = d + "/demo-interface-changes.md"
+        self.assertIn(f'iface show "{iface}"', facts)
+        self.assertIn("Before you start the affected tests or a full-suite run", facts)
+        self.assertIn("blocked-interface", facts)
+        gd = subprocess.run(["git", "-C", wt, "rev-parse", "--absolute-git-dir"],
+                            capture_output=True, text=True).stdout.strip()
+        env = open(os.path.join(gd, "bmad", "scripts.env"), encoding="utf-8").read()
+        self.assertIn(f"INTAKE='{intake}'", env)
+        self.assertIn(f"IFACE='{iface}'", env)
+        self.assertIn("UNIT='1'", env)
+
+    def test_the_worker_dispatch_carries_the_intake_lines(self):
+        worker = open(os.path.join(SKILL_DIR, "references", "worker.md"), encoding="utf-8").read()
+        for line in ("Intake: <intake>", "Risk: <risk>", "Interface changes: <iface>", "Size: <size>",
+                     "STATUS: blocked-interface", 'intake.py" unit "<intake>" <n>',
+                     'intake.py" iface add "<iface>"', 'intake.py" iface show "<iface>"',
+                     '--intake "<intake>" --unit <n> --iface "<iface>"', "--reply-interfaces"):
+            self.assertIn(line, worker)
+        synth = open(os.path.join(SKILL_DIR, "references", "synthesis.md"), encoding="utf-8").read()
+        for line in ('intake.py" scenarios "<intake>"', "<runs>/scenarios/", "<runs>/<slug>-scenarios.json",
+                     "assert-guard.py", "## Changed assertions", "SCENARIOS:", "ESCAPES:", '"assert_edits"'):
+            self.assertIn(line, synth)
+
+
+class InterfaceGate(unittest.TestCase):
+    """A unit may change a pinned interface only with an approved entry in the
+    interface-changes file."""
+
+    def setUp(self):
+        self.root, _, self.spec = unit_repo()
+        self.intake = write_intake()
+        self.iface = os.path.join(os.path.dirname(self.intake), "demo-interface-changes.md")
+
+    def check(self, reply, unit="1"):
+        return gate("--intake", self.intake, "--unit", unit, "--iface-file", self.iface,
+                    "--reply-interfaces", reply, self.root, "u1", self.spec, "main")
+
+    def test_a_changed_pinned_interface_without_an_entry_fails(self):
+        rc, out = self.check("GET /invoices/:id -> InvoiceDto {id, lines, total, tax} CHANGED; util.sum(a, b)")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("pinned interface 'InvoiceDto' marked CHANGED with no approved entry for U1", out)
+
+    def test_an_approved_entry_passes(self):
+        with open(self.iface, "w", encoding="utf-8") as f:
+            f.write("- 2026-11-15T10:00:00Z U1 InvoiceDto: {id, lines} -> {id, lines, total, tax} (reason: tax shown)\n")
+        rc, out = self.check("InvoiceDto {id, lines, total, tax} CHANGED")
+        self.assertEqual(rc, 0, out)
+        # Another unit's entry does not cover this one (U12 is not U1).
+        with open(self.iface, "w", encoding="utf-8") as f:
+            f.write("- 2026-11-15T10:00:00Z U12 InvoiceDto: a -> b (reason: r)\n")
+        rc, out = self.check("InvoiceDto CHANGED", unit="U1")
+        self.assertEqual(rc, 1, out)
+
+    def test_unchanged_or_unpinned_interfaces_pass(self):
+        self.assertEqual(self.check("InvoiceDto {id, lines, total}")[0], 0)
+        self.assertEqual(self.check("util.sum(a, b, c) CHANGED")[0], 0)
+        self.assertEqual(gate(self.root, "u1", self.spec, "main")[0], 0)  # no --intake: as before
+
+
+class AssertGuard(unittest.TestCase):
+    BASE = ("import { sum } from '../src/sum'\n"
+            "it('adds', () => {\n"
+            "  expect(sum(1, 2)).toBe(3)\n"
+            "  expect(sum(0, 0)).toBe(0)\n"
+            "  expect(sum(-1, 1)).toBe(0)\n"
+            "})\n")
+
+    def run_guard(self, new_test, other=None):
+        root, git = git_repo({"tests/sum.test.ts": self.BASE, "src/sum.ts": "assert(x)\n"})
+        subprocess.run(git + ["checkout", "-q", "-b", "u1"], check=True)
+        with open(os.path.join(root, "tests", "sum.test.ts"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(new_test)
+        if other:
+            for p, t in other.items():
+                os.makedirs(os.path.dirname(os.path.join(root, p)), exist_ok=True)
+                with open(os.path.join(root, p), "w", encoding="utf-8", newline="\n") as f:
+                    f.write(t)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "change"], check=True)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "assert-guard.py"), root, "main"],
+                           capture_output=True, text=True)
+        return r.returncode, r.stdout
+
+    def test_a_removed_and_an_edited_assertion_are_caught(self):
+        new = self.BASE.replace("  expect(sum(0, 0)).toBe(0)\n", "") \
+                       .replace("expect(sum(-1, 1)).toBe(0)", "expect(sum(-1, 1)).toBeDefined()")
+        rc, out = self.run_guard(new, other={"src/sum.ts": "x\n"})  # a non-test assert line is ignored
+        self.assertEqual(rc, 1, out)
+        self.assertIn("ASSERT-EDIT tests/sum.test.ts:4 expect(sum(0, 0)).toBe(0)", out)
+        self.assertIn("ASSERT-EDIT tests/sum.test.ts:5 expect(sum(-1, 1)).toBe(0)", out)
+        self.assertIn("assert-guard: 2 edits", out)
+        self.assertNotIn("src/sum.ts", out)
+
+    def test_moved_lines_and_new_assertions_do_not_count(self):
+        lines = self.BASE.splitlines(keepends=True)
+        moved = lines[:2] + [lines[4], lines[2], "  expect(sum(2, 2)).toBe(4)\n"] + lines[5:]
+        # One assertion moves to another test file, re-indented.
+        rc, out = self.run_guard("".join(moved), other={"src/other.spec.ts": "    expect(sum(0, 0)).toBe(0)\n"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("assert-guard: 0 edits", out)
+
+
+class IntakeFixture(unittest.TestCase):
+    """The fixture above is a valid intake, and the
+    id form the worker passes (the plan's numeric id) is accepted."""
+
+    def test_the_fixture_is_ready_and_unit_prints_the_worker_view(self):
+        intake = write_intake()
+        r = subprocess.run([sys.executable, INTAKE_PY, "check", intake], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = subprocess.run([sys.executable, INTAKE_PY, "unit", intake, "1"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("AC-1", r.stdout)
+        self.assertIn("InvoiceDto", r.stdout)
+        self.assertNotIn("SC-1", r.stdout)
+
+    def test_iface_add_writes_what_the_gate_reads(self):
+        root, _, spec = unit_repo()
+        intake = write_intake()
+        iface = os.path.join(os.path.dirname(intake), "demo-interface-changes.md")
+        r = subprocess.run([sys.executable, INTAKE_PY, "iface", "add", iface, "--unit", "1", "--iface", "InvoiceDto",
+                            "--change", "{id, lines} -> {id, lines, total, tax}", "--reason", "tax"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rc, out = gate("--intake", intake, "--unit", "1", "--iface-file", iface,
+                       "--reply-interfaces", "InvoiceDto CHANGED", root, "u1", spec, "main")
+        self.assertEqual(rc, 0, out)
+        # The U1 form is the same unit, for intake.py and the gate alike.
+        r = subprocess.run([sys.executable, INTAKE_PY, "unit", intake, "U1"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rc, out = gate("--intake", intake, "--unit", "U1", "--iface-file", iface,
+                       "--reply-interfaces", "InvoiceDto CHANGED", root, "u1", spec, "main")
+        self.assertEqual(rc, 0, out)
+
+
+class IntakeEndToEnd(unittest.TestCase):
+    """new -> fill -> check -> to-plan -> plan-waves -> set-mode -> freeze ->
+    unit -> iface add -> gate -> verify, on one fixture."""
+
+    def run_py(self, script, *args, env=None):
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, script), *args], capture_output=True,
+                           encoding="utf-8", env=env)
+        return r.returncode, r.stdout
+
+    def test_the_whole_intake_flow(self):
+        import shlex
+        mod = load("intake_e2e", "intake.py")
+        runs = tempfile.mkdtemp().replace("\\", "/")
+        self.addCleanup(lambda: [os.chmod(os.path.join(runs, f), 0o666) for f in os.listdir(runs)])
+        prompt = os.path.join(runs, "demo-prompt.txt")
+        with open(prompt, "w", encoding="utf-8") as f:
+            f.write(mod.body(INTAKE_MD, "Source prompt") + "\n")
+        rc, out = self.run_py("intake.py", "new", runs, "demo", "--prompt-file", prompt)
+        self.assertEqual(rc, 0, out)
+        intake = runs + "/demo-intake.md"
+        self.assertEqual(self.run_py("intake.py", "check", intake)[0], 2)
+        text = open(intake, encoding="utf-8").read()
+        for name in mod.HEADINGS[1:-1]:
+            if name != "Mode decision":
+                text = mod.replace_body(text, name, mod.body(INTAKE_MD, name))
+        with open(intake, "w", encoding="utf-8") as f:
+            f.write(text)
+        self.assertEqual(self.run_py("intake.py", "check", intake), (0, "READY\n"))
+        plan = runs + "/demo-plan.json"
+        self.assertEqual(self.run_py("intake.py", "to-plan", intake, plan)[0], 0)
+        rc, out = self.run_py("plan-waves.py", plan, "--max-parallel", "4", env={**os.environ, "BMAD_RUNS_DIR": runs})
+        self.assertEqual(rc, 0, out)
+        cmd = shlex.split(next(ln for ln in out.splitlines() if ln.startswith("Set mode: "))[len("Set mode: "):])
+        r = subprocess.run([sys.executable, *cmd[1:]], capture_output=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(mod.body(open(intake, encoding="utf-8").read(), "Mode decision").startswith("Mode: lane"))
+        self.assertEqual(self.run_py("intake.py", "freeze", intake)[0], 0)
+        rc, view = self.run_py("intake.py", "unit", intake, "1")
+        self.assertEqual(rc, 0)
+        self.assertIn("AC-1: Given an invoice with two lines", view)
+        self.assertNotIn("SC-1", view)
+        iface = runs + "/demo-interface-changes.md"
+        self.assertEqual(self.run_py("intake.py", "iface", "add", iface, "--unit", "1", "--iface", "InvoiceDto",
+                                     "--change", "{id, lines} -> {id, lines, total, tax}", "--reason", "tax")[0], 0)
+        root, _, spec = unit_repo()
+        rc, out = gate("--intake", intake, "--unit", "1", "--iface-file", iface,
+                       "--reply-interfaces", "InvoiceDto {id, lines, total, tax} CHANGED", root, "u1", spec, "main")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.run_py("intake.py", "verify", intake), (0, "FROZEN ok\n"))
+        run = open(runs + "/demo.md", encoding="utf-8").read()
+        self.assertRegex(run, r"INTAKE start \S+Z[\s\S]*INTAKE approved \S+Z")
 
 
 if __name__ == "__main__":

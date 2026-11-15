@@ -6,7 +6,9 @@ Creates and prints <store>/runs/<project>/<slug>/, where <store> is
 ~/.claude/bmad-batch-runs (BMAD_RUNS_DIR overrides it) and <project> is the
 main checkout's folder name. The orchestrator runs it once at the start of a
 run and uses the printed absolute path for the run file (<slug>.md), the plan
-(<slug>-plan.json), the tickets, the synthesis state, the cost report and the
+(<slug>-plan.json), the intake (<slug>-intake.md, its .sha256 and the
+interface broadcast <slug>-interface-changes.md, intake.py), the tickets, the
+synthesis state, the holdout scenario results, the cost report and the
 journal; the names keep the slug so a path alone says which run it is.
 
 Older runs kept these files in <root>/.claude/worktrees/_runs/. Creating
@@ -27,7 +29,8 @@ def project_name(root):
 
 
 # The files a run keeps; adopt() moves exactly these, never <slug>-<other>.
-SUFFIXES = (".md", "-plan.json", "-tickets.json", "-synthesis.md", "-contracts.md", "-cost.txt", "-journal.md")
+SUFFIXES = (".md", "-plan.json", "-tickets.json", "-synthesis.md", "-contracts.md", "-cost.txt", "-journal.md",
+            "-intake.md", "-intake.md.sha256", "-interface-changes.md", "-scenarios.json")
 
 
 def run_dir(root, slug, create=False):
@@ -73,7 +76,7 @@ def find(root, slug, suffix=""):
 _SEP = r"[/\\]+"
 RUN_FILE_RE = re.compile(
     rf"(?:{_SEP}runs{_SEP}[^/\\\"]+{_SEP}(?P<a>[\w.-]+){_SEP}(?P=a)|_runs{_SEP}(?P<b>[\w.-]+?))\.md")
-NOT_RUN_FILE = ("-cost", "-synthesis", "-contracts", "-spec", "-journal")
+NOT_RUN_FILE = ("-cost", "-synthesis", "-contracts", "-spec", "-journal", "-intake", "-interface-changes")
 
 
 def slug_in(line):

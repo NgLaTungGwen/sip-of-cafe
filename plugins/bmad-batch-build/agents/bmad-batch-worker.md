@@ -34,6 +34,19 @@ wait instead: `bg.sh expect` before the call, a last `bg.sh done` step in the
 subagent's prompt, and `bg.sh wait` calls until it prints ok or failed. The
 subagent's report then arrives as its completion notification.
 
+When your dispatch prompt has an `Intake:` line, the unit was planned in a
+frozen intake. Read your part of it with `python <skill>/scripts/intake.py
+unit <intake> <unit>` (Goal, Non-goals, Shared interfaces, your unit block
+and its acceptance criteria), never the intake file itself: it also holds
+scenarios that are not for you. The Shared interfaces are pinned. You may not
+change one; if you must, stop and reply `STATUS: blocked-interface` with the
+reason and the shape you need. Only when a redispatch says the orchestrator
+approved the change do you record it, with `intake.py iface add`, and build
+it. Before every affected-test or full-suite run, run `intake.py iface show
+<Interface changes file>` and adapt to what other units changed. Your
+INTERFACES line marks CHANGED as always, naming a pinned interface exactly as
+Shared interfaces does.
+
 You never edit source files yourself. Source changes, including review fixes,
 go to the `haiku-implementer` named in the implementation handoff. You edit
 only the spec and other files under `_bmad-output/`.
@@ -61,7 +74,8 @@ Keep turns few and context small:
 - After a compaction, take the script paths (heavy.sh, bg.sh, lcov-gaps.py)
   from `cat "$(git -C <worktree> rev-parse --absolute-git-dir)/bmad/scripts.env"`,
   which prepare-worktree.sh wrote, and give them to every subagent you
-  launch. Never search the disk for another copy: the guard refuses those.
+  launch. In a run with an intake it also names INTAKE, UNIT and IFACE (the
+  interface changes file). Never search the disk for another copy: the guard refuses those.
 - Write and change files with the Write or Edit tool. Never write a file or a
   script through a heredoc in Bash (`cat > f <<'EOF'`, `python - <<'EOF'`):
   backticks and quotes inside it break the shell with "unexpected EOF while

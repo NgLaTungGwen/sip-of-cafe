@@ -42,7 +42,11 @@ KEEP = ["start", "usd", "usd_by_role", "usd_idle_max", "mtok_in", "ktok_out", "m
         "min_wall", "min_user_wait", "min_ask", "min_typed", "questions", "min_slowest_worker", "min_synthesis", "min_rest", "workers",
         "units_reviewed", "units_haiku", "first_review_high_medium", "units_with_high",
         "fix_merge_commits", "max_turns", "by_role", "turn_budget_hit", "system_map",
-        "skill_version", "version_exact"]
+        "skill_version", "version_exact",
+        # The intake stage (0.17.0); null on runs before it.
+        "intake", "intake_min", "questions_at_gate", "questions_after_gate", "wait_min_gate",
+        "wait_min_after_gate", "intent_auditor_reject_rate", "layer_findings",
+        "scenario_pass_rate", "assert_edits", "escape_count"]
 
 
 def store_dir():

@@ -9,11 +9,12 @@ You are the orchestrator. You split the work, dispatch workers, check what they
 return and hand the results to synthesis. You never write product code
 yourself.
 
-The flow is: input → split → mode → **user approves** → tickets +
-worktrees + workers → gate → synthesis → one PR linked to the tickets.
+The flow is: input → intake (draft, readiness, one question round, split
+and mode) → **user approves** → freeze → tickets + worktrees + workers →
+gate → synthesis → one PR linked to the tickets.
 
 The schedule is chosen automatically from the split's dependencies (section
-2, "Schedule the units"):
+1, "Schedule the units"):
 
 - **parallel:** every unit gets its own worktree and all workers start
   together, then synthesis merges them.
@@ -24,9 +25,13 @@ The schedule is chosen automatically from the split's dependencies (section
   waves. Each wave runs as a lane or in parallel, and later waves start from
   the integration branch that already holds the earlier ones.
 
-The only planned checkpoint is the split approval. You also stop and ask in two
-other cases: when a worker doesn't build, and when synthesis reports `stuck`
-(after a wave too).
+The user is asked twice, both before anything is built: one question round
+on the intake, and the single approval of the intake, the plan and the gate
+policy (section 1). After approval you ask only about real failures: a unit
+that is blocked (`STATUS: blocked` or `blocked-interface`) or fails a gate
+that needs a decision, a destructive or irreversible decision, and a
+synthesis that reports `stuck` (after a wave too). Never ask to clarify a
+requirement after approval: the frozen intake is the requirement.
 
 Two rules shape the flow, because most of a run is waiting:
 
@@ -162,8 +167,8 @@ With `REMOTE none`, read every `origin/<base>` in this skill as `<base>`, and
 skip every fetch and push: the run ends on a local branch.
 
 **Tell the user when the run needs them.** Before every question to the user
-(the split approval, a service that is down, a gate failure, a stuck
-synthesis), send a `PushNotification` with one line saying what is needed,
+(the intake's question round, the approval, a service that is down, a gate
+failure, a stuck synthesis), send a `PushNotification` with one line saying what is needed,
 then ask. Load the tool with `ToolSearch` (`select:PushNotification`) if it is
 deferred.
 
@@ -189,20 +194,41 @@ carries the details becomes one unreadable paragraph:
   `AskUserQuestion` returns without an answer (it timed out or closed
   unanswered), go on with the option marked `(Recommended)`, write
   `TIMEOUT: <header>: took <option>` into the run file, and say so in the
-  final report. Where no option is marked, a timeout takes the one that
-  changes least: **Leave it out** for a failed unit, **Stop** for a blocker
-  in a lane or dependency chain and for a stuck synthesis. Only the split
-  approval waits for a real answer, since approving starts the spending and
-  the tickets: on a timeout there, ask it again once, then stop and record
-  the run.
+  final report. In the intake's question round, `intake.py defaults` does
+  both: it writes the default under the intake's Assumptions and the
+  `TIMEOUT:` line into the run file (section 1, Step 3), so don't write it
+  again. Where no option is marked, a timeout takes the one that changes
+  least: **Leave it out** for a failed unit, **Stop** for a blocker in a lane
+  or dependency chain and for a stuck synthesis. Only the approval waits for
+  a real answer, since approving starts the spending and the tickets: on a
+  timeout there, ask it again once, then stop and record the run.
+- **When to ask at all.** Before approval: the one question round and the
+  approval, nothing else. After approval: only a real failure (a blocked or
+  `blocked-interface` unit, a gate failure that needs a decision, a stuck
+  synthesis, a service that is down) or a destructive or irreversible
+  decision. A requirement that turns out unclear after approval is decided
+  from the frozen intake, its Assumptions and its Open risks; a change the
+  run must make anyway goes in with `intake.py amend`, never as a question.
 
-## 1. Read the input
+## 1. Intake
 
-The user provides one of two things:
+The intake, `<runs>/<slug>-intake.md`, is the run's one statement of what it
+builds: the user's prompt verbatim, the goal and non-goals, testable
+acceptance criteria, the pinned shared interfaces, the units, the mode and
+the holdout scenarios. Workers build from it, review and the gate check
+against it, and synthesis tests the merged result with its scenarios. It
+lives in `<runs>`, never in a worktree, and it is written before any
+worktree exists. `<skill>/scripts/intake.py` creates, checks, freezes and
+reads it; its docstring gives the format. The intake goes through five steps:
+draft, readiness, one question round, the single approval, freeze.
+
+### Step 1. Draft
+
+**Read the input.** The user provides one of two things:
 
 - **A meeting transcript.** Extract the decisions and action items that ask for
   a code change. Ignore discussion that didn't end in a decision. Note anything
-  ambiguous so you can raise it at the split approval.
+  ambiguous as an open question for Step 3.
 - **Pasted work items.** These are already analysed. Treat each item's title,
   description and acceptance criteria as the requirement. If an item carries an
   ADO ID (`#1234`, `1234` or a work item URL), or with `TICKETS gh` a GitHub
@@ -220,17 +246,26 @@ and so on). Create the run folder and use the path it prints as `<runs>`:
 python "<skill>/scripts/run_dir.py" <slug> --root "<root>"
 ```
 
-Record the run at `<runs>/<slug>.md`. That file holds the source summary, the units, their branches
-and worktrees, and their gate results. Keep it updated after every step so the
-run can be resumed.
+Save the user's prompt, as given (the transcript or the work items, word for
+word, nothing summarised), to `<runs>/<slug>-prompt.txt` with the Write tool,
+then create the intake:
 
-## 2. Split into units
+```bash
+python "<skill>/scripts/intake.py" new "<runs>" <slug> --prompt-file "<runs>/<slug>-prompt.txt"
+```
 
-Find where each change lands without reading the code yourself. Your context
-is re-written in full every time a worker, synthesis or the user answers after
-a long gap, since this session's cache keeps the session's own TTL, so every
-file you read here is paid for again at each of those returns. Read only
-`AGENTS.md` and, when the project has one, its system map. First run
+It writes the template with the Source prompt filled in, prints the intake's
+path, and writes `INTAKE start` into the run file. It refuses to overwrite an
+existing intake: a resumed run keeps its own. Record the run at
+`<runs>/<slug>.md`. That file holds the source summary, the units, their
+branches and worktrees, and their gate results. Keep it updated after every
+step so the run can be resumed.
+
+**Map the code** without reading it yourself. Your context is re-written in
+full every time a worker, synthesis or the user answers after a long gap,
+since this session's cache keeps the session's own TTL, so every file you
+read here is paid for again at each of those returns. Read only `AGENTS.md`
+and, when the project has one, its system map. First run
 `python "<skill>/scripts/check-map.py" "<root>"`:
 
 - `MAP none`: there is no map; go straight to Explore.
@@ -251,6 +286,31 @@ and any shared hotspot (migrations, `packages/contracts`, lockfiles, a file
 two requirements both need). Send a second `Explore` only for a gap in that
 map.
 
+**Fill the intake** with the Write or Edit tool, section by section (the
+headings stay as they are, in their order; a `<...>` placeholder left in a
+field counts as empty):
+
+- **Goal:** one to three sentences. **Non-goals:** what this run does not do.
+- **Acceptance criteria:** one `- AC-<n>: ...` line per testable behaviour,
+  in Given/When/Then.
+- **Shared interfaces:** every interface two units meet at, pinned exactly
+  (the route and payload, the type, the method signature), as
+  `- <symbol>: <current shape> -> <new shape> | owner U<n>`, or `- none`.
+  Workers code against these lines, so pin them here and nowhere else.
+- **Units:** one line per unit, as the split rules below say:
+  `- U<n> <title> | size <S|M|L|XL> | risk <low|med|high> | depends on: <- or U<n> (reason), ...> | touches: <files> | ACs: <AC ids> | items: <n>`,
+  with indented lines under it for its kind and unchanged behaviour (bug
+  units), the exact excerpt of the source it came from, `--apps`, its branch
+  and its ticket.
+- **Coupling map:** which units are independent, which must run in order, and
+  why.
+- **Verification scenarios:** `- SC-<n>: Given ... When ... Then ...` lines
+  that exercise the acceptance criteria end to end. They are the holdout:
+  synthesis runs them on the merged result, and workers never see them.
+- **Assumptions and defaults applied**, **Open risks:** what you assumed and
+  what may go wrong.
+- Leave **Mode decision** to `set-mode` and **Changes after approval** empty.
+
 A unit is a piece of work that one worker can build and test on its own, from
 `origin/<base>`, without seeing any other unit. Rules for splitting:
 
@@ -258,23 +318,61 @@ A unit is a piece of work that one worker can build and test on its own, from
   merge them into one unit.
 - **Cut dependencies at an agreed interface.** Workers can't see each other's
   branches. When unit B needs something unit A builds, such as an endpoint, a
-  type or a method, don't serialise them. Write the exact interface (the route
-  and payload, the type, or the method signature) into both intents. A
-  implements it and B codes against it, so both run at the same time. Put the
-  two in one unit only when the interface can't be pinned down before
-  implementation starts.
+  type or a method, don't serialise them. Pin the exact interface under
+  Shared interfaces with A as its owner. A implements it and B codes against
+  it, so both run at the same time. Put the two in one unit only when the
+  interface can't be pinned down before implementation starts.
 - **Shared hotspots get one owner.** A single unit owns all of a run's
   migrations, all `packages/contracts` changes and all lockfile changes. If
-  several units need contract changes, the owner unit makes them and the other
-  units' intents describe the agreed shape.
+  several units need contract changes, the owner unit makes them and the
+  agreed shape is pinned under Shared interfaces for the others.
 - **Record real dependencies, and only those.** When unit B can't build or
   test without unit A's code (it imports A's new module or types at compile
   time, or its tests run A's code), and an agreed interface can't stand in
-  for that code, B depends on A. Write `depends_on` with the reason. Prefer an
-  agreed interface wherever one works: a dependency moves B to a later wave.
+  for that code, B depends on A. Write it in `depends on:` with the reason.
+  Prefer an agreed interface wherever one works: a dependency moves B to a
+  later wave.
 - **No cap on the count.** Split as finely as file ownership allows. Each unit
   should be one session-sized build. A single unit is fine: it runs as a lane
   of one.
+
+For every unit, write:
+
+- a title
+- a size, from the files it owns:
+  - **S:** up to 3 files, with no migration and no new module;
+  - **M:** 4 to 10 files;
+  - **L:** more than 10 files, a new module, or a migration plus API plus UI;
+  - **XL:** more than one session's work. plan-waves.py schedules it as L
+    and prints a Split line for it: split it before the approval.
+- a risk, which sizes the review: **high** for migrations, auth,
+  payments, deleting or rewriting data, and the owner of a shared interface;
+  **med** for a change to a shared module, an API or a contract;
+  **low** for a change local to its own files.
+- `items`: how many separate things it must fix or build (findings, work
+  items, acceptance criteria), and `touches`: the source files they are in.
+  **Keep a unit to at most 50 items, and give a file of more than 2500 lines
+  its own unit** when it carries real work. One worker's coder cannot hold
+  more: in sonar-zero-5 a 64-finding unit with a 6500-line route file took
+  315 min and about 12 coder rounds, and held its whole wave.
+- its ACs: the ids of the acceptance criteria it delivers. Every AC should be
+  delivered by some unit.
+- `depends on`: the units whose code it needs to build or test, each with the
+  reason (for example "imports the chart kit types"), or `-`
+- a branch, `<run branch>-<n>`, used when the unit runs in a parallel
+  wave; a unit in a lane wave works on the run's branch
+- `--apps`, if the unit touches `apps/`
+- its kind: `bug` when it fixes behaviour that is wrong now, otherwise
+  `change`. A bug unit's block has the indented line `kind bug`, says what
+  happens now and what should happen, and ends with an **Unchanged
+  behaviour** list: what nearby must keep working as it does. The worker
+  reproduces the bug before fixing it, and the gate (`--bug`) rejects the unit
+  without that reproduction.
+- its ticket
+
+The worker sees only `intake.py unit <id>` output: the Goal, the Non-goals,
+the Shared interfaces, its own unit block and the full text of its ACs. So a
+unit's block must say everything its worker needs that the ACs don't.
 
 Heavy commands (installs, builds, full test suites, the synthesis verify) go
 through `scripts/heavy.sh`. It admits a command only while the machine has room
@@ -295,64 +393,85 @@ and waits.
 routes a heavy command that an agent typed without `heavy.sh` through the
 queue anyway. The skill never enables it itself.
 
-For every unit, write:
+### Step 2. Readiness
 
-- a title
-- a size, from the files it owns:
-  - **S:** up to 3 files, with no migration and no new module;
-  - **M:** 4 to 10 files;
-  - **L:** more than 10 files, a new module, or a migration plus API plus UI.
-- `items`: how many separate things it must fix or build (findings, work
-  items, acceptance criteria), and `files`: the source files they are in.
-  **Keep a unit to at most 50 items, and give a file of more than 2500 lines
-  its own unit** when it carries real work. One worker's coder cannot hold
-  more: in sonar-zero-5 a 64-finding unit with a 6500-line route file took
-  315 min and about 12 coder rounds, and held its whole wave.
-- `depends_on`: the units whose code it needs to build or test, each with the
-  reason (for example "imports the chart kit types"), or none
-- a branch, `<run branch>-<n>`, used when the unit runs in a parallel
-  wave; a unit in a lane wave works on the run's branch
-- `--apps`, if the unit touches `apps/`
-- the files or areas it owns
-- a self-contained intent: the goal, the scope, what's out of scope, acceptance
-  criteria in Given/When/Then, and the exact excerpt of the source material it
-  came from
-- its kind: `bug` when it fixes behaviour that is wrong now, otherwise
-  `change`. A bug unit's intent starts with the line `Kind: bug`, says what
-  happens now and what should happen, and ends with an **Unchanged
-  behaviour** list: what nearby must keep working as it does. The worker
-  reproduces the bug before fixing it, and the gate (`--bug`) rejects the unit
-  without that reproduction.
-- its ticket
+```bash
+python "<skill>/scripts/intake.py" check "<runs>/<slug>-intake.md"
+```
 
-The worker sees only its intent.
+- `READY` (exit 0): go on.
+- `NOT READY` (exit 2), with one `MISSING: <what>` line per gap: fill what
+  you can from the input and the code map, and check again. When a gap needs
+  input only the user has (no goal can be read from the prompt, no testable
+  behaviour, nothing to build), **stop**: show the `MISSING:` lines in your
+  message and ask the user for the missing input. Plan nothing and dispatch
+  nothing until a new check prints `READY`.
+
+### Step 3. One question round
+
+Collect every open question into **one batch**: ambiguities in the input,
+choices the code map raised (edit a migration or add one, which unit owns a
+contract), interface shapes you could not pin. At most about 6. Each gets a
+**Recommended** default, the option you would take, first. `AskUserQuestion`
+takes up to 4 questions per call, so use at most two calls back to back.
+Follow "How to ask" above. First mark the round:
+
+```bash
+python "<skill>/scripts/intake.py" asked "<runs>/<slug>-intake.md" --count <n>
+```
+
+Write each answer into the intake (Goal, ACs, Units, Shared interfaces or
+Assumptions, wherever it belongs). A question that times out takes its
+Recommended default:
+
+```bash
+python "<skill>/scripts/intake.py" defaults "<runs>/<slug>-intake.md" --question "<header>" --took "<option>"
+```
+
+It writes `- TIMEOUT: <header>: took <option>` under Assumptions and defaults
+applied and the `TIMEOUT:` line into the run file. With no open question,
+skip the round (and `asked`). Then run `check` again: it must print `READY`.
+This is the only round of questions about the requirements in the whole run.
 
 ### Schedule the units
 
 Decide it yourself from the units; don't ask. Write the plan file
-`<runs>/<slug>-plan.json`, in the format documented in
-`<skill>/scripts/plan-waves.py`, with each unit's id, title, size,
-`depends_on`, reason, `items` and `files`. Then run it, adding `--busy` when the machine is busy
-and `--no-tests` when the profile has no `suite` or the repository's
-instructions ban tests:
+`<runs>/<slug>-plan.json` from the intake:
+
+```bash
+python "<skill>/scripts/intake.py" to-plan "<runs>/<slug>-intake.md" "<runs>/<slug>-plan.json"
+```
+
+It writes each unit's id, title, size, risk, `depends_on` with the reasons,
+`items`, `files` and ACs, in the format documented in
+`<skill>/scripts/plan-waves.py`, and keeps the plan's other keys. Then run
+plan-waves, adding `--busy` when the machine is busy and `--no-tests` when
+the profile has no `suite` or the repository's instructions ban tests:
 
 ```bash
 n=$(bash "<skill>/scripts/heavy.sh" --count); [ "$n" -ge $(( $(nproc) / 3 )) ] && b=--busy || b=
 python "<skill>/scripts/plan-waves.py" "<runs>/<slug>-plan.json" $b [--no-tests] --root "<root>"
 ```
 
+It ends with a **Set mode:** line, a ready-to-paste `intake.py set-mode`
+command with the Mode line and the reason for it. Run it (one Bash call, the
+command after `Set mode: `); it fills the intake's Mode decision. Every time
+you change the units, run `to-plan`, `plan-waves.py` and the `Set mode`
+command again.
+
 When it prints a **Split** line, split that unit as the line says (by file or
-by area, each part with its own intent and ticket), rewrite the plan file and
-run the script again, before you show the split for approval. Parts that edit
-the same file never run side by side, because they would conflict at the
-merge: give each later part a `depends_on` on the one before, so they run as a
-lane. A unit that is only one big file and cannot be cut further stays one
-unit: show its Split line in the approval table with the reason, instead of
-splitting it.
+by area, each part with its own unit line, ACs and ticket), in the intake,
+then run the three commands again, before you show the split for approval.
+Parts that edit the same file never run side by side, because they would
+conflict at the merge: give each later part a `depends on` the one before, so
+they run as a lane. A unit that is only one big file and cannot be cut
+further stays one unit: show its Split line in the approval table with the
+reason, instead of splitting it.
 
 It also reads each unit's `files` and chains units that share one: the later
 gets a `depends_on` on the earlier (a **Chained** line says so), because two
-units editing one file cannot be merged side by side.
+units editing one file cannot be merged side by side. Write the chain into
+the intake's unit line too.
 
 It schedules the units in rounds. A round holds up to 4 ready units (all their
 dependencies are in earlier rounds), the unit with the longest chain of work
@@ -372,11 +491,12 @@ waves, and picks the mode:
 - **waves:** anything else.
 
 No parallel wave has more than 4 workers, 3 when one other run is active on
-the machine and 2 when more are; a larger group of independent units becomes
-several waves in a row. Each worker brings a coder and up to four reviewers,
-and Claude Code allows 20 subagents at once per session; on 2026-10-26 runs of
-12, 9 and 5 parallel workers at the same time got launches refused and
-stalled the build queue for hours. The script prints the cap it used.
+the machine and 2 when more are, and fewer when the free RAM can't hold that
+many units; a larger group of independent units becomes several waves in a
+row. Each worker brings a coder and up to four reviewers, and Claude Code
+allows 20 subagents at once per session; on 2026-10-26 runs of 12, 9 and 5
+parallel workers at the same time got launches refused and stalled the build
+queue for hours. The script prints the cap it used.
 
 A unit with `items` takes 40 min plus 2.2 min per item, plus 30 min per 1000
 lines of every file over 2500 lines it owns (sonar-zero-5: 21 findings took 85
@@ -384,7 +504,7 @@ min, 46 took 140, 64 with a 6500-line file took 315). A unit without `items`
 takes its size's minutes: S 50, M 100, L 160. Recorded runs correct every
 number from the first one on (three prior runs' worth of weight), first over
 all projects and then over this project's own, so give every unit `items` and
-`files`. The script also prints a p80, from the measured spread of recorded
+`touches`. The script also prints a p80, from the measured spread of recorded
 units (1.6 times the estimate until there are five), and a **Critical path**:
 the least the run can take however many workers it has. Show the p80 with the
 estimate: sonar-zero-5 was estimated at 6 h and took 13.4 h. A **Straggler
@@ -437,29 +557,34 @@ run onto that pattern, and **reuse what already exists**:
 - **Don't attach an Epic.** The user links stories to epics by hand.
 
 A new story's title is a plain behaviour statement, like the board's existing
-ones. Its description is a short HTML summary of the source and the list of
-units. A new Task's title is the unit title, and its description is the unit's
-intent as HTML. With `TICKETS gh`, write both descriptions in Markdown
-instead.
+ones. Its description is a short HTML summary of the intake's Goal and the
+list of units. A new Task's title is the unit title, and its description is
+the unit's `intake.py unit` output as HTML. With `TICKETS gh`, write both
+descriptions in Markdown instead.
 
-## 3. Get approval (the one planned checkpoint)
+### Step 4. The single approval
 
-Show the split as a compact table with these columns: unit, ticket (`#id`
-reused, or `new Task`), owns, interfaces (what it provides or consumes), and the
-acceptance criteria in brief. Above the table, give the story or stories (`#id`
-reused, or `new User Story: <title>`). List the open ambiguities underneath.
-Approving the split also approves creating the new tickets.
+Show the intake summary, the plan and the gate policy in one message, then
+ask once.
 
-Mark bug units with `(bug)` after their title. Add a size column and a **depends on** column (unit ids and the reason, or
-`-`) to the table. Under it, paste the **Mode** line that `plan-waves.py`
-printed: the chosen mode, every estimate with its p80, the wave order and the
-dependencies, for example
+**The intake summary:** the Goal, the Non-goals, the units table, the Mode
+line and the Open risks, plus the Assumptions the question round applied by
+default.
+
+The units table has these columns: unit, ticket (`#id` reused, or `new
+Task`), size, risk, owns (its touches), interfaces (what it provides or
+consumes, from Shared interfaces), the ACs it delivers in brief, and **depends
+on** (unit ids and the reason, or `-`). Above the table, give the story or
+stories (`#id` reused, or `new User Story: <title>`). Approving also approves
+creating the new tickets. Mark bug units with `(bug)` after their title.
+
+Under it, paste the **Mode** line that `plan-waves.py` printed: the chosen
+mode, every estimate with its p80, the wave order and the dependencies, for
+example
 `Mode: waves (≈450 min, p80 ≈720 min; lane ≈670 min, parallel not possible, waves ≈450 min). Order: {1,2} → {3,4,5}.`
 Paste its **Critical path**, **Straggler risk**, **Chained** and **Long run**
-lines with it, when it printed them.
-This is information, not a question. The user can still change the schedule,
-or a dependency, by choosing "adjust". Re-run the script after any change.
-
+lines with it, when it printed them. This is information, not a question. The
+user can still change the schedule, or a dependency, by choosing "adjust".
 Write the same line into the run file. The plan file keeps the sizes and the
 waves.
 
@@ -473,11 +598,12 @@ When `plan-waves.py` printed an **Advice** line, put it above the table and
 offer **Build directly (Recommended)** as the first option, ahead of approve,
 adjust and cancel. Building directly means:
 
-- run no workers and no synthesis;
+- run `intake.py freeze` as below, then no workers and no synthesis;
 - `git fetch origin`, then create one worktree on `<run branch>` from
   `origin/<base>` (never from the local `<base>`, which may be stale);
 - build the units in this session, in dependency order, with `bmad-build`,
-  passing the units' intents as one work list;
+  passing each unit's `intake.py unit` output as one work list, and check the
+  intake's acceptance criteria and verification scenarios at the end;
 - start every subagent prompt for this work (implementation, review) with
   the shell rules this skill's own agents carry, since a general-purpose
   agent has none of them: write and change files with the Write or Edit
@@ -492,52 +618,92 @@ adjust and cancel. Building directly means:
 
 Approving it still approves the new tickets.
 
-Otherwise ask with `AskUserQuestion` whether to approve, adjust or cancel. Iterate until
-the user approves. In the same call, ask the **gate policy** once (skip it
-for a single unit, or when every unit is in one lane): `If a unit nothing
-depends on fails its gate, what then?`, with **Re-dispatch once, then leave
-it out (Recommended)**, "A fresh worker builds it once more; if that fails
-too, its task stays open and out of the PR", **Merge unverified**, "Keep its
-code when it failed only on review traces, the reproduction or the app check;
-the PR marks it", and **Ask me**, "Stop and ask about each failed unit".
-Write the answer into the run file as `Gate policy: <option>`. After
-approval, run to the end without asking, except for a failed unit that
-later units build on (section 6), a failed unit under **Ask me**, and a
-stuck synthesis (section 7).
+Otherwise ask with `AskUserQuestion` whether to approve, adjust or cancel. In
+the same call, ask the **gate policy** once (skip it for a single unit, or
+when every unit is in one lane): `If a unit nothing depends on fails its gate,
+what then?`, with **Re-dispatch once, then leave it out (Recommended)**, "A
+fresh worker builds it once more; if that fails too, its task stays open and
+out of the PR", **Merge unverified**, "Keep its code when it failed only on
+review traces, the reproduction or the app check; the PR marks it", and **Ask
+me**, "Stop and ask about each failed unit". Write the answer into the run file
+as `Gate policy: <option>`. The open questions were settled in Step 3, so this
+call holds no other question.
 
-### Asking for approval
+**Adjust** is the one way back: change the intake (it is not frozen yet), run
+`check`, `to-plan`, `plan-waves.py` and the `Set mode` command again, and ask
+again. Iterate until the user approves. The approval waits for a real answer
+("How to ask"). **Cancel** ends the run: record it (section 8).
+
+#### Asking for approval
 
 Follow "How to ask" above:
 
-- **The message holds the plan**: the story line, the table, the Mode line,
-  any Advice, Combined, map and "Project commands" lines, and the run facts
-  (worktree, branch, base commit, and whether anything is pushed, opened as a
-  PR or written to the ticket tracker).
+- **The message holds the plan**: the intake summary, the story line, the
+  table, the Mode line, any Advice, Combined, map and "Project commands"
+  lines, the intake's path, and the run facts (worktree, branch, base commit,
+  and whether anything is pushed, opened as a PR or written to the ticket
+  tracker).
 - **The approval question** gives the counts, for example `Approve the split:
   2 units in one lane, about 230 min?`. Options: Approve, Adjust, Cancel,
   with **Build directly** first instead when there is Advice. A correction to
   the project commands comes in through Adjust or the free-text answer.
 - **The Approve option's `preview`** has one line per unit, `<id>  <size>
-  <title>` plus `after <ids>` when it depends on another, then the Mode line.
-- **Each open ambiguity is its own question** in the same call. Approve then
-  approves the split only.
+  <risk>  <title>` plus `after <ids>` when it depends on another, then the
+  Mode line.
 
-For the run in the example above, the call would be:
+For the run in the example above, the question round (Step 3) and the
+approval would be:
 
 ```text
-Q1  [Split]      Approve the split: 2 units in one lane, about 230 min?
-    Approve (Recommended) | Adjust | Cancel
-    preview of Approve:
-      1  L  Count ids, metrics handler, nullable totals, migration
-      2  S  Visitor flow endpoints, 24 h cutoff        after 1
-      Mode: lane (≈230 min). Order: 1 → 2.
-Q2  [Migration]  The LiveCounts migration is not merged yet. Edit it or add a new one?
-    Edit in place (Recommended) | Add a new migration
+Round   Q1  [Migration]  The LiveCounts migration is not merged yet. Edit it or add a new one?
+            Edit in place (Recommended) | Add a new migration
+Approval Q1 [Split]      Approve the split: 2 units in one lane, about 230 min?
+            Approve (Recommended) | Adjust | Cancel
+            preview of Approve:
+              U1  L  high  Count ids, metrics handler, nullable totals, migration
+              U2  S  low   Visitor flow endpoints, 24 h cutoff        after U1
+              Mode: lane (≈230 min). Order: 1 → 2.
 ```
 
-(Both units are in one lane, so the call has no gate-policy question. A run
-with independent units adds it as one more question:
-`Q3  [Gate]  If a unit nothing depends on fails its gate, what then?`.)
+(Both units are in one lane, so the approval has no gate-policy question. A
+run with independent units adds it as one more question:
+`Q2  [Gate]  If a unit nothing depends on fails its gate, what then?`.)
+
+### Step 5. Freeze
+
+On approval (Approve or Build directly):
+
+```bash
+python "<skill>/scripts/intake.py" freeze "<runs>/<slug>-intake.md"
+```
+
+It requires `READY`, hashes everything above `## Changes after approval` into
+`<slug>-intake.md.sha256`, writes `INTAKE approved` into the run file and makes
+the intake read-only. It runs once; a second freeze is refused. From here on
+change the intake only with
+
+```bash
+python "<skill>/scripts/intake.py" amend "<runs>/<slug>-intake.md" --reason "<why>" --text "<what changed>"
+```
+
+which appends a dated line under Changes after approval and leaves the frozen
+part, and its hash, as approved. Never Write or Edit the intake after the
+freeze: `intake.py verify` then prints `FROZEN changed`.
+
+**After approval** run to the end without asking, except for the real failures
+"How to ask" names: a blocked or `blocked-interface` unit, a failed unit that
+later units build on (section 6), a failed unit under **Ask me**, a destructive
+or irreversible decision, and a stuck synthesis (section 7). Never ask to
+clarify a requirement: decide it from the intake, and record a change the run
+must make anyway with `amend`.
+
+## 2. Split into units
+
+Folded into section 1 (Step 1, "Schedule the units" and "Tickets").
+
+## 3. Get approval
+
+Folded into section 1 (Steps 4 and 5).
 
 ## 4. Launch
 
@@ -552,6 +718,18 @@ worktree `<iwt>` is the first worktree that holds it:
 
 There is never a separate integration worktree, so no extra install competes
 with the workers.
+
+Before any ticket or worktree is created, the intake must be frozen as
+approved:
+
+```bash
+python "<skill>/scripts/intake.py" verify "<runs>/<slug>-intake.md"
+```
+
+It must print `FROZEN ok`. On `NOT FROZEN` the approval never froze it: go
+back to section 1, Step 5. On `FROZEN changed` the approved text was edited:
+create nothing; show the user the change and ask whether to restore the
+approved intake or approve the new one (a real failure, so it may ask).
 
 0. Preflight, in one Bash call, before anything is created:
    ```bash
@@ -596,6 +774,22 @@ with the workers.
      wave, or the first unit's worker for a lane wave, using the prompts in
      `<skill>/references/worker.md`. Each worker runs `bmad-build-auto`, which
      starts its own review subagents, so the calls must stay in the foreground.
+     Fill every worker's prompt, each lane unit's included, from the intake,
+     with `<intake>` = `<runs>/<slug>-intake.md`, `<iface>` =
+     `<runs>/<slug>-interface-changes.md` and `<n>` the unit's plan id (`1`
+     for `U1`):
+     - the lines `Unit: <n>`, `Size: <size>`, `Risk: <risk>` (the unit's
+       risk in the intake), `Intake: <intake>` and
+       `Interface changes: <iface>`;
+     - in step 0a, `--intake "<intake>" --unit <n> --iface "<iface>"` on
+       `prepare-worktree.sh`. A later lane unit skips step 0, so its own
+       `Unit:` line is what tells it which unit it is;
+     - as the intent, the output of
+       `python "<skill>/scripts/intake.py" unit "<intake>" <n>`, word for
+       word (after the lane line and the "Already on the branch" list, when
+       `references/worker.md` adds them).
+     Never paste the source prompt or the verification scenarios into a
+     worker's prompt.
 
 The ticket call finishes long before the workers; its notification may arrive
 while they run. Just note it.
@@ -612,7 +806,10 @@ Work through the waves in order. Within a wave:
 
 - **Parallel wave:** all its `Agent` calls go in one message and return
   together. Record each worker's reply in the run file, its `INTERFACES` line
-  included: synthesis checks those against the agreed interfaces. Copy every
+  included: synthesis checks those against the intake's Shared interfaces and
+  the interface broadcast (`intake.py iface show
+  "<runs>/<slug>-interface-changes.md"`), where a worker that had to change
+  an agreed interface recorded it. Copy every
   `SKILL ISSUES` entry other than `none`, from workers and synthesis alike, to
   its own run-file line `SKILL ISSUE: <unit or synthesis>: <entry>`; step 8
   records them for fixing the skill. Then gate
@@ -651,9 +848,12 @@ since it was sent>`. A **Slow** line is only a note in the run file. After a
 reached: finish the round you are in, start no other, and reply with what is
 left under REMAINING." A reply whose `REMAINING:` is not `none` is not a failed
 unit: gate it as usual, then add the remaining items to the plan file as a new
-unit (`items`, `files`, `depends_on` the finished unit), run `plan-waves.py`
-again, and build it in a later wave. It is inside the scope the user approved;
-list it in the final message. sonar-zero-5 had nothing like this: its slowest
+unit (`items`, `files`, `depends_on` the finished unit, and the finished
+unit's `risk` and `acs`), run `plan-waves.py` again, and build it in a later
+wave, with the finished unit's `intake.py unit` output plus the remaining
+items as its intent. Record it with `intake.py amend` (`--reason "straggler
+remainder"`). It is inside the scope the user approved; list it in the final
+message. sonar-zero-5 had nothing like this: its slowest
 unit ran 315 min and held its wave.
 
 **Turn budgets.** Each agent has a `maxTurns` budget in its agent file: worker
@@ -685,7 +885,12 @@ counts them.
 ## 6. Gate
 
 Apply the gate in `references/worker.md` to every unit, in one Bash call with
-`scripts/check-unit.sh`, and record the results in the run file.
+`scripts/check-unit.sh`, and record the results in the run file. Every unit's
+call carries the interface check:
+`--intake "<intake>" --unit <n> --iface-file "<iface>" --reply-interfaces "<INTERFACES>"`,
+with `<INTERFACES>` the value of the `INTERFACES:` line of that worker's
+reply, word for word (`none` when it says none). A unit that changed a pinned
+interface without an approved `intake.py iface add` entry for it fails here.
 
 - **Every unit is ready:** continue (the next unit in a lane wave, or the
   wave's synthesis or the next wave).
@@ -694,7 +899,7 @@ Apply the gate in `references/worker.md` to every unit, in one Bash call with
   spec path into the run file, and what the policy did with it.
   - **Re-dispatch once, then leave it out** (also the policy when the run
     file has none): re-dispatch the unit once, as below, with the gate's
-    reasons added to its intent. If the second worker's unit is not ready
+    reasons added after its `intake.py unit` output. If the second worker's unit is not ready
     either, leave it out: its task stays open and out of the PR.
   - **Merge unverified**: when the unit failed only on workflow traces (no
     baseline, no intent contract, no review pass), keep its code and mark it
@@ -715,7 +920,16 @@ Apply the gate in `references/worker.md` to every unit, in one Bash call with
   existing path and branch:
   `bash "<skill>/scripts/remove-worktree.sh" "<root>" "<name>" "<branch>"`, then
   `git -C "<root>" branch -D "<branch>"` (the script's `-d` keeps an unmerged
-  branch). Then send a fresh worker with the same, or a corrected, intent.
+  branch). Then send a fresh worker with the same intent, plus the gate's
+  reasons. A correction that changes what the unit must do goes into the
+  intake first, with `intake.py amend`.
+- **`STATUS: blocked-interface`:** the worker found that the agreed interface
+  can't work as pinned, and says why. It is a failed unit that needs a
+  decision, whatever the gate policy, so ask (it is a real blocker): show the
+  reason and the interface line from the intake, and ask whether to change
+  the interface (record it with `intake.py amend` and `intake.py iface add`,
+  then re-dispatch the unit and any unit that consumes it), leave the unit
+  out, or stop.
 - **A lane unit is not ready:** the lane stops there, because later units
   build on it. A unit that later waves depend on stops the run the same way.
   These are the only gate failures you always ask about, whatever the gate
@@ -740,7 +954,7 @@ ticket call is still running, wait for its notification. Then read
 foreground `Agent` with that prompt. Synthesis gets two lists:
 
 - **Units in the run so far:** every ready unit of every wave up to now, in
-  dependency order, with its agreed interfaces from the split, its worker's
+  dependency order, with its agreed interfaces from the intake, its worker's
   `INTERFACES` line and its Task. With no dependencies, put the unit that owns
   migrations and contracts first. The final synthesis builds the PR, the
   ticket links and the drift check from this list, so it must hold the whole
@@ -757,6 +971,11 @@ The units left out are kept across waves too.
 - `<state>` is `<runs>/<slug>-synthesis.md`,
   `<tickets json>` is `<runs>/<slug>-tickets.json`, and `<rules file>` is
   `review-classes.md` in the parent folder of `<runs>`.
+- `<intake>` is `<runs>/<slug>-intake.md` and `<iface>` is
+  `<runs>/<slug>-interface-changes.md` (it may not exist). Synthesis reads the
+  run goal and the acceptance criteria from the intake, runs its verification
+  scenarios (`intake.py scenarios`) on the merged result and writes
+  `<runs>/<slug>-scenarios.json`.
 - `<ci ignore>` and `<ci timeout>`: from the profile's `ci` (see
   `references/synthesis.md`).
 
