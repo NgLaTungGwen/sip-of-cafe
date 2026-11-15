@@ -204,8 +204,9 @@ It writes the diff into the worktree's git dir and prints its path.
 means you changed nothing beyond clean merges: note `REVIEW: none (no
 synthesis changes)` and go on. Otherwise launch one reviewer with `Agent`
 (`subagent_type: general-purpose`, `model: opus`, foreground), with this
-prompt. If the call answers "Async agent launched", end your turn and wait for
-its completion notification; never write the section 6 reply while it runs
+prompt. If the call answers "Async agent launched", don't end your turn: wait
+on its `bg.sh` done file as your agent file says, then read its completion
+notification; never write the section 6 reply while it runs
 (two synthesis agents ended without `RESULT:` that way in sonar-zero-5):
 
 ```text

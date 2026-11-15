@@ -25,6 +25,15 @@ main checkout, force pushes, pushes to a protected branch, merging a PR,
 starting deploys, infrastructure changes. When it denies one, never work
 around it: report it as the blocking condition.
 
+Never end your turn while an agent you launched (a coder, a reviewer) is
+still running. You are a subagent: ending your turn hands you back to the
+orchestrator half done, and it has to resume you (sonar-zero-5: 14 resumes).
+Claude Code can start an Agent call in the background even when you ask for
+the foreground ("Async agent launched"). Your dispatch prompt says how to
+wait instead: `bg.sh expect` before the call, a last `bg.sh done` step in the
+subagent's prompt, and `bg.sh wait` calls until it prints ok or failed. The
+subagent's report then arrives as its completion notification.
+
 You never edit source files yourself. Source changes, including review fixes,
 go to the `haiku-implementer` named in the implementation handoff. You edit
 only the spec and other files under `_bmad-output/`.

@@ -535,6 +535,39 @@ class BgWait(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("job: still running", r.stdout)
 
+    def test_a_worker_waits_on_its_subagent_through_expect_and_done(self):
+        # A subagent that ends its turn to wait is handed back, so a worker
+        # blocks on the subagent's done file instead.
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        wt = tempfile.mkdtemp().replace("\\", "/")
+        subprocess.run(["git", "init", "-q", wt], check=True)
+        bg = os.path.join(SCRIPTS, "bg.sh")
+
+        def sh(*args):
+            return subprocess.run([bash, bg, *args], capture_output=True, text=True, timeout=60)
+
+        try:
+            self.assertEqual(sh("expect", wt, "review-1").returncode, 0)
+            # expect leaves the pid marker that keeps wait from answering
+            # "not started" once its 30 s start grace is over.
+            gd = subprocess.run(["git", "-C", wt, "rev-parse", "--absolute-git-dir"], capture_output=True,
+                                text=True).stdout.strip()
+            self.assertTrue(os.path.exists(os.path.join(gd, "bmad", "review-1.pid")))
+            r = sh("wait", wt, "review-1", "1")
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("review-1: still running", r.stdout)
+            self.assertEqual(sh("done", wt, "review-1").returncode, 0)
+            r = sh("wait", wt, "review-1")
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, "review-1: ok"), r.stderr)
+            sh("expect", wt, "impl-2")
+            sh("done", wt, "impl-2", "1")
+            r = sh("wait", wt, "impl-2")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("impl-2: failed (rc 1)", r.stdout)
+            self.assertNotIn("No such file", r.stderr)  # no log to tail for an agent
+        finally:
+            shutil.rmtree(wt, ignore_errors=True)
+
 
 class PrepareWorktree(unittest.TestCase):
     def pinned(self, with_api, extra=(), with_apps=False, graph=False):
@@ -721,6 +754,139 @@ class Metrics(unittest.TestCase):
         own = [r for r in runs if r["installation_id"] != "other"][0]
         self.assertEqual(own["project"], "ClientSecretProject")  # own rows keep their names
 
+    def test_two_runs_of_one_session_stay_two_rows(self):
+        # The old dataset row merged the session's runs; the new rows replace it.
+        inst = self.m.installation_id()
+        self.m.write_jsonl(os.path.join(self.store, "metrics", "runs.jsonl"),
+                           [{"installation_id": inst, "session": "s1", "slug": "merged", "start": "a"}])
+        second = dict(self.ROW, slug="client-feature-y", start="2026-10-27T05:00:00Z", min_ask=4, min_typed=2,
+                      questions=3)
+        with open(os.path.join(self.store, "runs.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(second) + "\n")
+        self.m.import_bundles([])
+        runs = self.m.read_jsonl(os.path.join(self.store, "metrics", "runs.jsonl"))
+        self.assertEqual(sorted(r["slug"] for r in runs), ["client-feature-x", "client-feature-y"])
+        self.assertEqual([(r["min_ask"], r["min_typed"], r["questions"]) for r in runs if r["slug"].endswith("y")],
+                         [(4, 2, 3)])
+        # Exported, the two slugs stay apart but hashed.
+        slugs = [r["slug"] for r in self.m.bundle()["runs"]]
+        self.assertEqual(len(set(slugs)), 2)
+        self.assertTrue(all(s.startswith("r-") for s in slugs))
+
+
+class RunsPerSession(unittest.TestCase):
+    """One session can hold several runs. Rows were keyed by session alone and
+    the main span ran from the first invocation to the last synthesis result,
+    so a second run overwrote the first (ti-ux-perf-orgs, qa-postgres-b2s
+    lost) or merged with it (24847c3e held four runs in one row)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.session = os.path.join(self.dir, "s1.jsonl")
+        subs = os.path.join(self.dir, "s1", "subagents")
+        os.makedirs(subs)
+        runs = "D:/store/runs/proj"
+        perm = result(10, "ok", "2026-10-26T12:15:00Z", error=False)
+        perm["permissionDecision"] = {"decision": "accept", "source": "user_temporary"}
+        write_jsonl(self.session, [
+            {"type": "user", "timestamp": "2026-10-26T10:00:00Z",
+             "message": {"content": "<command-name>/bmad-batch-build</command-name>"}},
+            call(1, "Bash", {"command": 'python "D:/s/scripts/run_dir.py" alpha --root D:/repo'}, "2026-10-26T10:01:00Z"),
+            call(2, "Write", {"file_path": f"{runs}/alpha/alpha.md", "content": "x"}, "2026-10-26T10:02:00Z"),
+            call(3, "AskUserQuestion", {"questions": [{"question": "a"}, {"question": "b"}]}, "2026-10-26T10:03:00Z"),
+            result(3, "answered", "2026-10-26T10:13:00Z", error=False),
+            call(4, "Agent", {"description": "Unit 1 worker", "prompt": "Project root: D:/repo/.claude/worktrees/alpha-1"},
+                 "2026-10-26T10:14:00Z"),
+            result(4, "Async agent launched", "2026-10-26T10:14:00Z", error=False),
+            {"type": "user", "timestamp": "2026-10-26T10:20:00Z", "message": {"content": "go on"}},
+            call(5, "Agent", {"description": "Final synthesis", "prompt": "merge alpha"}, "2026-10-26T11:00:00Z"),
+            result(5, "RESULT: pr", "2026-10-26T11:30:00Z", error=False),
+            # A second batch, asked for in plain words: no new invocation.
+            {"type": "user", "timestamp": "2026-10-26T11:50:00Z", "message": {"content": "now the next batch"}},
+            call(6, "Bash", {"command": 'python "D:/s/scripts/run_dir.py" beta --root D:/repo'}, "2026-10-26T12:00:00Z"),
+            call(7, "Write", {"file_path": f"{runs}/beta/beta.md", "content": "x"}, "2026-10-26T12:01:00Z"),
+            call(8, "Agent", {"description": "Unit 1 worker", "prompt": "Project root: D:/repo/.claude/worktrees/beta-1"},
+                 "2026-10-26T12:02:00Z"),
+            result(8, "Async agent launched", "2026-10-26T12:02:00Z", error=False),
+            call(10, "Bash", {"command": "rm x"}, "2026-10-26T12:10:00Z"),
+            perm,
+            call(9, "Agent", {"description": "beta synthesis", "prompt": "merge"}, "2026-10-26T12:30:00Z"),
+            result(9, "RESULT: pr", "2026-10-26T13:00:00Z", error=False),
+        ])
+
+        def agent(name, meta, start, end, first="x"):
+            write_jsonl(os.path.join(subs, name + ".jsonl"), [
+                {"type": "user", "timestamp": start, "message": {"content": first}},
+                {"type": "user", "timestamp": end, "message": {"content": "done"}}])
+            json.dump(meta, open(os.path.join(subs, name + ".meta.json"), "w"))
+
+        agent("agent-wa", {"agentType": "bmad-batch-worker", "toolUseId": "t4"},
+              "2026-10-26T10:14:00Z", "2026-10-26T10:50:00Z")
+        agent("agent-sa", {"agentType": "bmad-batch-synthesis", "toolUseId": "t5"},
+              "2026-10-26T11:00:00Z", "2026-10-26T11:40:00Z")
+        agent("agent-wb", {"agentType": "bmad-batch-worker", "toolUseId": "t8"},
+              "2026-10-26T12:02:00Z", "2026-10-26T12:25:00Z")
+        with open(os.path.join(subs, "agent-wb.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(call(50, "Agent", {"description": "implement", "prompt": "x"},
+                                     "2026-10-26T12:05:00Z")) + "\n")
+        agent("agent-hb", {"agentType": "haiku-implementer", "toolUseId": "t50"},
+              "2026-10-26T12:05:00Z", "2026-10-26T12:20:00Z")
+        agent("agent-sb", {"agentType": "bmad-batch-synthesis", "toolUseId": "t9"},
+              "2026-10-26T12:30:00Z", "2026-10-26T13:00:00Z")
+        self.cost = load("cost_report_runs", "cost-report.py")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def row(self, slug):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.cost.report([self.session], slug)[0]
+
+    def test_each_run_gets_its_own_span_and_agents(self):
+        runs = self.cost.runs_in(self.cost.load(self.session))
+        self.assertEqual([r["slug"] for r in runs], ["alpha", "beta"])
+        self.assertEqual(runs[0]["start"], 0)  # the invocation, not the run file
+        a, b = self.row("alpha"), self.row("beta")
+        # alpha: 10:00 to its synthesis agent's end at 11:40.
+        self.assertEqual((a["min_wall"], a["workers"], a["min_synthesis"]), (100, 1, 40))
+        # beta starts at its run file (12:00) and ends at its own synthesis result.
+        self.assertEqual((b["min_wall"], b["workers"], b["min_synthesis"]), (60, 1, 30))
+        self.assertEqual(b["start"], "2026-10-26T12:00:00Z")
+        # The coder its worker launched goes with beta, not alpha.
+        self.assertIn("haiku", b["usd_by_role"])
+        self.assertNotIn("haiku", a["usd_by_role"])
+        self.assertEqual(a["session_runs"], ["alpha", "beta"])
+        # Without a slug, the whole session as before.
+        self.assertEqual(self.row(None)["workers"], 2)
+
+    def test_user_wait_splits_into_questions_and_typed(self):
+        a, b = self.row("alpha"), self.row("beta")
+        self.assertEqual((a["min_ask"], a["min_typed"], a["questions"], a["min_user_wait"]), (10, 6, 2, 16))
+        # A permission prompt the user answered counts as asking.
+        self.assertEqual((b["min_ask"], b["min_typed"], b["questions"]), (5, 0, 0))
+
+    def test_rows_are_kept_per_run(self):
+        store = os.path.join(self.dir, "store")
+        with mock.patch.dict(os.environ, {"BMAD_RUNS_DIR": store}):
+            for slug in ("alpha", "beta", "alpha"):
+                self.cost.save_row({"session": "s1", "slug": slug, "start": "x", "usd": 1})
+            # A row from before slugs were keyed stays as it is.
+            self.cost.save_row({"session": "s0", "start": "w"})
+            rows = self.cost.load_rows()
+        self.assertEqual(sorted((r["session"], r.get("slug")) for r in rows),
+                         [("s0", None), ("s1", "alpha"), ("s1", "beta")])
+        # An old row, written before session_runs, is recorded again once.
+        self.assertFalse(self.cost.is_current([{"slug": "alpha", "session_mtime": 10}], 5))
+        new = [{"slug": "alpha", "session_mtime": 10, "session_runs": ["alpha", "beta"]},
+               {"slug": "beta", "session_mtime": 4, "session_runs": ["alpha", "beta"]}]
+        self.assertTrue(self.cost.is_current(new, 5))
+        self.assertFalse(self.cost.is_current(new[:1], 5))  # beta has no row yet
+
+    def test_collect_finds_every_run(self):
+        invoked, slugs, _, _ = self.cost.session_info(self.session)
+        self.assertTrue(invoked)
+        self.assertEqual(slugs, ["alpha", "beta"])
+
 
 class Setup(unittest.TestCase):
     """setup.sh resolves a project without asking: ignore rule, base branch,
@@ -771,6 +937,34 @@ class Setup(unittest.TestCase):
         self.assertIn("PR gh", r.stdout)
         shutil.rmtree(root, ignore_errors=True)
         shutil.rmtree(stub, ignore_errors=True)
+
+    def test_fork_mode_warning(self):
+        # Fork mode starts every subagent in the background, so a worker that
+        # ends its turn to wait is handed back (sonar-zero-5: 14 resumes).
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        root = tempfile.mkdtemp().replace("\\", "/")
+        os.makedirs(os.path.join(root, "_bmad", "scripts"))
+        open(os.path.join(root, "_bmad", "scripts", "render_skill.py"), "w").close()
+        os.makedirs(os.path.join(root, ".claude", "skills", "bmad-build-auto"))
+        open(os.path.join(root, ".claude", "skills", "bmad-build-auto", "SKILL.md"), "w").close()
+        subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+        try:
+            for value, want in ((None, "FORK on (CLAUDE_CODE_FORK_SUBAGENT is unset)"),
+                                ("1", "FORK on (CLAUDE_CODE_FORK_SUBAGENT is 1)"), ("0", "FORK off")):
+                env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_FORK_SUBAGENT"}
+                if value is not None:
+                    env["CLAUDE_CODE_FORK_SUBAGENT"] = value
+                r = subprocess.run([bash, os.path.join(SCRIPTS, "setup.sh"), root], capture_output=True,
+                                   text=True, env=env)
+                self.assertIn(want, r.stdout, r.stdout + r.stderr)
+                self.assertIn("SETUP ok", r.stdout)  # a warning, never a block
+                fork = [ln for ln in r.stdout.splitlines() if ln.startswith("FORK")][0]
+                if value != "0":
+                    self.assertIn('"CLAUDE_CODE_FORK_SUBAGENT": "0"', fork)
+                # bg.sh runs on background Bash calls, which this setting turns off.
+                self.assertNotIn("DISABLE_BACKGROUND_TASKS", fork)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_lapsed_az_sign_in_turns_ado_tickets_off(self):
         # `az account show` passes on a cached profile after the sign-in lapsed;

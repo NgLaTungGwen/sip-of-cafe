@@ -82,12 +82,25 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
    with the intent below. Run every step, in order: plan, implement through
    the implementation handoff, review. Subagents you launch must run in the
    foreground, as that workflow requires: launch them without
-   `run_in_background`. If the Agent tool still answers "Async agent
-   launched", waiting for that agent's completion notification meets the
-   requirement: end your turn and wait. Until it arrives, don't start the
-   next workflow step, launch another agent on the same files, or write the
-   reply in step 3. A spec written after the code, or a
-   skipped review, fails the gate and the unit is not merged.
+   `run_in_background`. Claude Code may still start one in the background
+   (the Agent tool answers "Async agent launched"). **Never end your turn
+   while an agent you launched is still running**: for you, ending the turn
+   hands you back to the orchestrator half done. So, for every subagent
+   (the implementation subagent of each round and every reviewer):
+   a. Give it a name, such as `impl-1` or `review-1-edge`, and run
+      `bash "<skill>/scripts/bg.sh" expect "<wt>" <agent name>` first.
+   b. End its prompt with this line: `Your last step, after your report is
+      written: run bash "<skill>/scripts/bg.sh" done "<wt>" <agent name>
+      (add 1 at the end if you could not finish), then reply with your report.`
+   c. If the Agent call answers "Async agent launched", block on
+      `bash "<skill>/scripts/bg.sh" wait "<wt>" <agent name>`, one per Bash
+      call (each returns within 100 s), again while it prints still running.
+      When it prints ok or failed, the agent's report arrives as its
+      completion notification with your next tool result; work on that
+      report. Until then, don't start the next workflow step, launch another
+      agent on the same files, or write the reply in step 3.
+   A spec written after the code, or a skipped review, fails the gate and the
+   unit is not merged.
    Budget: before you start any further fix round, compare `date +%s` with the
    number you kept. Once the budget is used up, start no new round: finish the
    one you are in, record the findings still open in the spec's review log as

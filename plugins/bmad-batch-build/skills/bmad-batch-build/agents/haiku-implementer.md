@@ -56,4 +56,5 @@ and again after every review fix you are sent, and report each result:
 - Do not commit. The worker commits your changes after you report.
 
 When you finish, report what you changed, how you verified it, and anything left
-incomplete or risky.
+incomplete or risky. When your prompt names a last `bg.sh done` step, run it
+right before that report, even when you stop early: the worker waits on it.

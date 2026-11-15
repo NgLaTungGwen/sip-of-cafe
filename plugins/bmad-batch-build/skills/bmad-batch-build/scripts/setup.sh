@@ -20,6 +20,11 @@
 #                             Azure DevOps tickets with an ADO remote and az;
 #                             GitHub issues with a GitHub remote and gh
 #   PR az|gh|none (<why>)     the CLI synthesis opens the PR with
+#   FORK off|on (<fix>)       Claude Code's fork mode (CLAUDE_CODE_FORK_SUBAGENT,
+#                             on unless it is 0) starts subagents in the
+#                             background, so workers and synthesis must wait
+#                             on bg.sh instead of their Agent calls; a warning,
+#                             never a block
 # A BLOCKED line says what the user must install; nothing else stops a run.
 set -uo pipefail
 
@@ -167,6 +172,17 @@ else
   else
     echo "PR none (push the branch and open the PR in the browser)"
   fi
+fi
+
+# Fork mode is on by default and starts every subagent in the background, so
+# an agent that ends its turn to wait is handed back half done. Not
+# CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: that also turns off the background
+# Bash calls bg.sh runs on.
+if [ "${CLAUDE_CODE_FORK_SUBAGENT:-}" = 0 ]; then
+  echo "FORK off"
+else
+  echo "FORK on (CLAUDE_CODE_FORK_SUBAGENT is ${CLAUDE_CODE_FORK_SUBAGENT:-unset}): subagents start in the background;" \
+    "set \"env\": {\"CLAUDE_CODE_FORK_SUBAGENT\": \"0\"} in ~/.claude/settings.json and restart Claude Code for fewer hand-backs"
 fi
 
 if [ "$blocked" = 1 ]; then echo "SETUP blocked"; exit 1; fi
