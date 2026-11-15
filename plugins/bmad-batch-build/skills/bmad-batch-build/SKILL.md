@@ -774,12 +774,22 @@ approved intake or approve the new one (a real failure, so it may ask).
      wave, or the first unit's worker for a lane wave, using the prompts in
      `<skill>/references/worker.md`. Each worker runs `bmad-build-auto`, which
      starts its own review subagents, so the calls must stay in the foreground.
-     A worker's intent is the output of
-     `python "<skill>/scripts/intake.py" unit "<runs>/<slug>-intake.md" <id>`,
-     word for word, with these lines in its prompt: `Intake: <runs>/<slug>-intake.md`,
-     `Unit: <id>`, `Size: <size>`, `Risk: <risk>` and
-     `Interface changes: <runs>/<slug>-interface-changes.md`. Never paste the
-     source prompt or the verification scenarios into a worker's prompt.
+     Fill every worker's prompt, each lane unit's included, from the intake,
+     with `<intake>` = `<runs>/<slug>-intake.md`, `<iface>` =
+     `<runs>/<slug>-interface-changes.md` and `<n>` the unit's plan id (`1`
+     for `U1`):
+     - the lines `Unit: <n>`, `Size: <size>`, `Risk: <risk>` (the unit's
+       risk in the intake), `Intake: <intake>` and
+       `Interface changes: <iface>`;
+     - in step 0a, `--intake "<intake>" --unit <n> --iface "<iface>"` on
+       `prepare-worktree.sh`. A later lane unit skips step 0, so its own
+       `Unit:` line is what tells it which unit it is;
+     - as the intent, the output of
+       `python "<skill>/scripts/intake.py" unit "<intake>" <n>`, word for
+       word (after the lane line and the "Already on the branch" list, when
+       `references/worker.md` adds them).
+     Never paste the source prompt or the verification scenarios into a
+     worker's prompt.
 
 The ticket call finishes long before the workers; its notification may arrive
 while they run. Just note it.
@@ -875,7 +885,12 @@ counts them.
 ## 6. Gate
 
 Apply the gate in `references/worker.md` to every unit, in one Bash call with
-`scripts/check-unit.sh`, and record the results in the run file.
+`scripts/check-unit.sh`, and record the results in the run file. Every unit's
+call carries the interface check:
+`--intake "<intake>" --unit <n> --iface-file "<iface>" --reply-interfaces "<INTERFACES>"`,
+with `<INTERFACES>` the value of the `INTERFACES:` line of that worker's
+reply, word for word (`none` when it says none). A unit that changed a pinned
+interface without an approved `intake.py iface add` entry for it fails here.
 
 - **Every unit is ready:** continue (the next unit in a lane wave, or the
   wave's synthesis or the next wave).
@@ -956,7 +971,7 @@ The units left out are kept across waves too.
 - `<state>` is `<runs>/<slug>-synthesis.md`,
   `<tickets json>` is `<runs>/<slug>-tickets.json`, and `<rules file>` is
   `review-classes.md` in the parent folder of `<runs>`.
-- `<intake>` is `<runs>/<slug>-intake.md` and `<interface changes>` is
+- `<intake>` is `<runs>/<slug>-intake.md` and `<iface>` is
   `<runs>/<slug>-interface-changes.md` (it may not exist). Synthesis reads the
   run goal and the acceptance criteria from the intake, runs its verification
   scenarios (`intake.py scenarios`) on the merged result and writes

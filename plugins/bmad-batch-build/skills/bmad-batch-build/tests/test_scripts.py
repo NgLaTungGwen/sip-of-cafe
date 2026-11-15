@@ -2734,7 +2734,8 @@ class Intake(unittest.TestCase):
                 "for i in range(15):\n"
                 "    subprocess.run([sys.executable, sys.argv[1], 'iface', 'add', sys.argv[2], '--unit', sys.argv[3],"
                 " '--iface', 'sym%d' % i, '--change', 'a -> b', '--reason', 'r'], check=True)\n")
-        procs = [subprocess.Popen([sys.executable, "-c", loop, os.path.join(SCRIPTS, "intake.py"), f, u])
+        procs = [subprocess.Popen([sys.executable, "-c", loop, os.path.join(SCRIPTS, "intake.py"), f, u],
+                                  stdout=subprocess.DEVNULL)
                  for u in ("U2", "3")]
         self.assertEqual([p.wait(timeout=240) for p in procs], [0, 0])
         lines = self.run_intake("iface", "show", f).stdout.splitlines()
@@ -3221,6 +3222,65 @@ class IntakeFixture(unittest.TestCase):
         rc, out = gate("--intake", intake, "--unit", "1", "--iface-file", iface,
                        "--reply-interfaces", "InvoiceDto CHANGED", root, "u1", spec, "main")
         self.assertEqual(rc, 0, out)
+        # The U1 form is the same unit, for intake.py and the gate alike.
+        r = subprocess.run([sys.executable, INTAKE_PY, "unit", intake, "U1"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rc, out = gate("--intake", intake, "--unit", "U1", "--iface-file", iface,
+                       "--reply-interfaces", "InvoiceDto CHANGED", root, "u1", spec, "main")
+        self.assertEqual(rc, 0, out)
+
+
+class IntakeEndToEnd(unittest.TestCase):
+    """new -> fill -> check -> to-plan -> plan-waves -> set-mode -> freeze ->
+    unit -> iface add -> gate -> verify, on one fixture."""
+
+    def run_py(self, script, *args, env=None):
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, script), *args], capture_output=True,
+                           encoding="utf-8", env=env)
+        return r.returncode, r.stdout
+
+    def test_the_whole_intake_flow(self):
+        import shlex
+        mod = load("intake_e2e", "intake.py")
+        runs = tempfile.mkdtemp().replace("\\", "/")
+        self.addCleanup(lambda: [os.chmod(os.path.join(runs, f), 0o666) for f in os.listdir(runs)])
+        prompt = os.path.join(runs, "demo-prompt.txt")
+        with open(prompt, "w", encoding="utf-8") as f:
+            f.write(mod.body(INTAKE_MD, "Source prompt") + "\n")
+        rc, out = self.run_py("intake.py", "new", runs, "demo", "--prompt-file", prompt)
+        self.assertEqual(rc, 0, out)
+        intake = runs + "/demo-intake.md"
+        self.assertEqual(self.run_py("intake.py", "check", intake)[0], 2)
+        text = open(intake, encoding="utf-8").read()
+        for name in mod.HEADINGS[1:-1]:
+            if name != "Mode decision":
+                text = mod.replace_body(text, name, mod.body(INTAKE_MD, name))
+        with open(intake, "w", encoding="utf-8") as f:
+            f.write(text)
+        self.assertEqual(self.run_py("intake.py", "check", intake), (0, "READY\n"))
+        plan = runs + "/demo-plan.json"
+        self.assertEqual(self.run_py("intake.py", "to-plan", intake, plan)[0], 0)
+        rc, out = self.run_py("plan-waves.py", plan, "--max-parallel", "4", env={**os.environ, "BMAD_RUNS_DIR": runs})
+        self.assertEqual(rc, 0, out)
+        cmd = shlex.split(next(ln for ln in out.splitlines() if ln.startswith("Set mode: "))[len("Set mode: "):])
+        r = subprocess.run([sys.executable, *cmd[1:]], capture_output=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(mod.body(open(intake, encoding="utf-8").read(), "Mode decision").startswith("Mode: lane"))
+        self.assertEqual(self.run_py("intake.py", "freeze", intake)[0], 0)
+        rc, view = self.run_py("intake.py", "unit", intake, "1")
+        self.assertEqual(rc, 0)
+        self.assertIn("AC-1: Given an invoice with two lines", view)
+        self.assertNotIn("SC-1", view)
+        iface = runs + "/demo-interface-changes.md"
+        self.assertEqual(self.run_py("intake.py", "iface", "add", iface, "--unit", "1", "--iface", "InvoiceDto",
+                                     "--change", "{id, lines} -> {id, lines, total, tax}", "--reason", "tax")[0], 0)
+        root, _, spec = unit_repo()
+        rc, out = gate("--intake", intake, "--unit", "1", "--iface-file", iface,
+                       "--reply-interfaces", "InvoiceDto {id, lines, total, tax} CHANGED", root, "u1", spec, "main")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.run_py("intake.py", "verify", intake), (0, "FROZEN ok\n"))
+        run = open(runs + "/demo.md", encoding="utf-8").read()
+        self.assertRegex(run, r"INTAKE start \S+Z[\s\S]*INTAKE approved \S+Z")
 
 
 if __name__ == "__main__":

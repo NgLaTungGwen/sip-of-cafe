@@ -35,7 +35,9 @@ of `<runs>`: the kinds of mistake reviewers made units fix, across runs.
 
 `<intake>` is `<runs>/<slug>-intake.md`, the run's frozen intake, or `none`
 for a run without one; then the prompt's Intake lines and section 3c are left
-out. `<runs>` and `<slug>` are the run's, as in SKILL.md.
+out. `<runs>` and `<slug>` are the run's, as in SKILL.md. `<iface>` is
+`<runs>/<slug>-interface-changes.md`, the interface changes approved after
+the freeze (it may not exist), or `none` without an intake.
 
 `<ci ignore>` is the profile's `ci.ignore` joined with commas (`Acceptance`
 for hive-factory, which has no profile), or empty. `<ci timeout>` is its
@@ -61,6 +63,9 @@ choosing what the code should do, decide by them, not by the raw prompt or a
 unit's own reading. Print them with
 `python "<skill>/scripts/intake.py" unit "<intake>" <n>` for the units
 involved. Its Verification scenarios are for section 3c only.
+Interface changes: `<iface>`. `python "<skill>/scripts/intake.py" iface show "<iface>"`
+prints the approved changes to the pinned interfaces, or none; the agreed
+shape of an interface is its Shared interfaces line with these applied.
 
 Units in the run so far, in dependency order. This is the whole run, every
 earlier wave included; the PR, the ticket links and the drift check cover all
@@ -139,7 +144,8 @@ Then the checks only you can do, which parallel branches have broken here
 before:
 
 - **Agreed interfaces.** Compare every unit's `agreed` and `built` interfaces
-  above, earlier waves included. Start with any marked `CHANGED`, and then check that each provider and
+  above, earlier waves included, with the approved changes from `iface show`
+  applied. Start with any marked `CHANGED`, and then check that each provider and
   consumer match exactly (routes, payloads, types and method signatures). Fix
   whichever side drifted from the agreed shape.
 - **Duplicate or overlapping methods.** Two units may each add the same port,
