@@ -96,9 +96,15 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
       `bash "<skill>/scripts/bg.sh" wait "<wt>" <agent name>`, one per Bash
       call (each returns within 100 s), again while it prints still running.
       When it prints ok or failed, the agent's report arrives as its
-      completion notification with your next tool result; work on that
-      report. Until then, don't start the next workflow step, launch another
-      agent on the same files, or write the reply in step 3.
+      completion notification; work on that report. `done` runs just before
+      the agent's reply, so if the report isn't there yet, call `wait` once
+      more (it returns at once) instead of ending your turn. Until then,
+      don't start the next workflow step, launch another agent on the same
+      files, or write the reply in step 3. An agent can also end without
+      running `done` (turn budget, an error): after 40 replies of still
+      running in a row (about an hour), or once your budget is used up, stop
+      waiting and end your turn; the orchestrator resumes you when the
+      agent's notification reaches it.
    A spec written after the code, or a skipped review, fails the gate and the
    unit is not merged.
    Budget: before you start any further fix round, compare `date +%s` with the

@@ -349,6 +349,10 @@ def union(intervals):
     return total + ((cur[1] - cur[0]).total_seconds() if cur else 0)
 
 
+# (session path, slug) -> ((start, end), subagent logs) of each run run() split out.
+RUN_PARTS = {}
+
+
 def load_subagents(base):
     subs = {}
     for f in sorted(glob.glob(base + "/subagents/*.jsonl")):
@@ -384,6 +388,8 @@ def run(session_path, slug=None):
     else:
         s, e = runs[k]["start"], runs[k]["end"]
         subs = {f: v for f, v in subs.items() if owner.get(f) == k}
+        # The journal of this run reads the same part of the session.
+        RUN_PARTS[(session_path, slug)] = ((s, e), set(subs))
     main_ts = profile(lines[s:e], "main", acc, edits, waits, ivals)
     ends = {}
     acc["main"]["agents"] += 1
@@ -797,7 +803,11 @@ def add_journal(row, session, slug, root, run_copy=False):
     """Builds the run journal (journal.py): keeps its items on the row, writes
     <store>/journals/<session>.md, and with run_copy also <slug>-journal.md
     in the run folder. Returns its headline."""
-    j = journal.build(session, slug, root, store_dir())
+    # A session with several runs: only this run's part of it (see run()).
+    span, keep = RUN_PARTS.get((session, slug)) or (None, None)
+    multi = len(row.get("session_runs") or []) > 1
+    j = journal.build(session, slug, root, store_dir(), span=span if multi else None,
+                      keep=keep if multi else None)
     row["journal"] = {"counts": j["counts"], "items": j["items"][:60], "outcome": j["outcome"]}
     text = journal.markdown(j, row)
     # A session that held several runs gets one journal per run.
@@ -916,14 +926,23 @@ def session_info(path):
     return invoked, slugs or ([slug] if slug else []), project, cwd
 
 
-def is_current(old_rows, mtime):
+def is_current(old_rows, mtime, migrate=True):
     """Whether a session's rows are up to date: one of them was built after
     the log last grew, and every run it saw in the session has a row. A row
-    from before rows were keyed per run has no session_runs, so its session
-    is recorded again once, splitting any runs it had merged."""
+    from before rows were keyed per run has no session_runs; with migrate
+    (an explicit --collect) its session is recorded again once, splitting any
+    runs it had merged. Without (the sweep after --record, which must stay
+    quick) it counts as current, as before."""
     seen = {r.get("slug") for r in old_rows}
-    return any(r.get("session_mtime", 0) >= mtime - 1 and "session_runs" in r
-               and set(r["session_runs"]) <= seen for r in old_rows)
+    for r in old_rows:
+        if r.get("session_mtime", 0) < mtime - 1:
+            continue
+        if "session_runs" in r:
+            if set(r["session_runs"]) <= seen:
+                return True
+        elif not migrate:
+            return True
+    return False
 
 
 def archive(path, project):
@@ -985,7 +1004,7 @@ def collect(quiet=False, refresh=False):
         if now - mtime < 900:
             continue
         olds = rows.get(session) or []
-        if olds and is_current(olds, mtime) and not refresh:
+        if olds and is_current(olds, mtime, migrate=not quiet) and not refresh:
             continue
         invoked, slugs, project, cwd = session_info(path)
         if not invoked:

@@ -185,8 +185,12 @@ carries the details becomes one unreadable paragraph:
   `AskUserQuestion` returns without an answer (it timed out or closed
   unanswered), go on with the option marked `(Recommended)`, write
   `TIMEOUT: <header>: took <option>` into the run file, and say so in the
-  final report. Only the split approval waits for a real answer: on a
-  timeout there, ask it again once, then stop and record the run.
+  final report. Where no option is marked, a timeout takes the one that
+  changes least: **Leave it out** for a failed unit, **Stop** for a blocker
+  in a lane or dependency chain and for a stuck synthesis. Only the split
+  approval waits for a real answer, since approving starts the spending and
+  the tickets: on a timeout there, ask it again once, then stop and record
+  the run.
 
 ## 1. Read the input
 

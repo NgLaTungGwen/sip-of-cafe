@@ -875,12 +875,29 @@ class RunsPerSession(unittest.TestCase):
             rows = self.cost.load_rows()
         self.assertEqual(sorted((r["session"], r.get("slug")) for r in rows),
                          [("s0", None), ("s1", "alpha"), ("s1", "beta")])
-        # An old row, written before session_runs, is recorded again once.
+        # An old row, written before session_runs, is recorded again once by
+        # --collect, but not by the quick sweep after --record.
         self.assertFalse(self.cost.is_current([{"slug": "alpha", "session_mtime": 10}], 5))
+        self.assertTrue(self.cost.is_current([{"slug": "alpha", "session_mtime": 10}], 5, migrate=False))
         new = [{"slug": "alpha", "session_mtime": 10, "session_runs": ["alpha", "beta"]},
                {"slug": "beta", "session_mtime": 4, "session_runs": ["alpha", "beta"]}]
         self.assertTrue(self.cost.is_current(new, 5))
         self.assertFalse(self.cost.is_current(new[:1], 5))  # beta has no row yet
+
+    def test_each_run_gets_its_own_journal(self):
+        store = os.path.join(self.dir, "store")
+        with mock.patch.dict(os.environ, {"BMAD_RUNS_DIR": store}):
+            for slug, other in (("beta", "alpha"), ("alpha", "beta")):
+                row = self.row(slug)
+                self.cost.add_journal(row, self.session, slug, None)
+                j = self.cost.journal.build(self.session, slug, None, store,
+                                            *self.cost.RUN_PARTS[(self.session, slug)])
+                stamps = [t["start"] for t in j["timeline"]]
+                self.assertTrue(os.path.exists(os.path.join(store, "journals", f"s1-{slug}.md")))
+                # Only this run's agents: beta's from 12:00, alpha's before.
+                self.assertEqual(len(stamps), 2, stamps)  # its worker and its synthesis
+                for s in stamps + [j["start"].replace("T", " ")]:
+                    self.assertEqual(s >= "2026-10-26 12", slug == "beta", (slug, s))
 
     def test_collect_finds_every_run(self):
         invoked, slugs, _, _ = self.cost.session_info(self.session)
