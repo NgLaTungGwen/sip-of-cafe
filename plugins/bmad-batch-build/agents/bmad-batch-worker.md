@@ -58,6 +58,10 @@ Keep turns few and context small:
   returns within 100 s), repeated while it prints still running. Never
   wrap a wait in a loop, `timeout` or `sleep`, and never start a command with
   `sleep N`: the harness blocks it.
+- After a compaction, take the script paths (heavy.sh, bg.sh, lcov-gaps.py)
+  from `cat "$(git -C <worktree> rev-parse --absolute-git-dir)/bmad/scripts.env"`,
+  which prepare-worktree.sh wrote, and give them to every subagent you
+  launch. Never search the disk for another copy: the guard refuses those.
 - Write and change files with the Write or Edit tool. Never write a file or a
   script through a heredoc in Bash (`cat > f <<'EOF'`, `python - <<'EOF'`):
   backticks and quotes inside it break the shell with "unexpected EOF while

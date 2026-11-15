@@ -711,6 +711,67 @@ class PrepareWorktree(unittest.TestCase):
             return
         tomllib.loads(toml)
 
+    def test_script_paths_survive_compaction_in_the_git_dir(self):
+        # ti-port: implementers lost the heavy.sh/bg.sh paths after compaction
+        # and ran stale copies, which the guard refused 6 times.
+        wt, toml = self.pinned(with_api=False)
+        gd = subprocess.run(["git", "-C", wt, "rev-parse", "--absolute-git-dir"],
+                            capture_output=True, text=True).stdout.strip()
+        env = open(os.path.join(gd, "bmad", "scripts.env"), encoding="utf-8").read()
+        import re
+        found = dict(re.findall(r"^(\w+)='(.*)'$", env, re.M))
+        self.assertEqual(set(found), {"HEAVY", "BG", "LCOV", "APP_CHECK", "SCRIPTS"})
+        for k, f in (("HEAVY", "heavy.sh"), ("BG", "bg.sh"), ("LCOV", "lcov-gaps.py")):
+            self.assertTrue(found[k].endswith("/" + f), found[k])
+            self.assertTrue(os.path.basename(found[k]) == f)
+        import tomllib
+        doc = tomllib.loads(toml)["workflow"]
+        lookup = f'cat "$(git -C {wt} rev-parse --absolute-git-dir)/bmad/scripts.env"'
+        self.assertIn(lookup, doc["implementation_handoff"])
+        self.assertIn(lookup, " ".join(doc["persistent_facts"]))
+        st = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True).stdout
+        self.assertNotIn("scripts.env", st)
+        # The agent files, both copies, say where to look.
+        for d in (os.path.join(SKILL_DIR, "agents"),
+                  os.path.join(os.path.dirname(os.path.dirname(SKILL_DIR)), "agents")):
+            for f in ("haiku-implementer.md", "bmad-batch-worker.md", "bmad-batch-synthesis.md"):
+                text = open(os.path.join(d, f), encoding="utf-8").read()
+                self.assertIn("rev-parse --absolute-git-dir)/bmad/scripts.env", text, f)
+
+    def test_review_layers_are_sized_by_risk(self):
+        # 2.2: the blind hunter's finding floor gave 854 findings, 60% low and
+        # 3 high. 2.3: small units get edge-case and verification-gap only, the
+        # intent auditor (56% rejected, no high) only L units or CHANGED
+        # interfaces, and the two cheaper layers run on Sonnet.
+        _, toml = self.pinned(with_api=False)
+        import tomllib
+        doc = tomllib.loads(toml)["workflow"]
+        layers = {l["id"]: l for l in doc["review_layers"]}
+        self.assertEqual(set(layers), {"blind-hunter", "intent-alignment"})  # the other two keep their defaults
+        bh, ia = layers["blind-hunter"], layers["intent-alignment"]
+        for l in (bh, ia):
+            self.assertTrue(l["name"] and "{diff_file}" in l["instruction"])
+            self.assertIn("model: sonnet", l["instruction"])
+            self.assertIn("do not spawn subagents of your own", l["instruction"])
+        self.assertNotIn("floor", bh["instruction"])
+        self.assertNotIn("do not stop with an empty list", bh["instruction"])
+        self.assertIn("return an empty list", bh["instruction"])
+        self.assertIn("Size: S", bh["when"])
+        self.assertIn("fewer than 400 changed lines", bh["when"])
+        for w in ("contract", "migration", "auth"):
+            self.assertIn(w, bh["when"])
+        self.assertIn("With no Size line, run it", bh["when"])
+        self.assertIn("Size: L", ia["when"])
+        self.assertIn("CHANGED", ia["when"])
+        self.assertIn("{verbatim_intent}", ia["instruction"])
+        facts = " ".join(doc["persistent_facts"])
+        self.assertIn("This replaces step-04's rule that all review subagents run at the same model", facts)
+        self.assertIn("Verification Gap Reviewer at the session model", facts)
+        # The size the gates read reaches the worker.
+        worker = open(os.path.join(SKILL_DIR, "references", "worker.md"), encoding="utf-8").read()
+        self.assertIn("Size: <size>", worker)
+        self.assertIn("--db-template <template>", worker)
+
     def test_build_is_not_banned_when_the_project_requires_it(self):
         # An unconditional "Never run npm run build" made workers skip a build
         # that the intent or AGENTS.md required (healthpro-seed-fix, healthpro-cyber).
@@ -1951,6 +2012,9 @@ class Guard(unittest.TestCase):
         self.assertIsNotNone(why)
         self.assertIn("0.12.12", why)
         self.assertIn(SCRIPTS.replace("\\", "/") + "/heavy.sh", why)
+        # ti-port: after a compaction the refused agent did not know where the
+        # current paths were; the refusal names the file that keeps them.
+        self.assertIn("rev-parse --absolute-git-dir)/bmad/scripts.env", why)
         self.assertIsNotNone(self.bash(f"bash /x/.claude/backups/bmad-batch-build-20261025-v070/skill/scripts/bg.sh wait . v"))
         self.assertIsNone(self.bash(f"bash {same}/scripts/heavy.sh 'npm test'"))
         self.assertIsNone(self.bash(f"bash '{SCRIPTS}/heavy.sh' 'npm test'"))

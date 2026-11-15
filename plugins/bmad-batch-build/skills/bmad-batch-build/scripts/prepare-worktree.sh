@@ -2,7 +2,10 @@
 # Create an isolated worktree that can run BMAD skills.
 #
 # usage: prepare-worktree.sh <main-root> <name> <branch> [--apps] [--no-install] [--base <rev>]
-#                            [--agents <prefix>]
+#                            [--agents <prefix>] [--db-template <template>]
+#
+# --db-template is the run's migrated template database (db-template.sh). The
+# worktree's test database is cloned from it; see the database section below.
 #
 # --agents is the agent name prefix: "bmad-batch-build:" when the agents come
 # from the plugin, empty for project or user copies (see SKILL.md), or
@@ -27,13 +30,15 @@ root=$1 name=$2 branch=$3
 root=${root//\\//}
 shift 3
 . "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
-apps=0 install=1 base=$(base_ref "$root") agents=""
+. "$(dirname "${BASH_SOURCE[0]}")/lib-db.sh"
+apps=0 install=1 base=$(base_ref "$root") agents="" db_template=""
 while [ $# -gt 0 ]; do
   case $1 in
     --apps) apps=1 ;;
     --no-install) install=0 ;;
     --base) base=$2; shift ;;
     --agents) agents=$2; shift ;;
+    --db-template) db_template=$2; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -98,22 +103,32 @@ fi
 
 # A private test database per worktree. Without one every run shares
 # <dev db>_test, and each run's teardown deletes rows the other created
-# (api/test/global-cleanup.ts). The test setup creates, migrates and seeds
-# <db>_test from DATABASE_URL. *_FILE secrets stay in the main checkout and are
-# referenced by absolute path, never copied. 127.0.0.1, not localhost: the
-# localhost relay on this machine wedges.
-db="hive_pb_$(printf '%s' "$name" | tr -c 'a-zA-Z0-9\n' '_' | tr 'A-Z' 'a-z')"
-per_db=1
-if profile_get "$root" base > /dev/null; then
-  [ "$(profile_get "$root" database.per_worktree)" = True ] || per_db=0
+# (api/test/global-cleanup.ts), which showed up as FK, 409 and duplicate-key
+# failures that pass when a suite runs alone. With --db-template the database
+# is cloned from the run's migrated template (lib-db.sh, db-template.sh), so
+# the suite finds it ready. When the clone fails (Postgres down, a connection
+# open on the template), hive-factory's test setup creates, migrates and seeds
+# <db>_test from DATABASE_URL as before, and a profiled project keeps the
+# shared database in .env, since nothing would create its private one. A
+# project with no database gets none of this. *_FILE secrets stay in the main
+# checkout and are referenced by absolute path, never copied.
+db="hive_pb_$(db_ident "$name")"
+dbmode=$(db_mode "$root")
+if [ "$dbmode" != none ] && [ -n "$db_template" ]; then
+  target="$db$(db_suffix "$root" "$dbmode")"
+  if db_clone "$root" "$dbmode" "$db_template" "$target"; then
+    echo "test database: $target, cloned from $db_template" >&2
+  else
+    echo "test database: could not clone $db_template into $target; $([ "$dbmode" = hive ] && echo "the test setup creates and migrates it" || echo "this worktree shares the database in .env")" >&2
+    [ "$dbmode" = profile ] && dbmode=none
+  fi
+elif [ "$dbmode" = profile ]; then
+  dbmode=none  # no template: nothing would create the private database
 fi
-if [ -f "$root/.env" ] && [ "$per_db" = 0 ]; then
+if [ -f "$root/.env" ] && [ "$dbmode" = none ]; then
   sed -E -e "s#^([A-Z_]+_FILE)=(secrets/.*)#\1=$root/\2#" "$root/.env" > "$wt/.env"
 elif [ -f "$root/.env" ]; then
-  sed -E \
-    -e "s#^(DATABASE_URL|MIGRATION_DATABASE_URL)=(postgres://[^@]*@)[^/]*/.*#\1=\2127.0.0.1:55432/$db#" \
-    -e "s#^([A-Z_]+_FILE)=(secrets/.*)#\1=$root/\2#" \
-    "$root/.env" > "$wt/.env"
+  sed -E -e "$(db_url "$dbmode" "$db")" -e "s#^([A-Z_]+_FILE)=(secrets/.*)#\1=$root/\2#" "$root/.env" > "$wt/.env"
 fi
 # Vitest starts one worker per CPU by default. With several suites running at
 # once across worktrees and sessions that crashed workers, so every run in this
@@ -130,6 +145,15 @@ heavy="$scripts/heavy.sh" bg="$scripts/bg.sh" app="$scripts/app-check.sh"
 # Python on Windows cannot open Git Bash's /c/... form, so the coverage reader
 # gets the mixed C:/... form.
 lcov=$(cygpath -m "$scripts/lcov-gaps.py" 2>/dev/null || echo "$scripts/lcov-gaps.py")
+# The same paths in a file in the worktree's private git dir, where bg.sh keeps
+# its logs. An agent that compacted away its prompt finds them again from the
+# worktree path alone; without it, implementers fell back to stale copies and
+# the guard refused them 6 times (ti-port). The handoff and the agent files name
+# the lookup: cat "$(git -C <wt> rev-parse --absolute-git-dir)/bmad/scripts.env".
+scripts_env="$(git -C "$wt" rev-parse --absolute-git-dir)/bmad/scripts.env"
+mkdir -p "$(dirname "$scripts_env")"
+printf "HEAVY='%s'\nBG='%s'\nLCOV='%s'\nAPP_CHECK='%s'\nSCRIPTS='%s'\n" "$heavy" "$bg" "$lcov" "$app" "$scripts" > "$scripts_env"
+paths_lookup="cat \\\"\$(git -C $wt rev-parse --absolute-git-dir)/bmad/scripts.env\\\""
 
 # A project whose profile names an app gets each unit checked in the running
 # app (app-check.sh). Every worktree gets its own port, so parallel units
@@ -235,12 +259,13 @@ persistent_facts = [
   "Run shell commands as \`cd $wt && ...\`, or use \`git -C $wt\`. Every command here is bash: with no Bash tool (PowerShell only, on Windows), run each one as bash -c '<command>' through PowerShell, writing a single quote inside it as two, and never translate it into PowerShell.",
   "Source files change only through the implementation subagent, review fixes included. For every fix round, launch a new \`${impl_type}\`${impl_fix} with the Agent tool in the foreground, giving it the spec path and the fixes. Never resume an earlier one with SendMessage: that runs in the background, and you would end your turn before the fixes land. This replaces step-04's instruction to re-engage the same implementation subagent. Never end your turn or hand back while a fix round is running. The parent edits only the spec and files under _bmad-output/.",
   "No single Bash call may run longer than 10 minutes; Claude Code moves a longer one to the background. Start anything that can take longer (the full suite, a build, an install) with \`bash $bg run $wt <name> \"<command>\"\` as a Bash call with run_in_background: true, and wait for it with one \`bash $bg wait $wt <name>\` per Bash call, repeated while it prints still running. Never wrap a wait in a loop, \`timeout\` or \`sleep\`. Logs and scratch files stay inside $wt. The one exception is {diff_file}, which steps 03 and 04 write to the system temp directory: keep it there, because inside $wt it would end up in the next diff.",
-  "Every subagent prompt you write yourself (a fix round, a reviewer, a helper) must say, in its own words: the skill's scripts are \`$heavy\`, \`$bg\` and \`$lcov\`, and no other copy (another copy's are refused); never call TaskStop or Monitor, which they cannot use (a stuck command ends at its time limit; wait for it with bg.sh); write files only inside $wt; do not commit. You commit the implementation subagent's work yourself, after it returns, so every commit carries your own trailer. Give one implementation subagent at most about 15 findings or 3 files per round, and run rounds one after another: parallel ones in one worktree share its test database and coverage folder (heavy.sh runs their tests one at a time anyway), and in sonar-zero-5 large rounds came back partial. To read coverage, run \`python $lcov <lcov file> <path part>\` instead of parsing lcov by hand: it handles CRLF, backslash paths and bun's lcov, and exits 2 when the lcov is empty.",
+  "Every subagent prompt you write yourself (a fix round, a reviewer, a helper) must say, in its own words: the skill's scripts are \`$heavy\`, \`$bg\` and \`$lcov\`, and no other copy (another copy's are refused), and after a compaction \`$paths_lookup\` prints them again (the one file outside $wt anyone may read; you can use it too); never call TaskStop or Monitor, which they cannot use (a stuck command ends at its time limit; wait for it with bg.sh); write files only inside $wt; do not commit. You commit the implementation subagent's work yourself, after it returns, so every commit carries your own trailer. Give one implementation subagent at most about 15 findings or 3 files per round, and run rounds one after another: parallel ones in one worktree share its test database and coverage folder (heavy.sh runs their tests one at a time anyway), and in sonar-zero-5 large rounds came back partial. To read coverage, run \`python $lcov <lcov file> <path part>\` instead of parsing lcov by hand: it handles CRLF, backslash paths and bun's lcov, and exits 2 when the lcov is empty.",
   "Write and change files with the Write or Edit tool. Never write a file or a script through a heredoc in Bash (\`cat > f <<'EOF'\`, \`python - <<'EOF'\`): quotes and backticks inside it break the shell, and the harness blocks the python one. Write the script to a file under $wt/_bmad-output/ with the Write tool, then run it.",
   "Workflow gaps: if the spec template has no baseline_revision, set it to the output of \`git -C $wt rev-parse HEAD\` before the first change. If _bmad-output/ is gitignored, commit the spec with \`git add -f\`. Exclude _bmad-output from git pathspecs with ':(exclude)_bmad-output'; the short form ':!_bmad-output' fails with 'Unimplemented pathspec magic'.",
   "Dependencies install in the background while you plan; planning needs only the checkout. Before any command that needs node_modules (tests, typecheck, build, lint), run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, halt with its output as the blocking condition.",
   "Testing has one owner per check. The implementation subagent runs the targeted test files and the typecheck of each workspace it touched, after its first pass and after every review fix, and reports the results. You do not re-run them: if it reports one it could not get green, send that back to it. $suite_fact Synthesis builds, so skip the build unless the intent, the spec's Verification or AGENTS.md requires one; then run it once, after the implementation subagent returns, through the queue: \`bash $heavy 'cd $wt && <the project build command>'\`.",
   "When the intent starts with \`Kind: bug\`, reproduce the bug before fixing it. The plan's first task is a test that shows the bug; the implementation subagent runs it before the fix, where it must fail, and after, where it must pass, and reports both result lines. Keep a test for each item of the intent's Unchanged behaviour list too. Record the reproduction in the spec under \`## Reproduction\`, one line each: \`RED: <command> -> <the failing line>\` and \`GREEN: <command> -> <the passing line>\`. In a project that runs no tests, reproduce it through the app check when there is one, otherwise write \`RED: traced: <file:line and why it fails>\` and \`GREEN: traced: <what the fix changes there>\`. The gate rejects a bug unit without both lines.",
+  "Review is sized by risk. This replaces step-04's rule that all review subagents run at the same model capability as the current session: launch the Blind Hunter (\`blind-hunter\`) and the Intent Alignment Auditor (\`intent-alignment\`) with \`model: sonnet\` in their Agent calls, and the Edge Case Hunter and the Verification Gap Reviewer at the session model (no \`model\`). Each layer's 'Run only when' line reads the \`Size:\` line of your worker prompt (S, M or L; with none, run every layer) and the diff: count its changed lines, insertions plus deletions, with \`git -C $wt diff --shortstat <baseline_revision>\`. Announce each skipped layer with the reason.",
 $app_fact
   "file:AGENTS.md",
 ]
@@ -256,9 +281,49 @@ Launch a subagent with no prior conversation context, using the \`${impl_type}\`
 >
 > You own the targeted checks; the parent does not repeat them. $t_clause the typecheck of each workspace you touched through the machine-wide queue (\`bash $heavy 'cd $checks && $t_tc'\`).$apps_clause Run them again after every review fix you are sent. Report each result.
 >
-> Use only these copies of the skill's scripts: \`$heavy\`, \`$bg\` and, to read coverage, \`python $lcov <lcov file> <path part>\`. Never call TaskStop or Monitor; you cannot use them. Write logs and scratch files only inside $wt (under _bmad-output/). Do not commit: the parent commits your work.
+> Use only these copies of the skill's scripts: \`$heavy\`, \`$bg\` and, to read coverage, \`python $lcov <lcov file> <path part>\`. If you lose these paths, for example after a compaction, read them back with \`$paths_lookup\` (the one file outside $wt you may read); never search the disk for another copy. Never call TaskStop or Monitor; you cannot use them. Write logs and scratch files only inside $wt (under _bmad-output/). Do not commit: the parent commits your work.
 >
 > When you're done, report what you changed, how you verified it, and anything left incomplete or risky.
+"""
+
+# Review layers merge with bmad-build-auto's defaults by id, each replacing the
+# whole layer. The blind hunter's finding floor and its "do not stop with an
+# empty list" rule are gone: 60% of its findings were low, 3 high in 854. The
+# edge-case and verification-gap layers keep their defaults and always run.
+[[workflow.review_layers]]
+id = "blind-hunter"
+name = "Blind Hunter"
+when = "the unit is not small and low-risk. It is small and low-risk only when all three hold: your worker prompt says \`Size: S\`; the diff has fewer than 400 changed lines (insertions plus deletions, from \`git -C $wt diff --shortstat <baseline_revision>\`); and it touches no contract, migration or auth code (no changed path in a contracts package or a migrations folder, none with auth, session, permission or role in its path, and no change to an interface the intent agreed on). With no Size line, run it."
+instruction = """
+Launch a context-free subagent with \`model: sonnet\` (the review-sizing fact replaces step-04's same-model rule for this layer), with this prompt:
+
+Conduct a review of CONTENT.
+Look for what's missing, not only what's wrong.
+Report only real defects: each one a bad outcome a user or developer would actually meet, at a file and line you cite. Leave out style, naming, taste and speculative hardening. There is no minimum number of findings: if you find no real defect, return an empty list and say so in one line.
+Output a Markdown list of findings only, with no severity, priority or ranking.
+If the content is empty, stop and say so.
+
+CONTENT: the unified diff at \`{diff_file}\`. Read that file; it is the content under review.
+
+Do not invoke any skill, and do not spawn subagents of your own: you are the reviewer. Return your findings as text in your final message; do not route them through any findings-reporting tool the host may offer.
+"""
+
+[[workflow.review_layers]]
+id = "intent-alignment"
+name = "Intent Alignment Auditor"
+when = "your worker prompt says \`Size: L\` (or larger), or the diff changes an interface this unit provides or consumes from the shape the intent agreed (a route, payload, type or method signature you will mark CHANGED in your reply). With no Size line, run it."
+instruction = """
+Launch a subagent with \`model: sonnet\` (the review-sizing fact replaces step-04's same-model rule for this layer), with this prompt:
+
+You are an intent-alignment auditor. You have no other context about how this change was produced. Here is the verbatim intent this work started from:
+
+{verbatim_intent}
+
+The diff is the unified diff at \`{diff_file}\`. Read that file; it is the change under review.
+
+Your task is strictly descriptive; do not prescribe additional work. Report: (1) the defensible readings of the intent, enumerated; (2) which reading this diff implements; (3) where the readings and the diff diverge, specifically which surface the intent's expectations live at versus which surface the diff's changes and its tests exercise.
+
+Do not invoke any skill, and do not spawn subagents of your own: you are the reviewer. Return your findings as text in your final message; do not route them through any findings-reporting tool the host may offer.
 """
 EOF
 hide _bmad/custom/bmad-build-auto.toml

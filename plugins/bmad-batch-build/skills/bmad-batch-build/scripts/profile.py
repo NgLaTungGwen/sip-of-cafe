@@ -38,6 +38,24 @@ An optional "ci" tunes the watch on the server's pipelines (ci-status.py):
 "ignore" names checks, stages, jobs or tasks that fail by design; "timeout"
 is how many minutes synthesis waits for the PR's pipelines.
 
+"database" (detect sets it when .env has DATABASE_URL) gives every worktree
+a private test database, cloned from a template migrated once per run
+(db-template.sh, prepare-worktree.sh --db-template):
+
+    "database": {"env": "DATABASE_URL", "per_worktree": true,
+                 "migrate": {"dir": ".", "cmd": "npm run db:migrate"},
+                 "container": "postgres", "test_suffix": "",
+                 "template_sql": "...", "clone_sql": "GRANT CONNECT ON DATABASE {db} TO app"}
+
+"migrate" runs in the main checkout with DATABASE_URL and
+MIGRATION_DATABASE_URL pointed at the template; without it there is no
+template and the worktrees share the database in .env. "container" is the
+Docker container psql runs in as postgres (default hive-postgres).
+"test_suffix" is what the suite appends to the database name in .env
+(hive-factory's "_test"; default none). "template_sql" runs inside the new
+template before the migration, "clone_sql" after each clone. "per_worktree":
+false turns it all off.
+
 An optional "merge_message" (e.g. "chore(merge): {title}") replaces the
 "merge: {title}" message merge-units.sh gives each unit merge, for a
 repository whose commit-msg hook wants its own format.
@@ -228,7 +246,10 @@ def detect(root):
             prof["notes"] = "No build files recognised: write the install, checks, suite and targeted commands in by hand."
     env = os.path.join(root, ".env")
     if os.path.exists(env) and any(line.startswith("DATABASE_URL=") for line in open(env, encoding="utf-8", errors="ignore")):
-        prof["database"] = {"env": "DATABASE_URL", "per_worktree": False}
+        # On by default: a shared test database lets parallel suites delete
+        # each other's rows. It only takes effect with a template (db-template.sh),
+        # which needs "migrate"; without one the worktrees share the database.
+        prof["database"] = {"env": "DATABASE_URL", "per_worktree": True}
     prof["fingerprint"] = fingerprint(root)
     return prof
 

@@ -327,6 +327,134 @@ jobs:
         self.assertIn("127.0.0.1:55432", env)
 
 
+class WorktreeDatabase(unittest.TestCase):
+    """1.2: every worktree's test database is cloned from one migrated template
+    per run, since a shared one let parallel suites delete each other's rows
+    (FK, 409 and duplicate-key failures that pass alone). docker and npm are
+    fakes on PATH, so no test reaches a real Postgres."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bin = os.path.join(self.tmp, "bin")
+        self.docker = os.path.join(self.tmp, "docker.txt").replace("\\", "/")
+        self.npm = os.path.join(self.tmp, "npm.txt").replace("\\", "/")
+        write(os.path.join(self.bin, "docker"),
+              f'#!/usr/bin/env bash\necho "${{@: -1}}" >> "{self.docker}"\n'
+              'if [ -n "${FAKE_DOCKER_FAIL:-}" ]; then case "$*" in *"$FAKE_DOCKER_FAIL"*) exit 1 ;; esac; fi\nexit 0\n')
+        write(os.path.join(self.bin, "npm"),
+              f'#!/usr/bin/env bash\necho "npm $* | $DATABASE_URL | $MIGRATION_DATABASE_URL" >> "{self.npm}"\n')
+        for f in ("docker", "npm"):
+            os.chmod(os.path.join(self.bin, f), 0o755)
+        self.repo = os.path.join(self.tmp, "repo").replace("\\", "/")
+        remote = os.path.join(self.tmp, "remote.git")
+        git("init", "-q", "--bare", "-b", "main", remote)
+        git("clone", "-q", remote, self.repo)
+        os.makedirs(os.path.join(self.repo, "_bmad", "custom"))
+        write(os.path.join(self.repo, "package.json"), '{"name": "x", "scripts": {"db:migrate": "m"}}')
+        write(os.path.join(self.repo, ".env"),
+              "DATABASE_URL=postgres://hive_app:a@localhost:55432/hive_factory\n"
+              "MIGRATION_DATABASE_URL=postgres://hive_owner:o@localhost:55432/hive_factory\n")
+        write(os.path.join(self.repo, ".gitignore"), ".env\n_bmad/\n.claude/\n")
+        git("add", "-A", cwd=self.repo)
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init", cwd=self.repo)
+        git("push", "-q", "origin", "HEAD", cwd=self.repo)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_it(self, script, *args, **env):
+        e = dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"], BMAD_DB_RETRY_PAUSE="0",
+                 BMAD_RUNS_DIR=os.path.join(self.tmp, "store"), BMAD_HEAVY_DIR=os.path.join(self.tmp, "heavy"), **env)
+        return subprocess.run([BASH, os.path.join(SCRIPTS, script), *args], capture_output=True, text=True, env=e)
+
+    def calls(self, which=None):
+        p = which or self.docker
+        return open(p, encoding="utf-8").read().splitlines() if os.path.exists(p) else []
+
+    def prepare(self, *extra, **env):
+        r = self.run_it("prepare-worktree.sh", self.repo, "u-1", "feat/u-1", "--no-install", *extra, **env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        wt = os.path.join(self.repo, ".claude", "worktrees", "u-1")
+        return r, open(os.path.join(wt, ".env"), encoding="utf-8").read()
+
+    def profiled(self):
+        py = ["python", os.path.join(SCRIPTS, "profile.py")]
+        subprocess.run(py + ["detect", self.repo, "--write"], check=True, capture_output=True)
+        subprocess.run(py + ["set", self.repo, "database.migrate", '{"dir": ".", "cmd": "npm run db:migrate"}'],
+                       check=True, capture_output=True)
+        prof = json.load(open(os.path.join(self.repo, ".claude", "bmad-batch-project.json"), encoding="utf-8"))
+        self.assertIs(prof["database"]["per_worktree"], True)  # on by default now
+
+    def test_the_template_is_migrated_once_from_the_main_checkout(self):
+        r = self.run_it("db-template.sh", self.repo, "Run-1")
+        self.assertEqual(r.stdout.strip(), "DB-TEMPLATE hive_pb_run_1_template", r.stderr)
+        sql = self.calls()
+        self.assertIn("CREATE DATABASE hive_pb_run_1_template", sql)
+        self.assertIn("GRANT CONNECT ON DATABASE hive_pb_run_1_template TO hive_owner, hive_app", sql)
+        self.assertTrue(any(s.startswith("GRANT CREATE, USAGE ON SCHEMA public TO hive_owner") for s in sql))
+        npm = self.calls(self.npm)
+        self.assertEqual(len(npm), 1)
+        self.assertIn("run db:migrate", npm[0])
+        self.assertIn("hive_app:a@127.0.0.1:55432/hive_pb_run_1_template |", npm[0])
+        self.assertTrue(npm[0].endswith("hive_owner:o@127.0.0.1:55432/hive_pb_run_1_template"), npm[0])
+        r = self.run_it("db-template.sh", self.repo, "Run-1", "--drop")
+        self.assertIn("DROP DATABASE IF EXISTS hive_pb_run_1_template WITH (FORCE)", self.calls())
+
+    def test_no_template_from_a_main_checkout_that_could_hold_newer_migrations(self):
+        write(os.path.join(self.repo, "package.json"), '{"name": "y", "scripts": {"db:migrate": "m"}}')
+        r = self.run_it("db-template.sh", self.repo, "run")
+        self.assertIn("DB-TEMPLATE none: the main checkout has uncommitted changes", r.stdout)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.calls(self.npm), [])
+
+    def test_a_failed_migration_drops_the_template(self):
+        write(os.path.join(self.bin, "npm"), "#!/usr/bin/env bash\necho boom postgres://u:secret@h/x; exit 1\n")
+        r = self.run_it("db-template.sh", self.repo, "run")
+        self.assertIn("DB-TEMPLATE none: the migration failed", r.stdout)
+        self.assertNotIn("secret", r.stderr)
+        self.assertIn("DROP DATABASE IF EXISTS hive_pb_run_template WITH (FORCE)", self.calls()[-1])
+
+    def test_prepare_clones_the_worktree_database_from_the_template(self):
+        r, env = self.prepare("--db-template", "hive_pb_run_template")
+        self.assertEqual(self.calls(), [
+            "DROP DATABASE IF EXISTS hive_pb_u_1_test",
+            "CREATE DATABASE hive_pb_u_1_test TEMPLATE hive_pb_run_template",
+            "GRANT CONNECT ON DATABASE hive_pb_u_1_test TO hive_owner, hive_app"])
+        self.assertIn("cloned from hive_pb_run_template", r.stderr)
+        self.assertIn("DATABASE_URL=postgres://hive_app:a@127.0.0.1:55432/hive_pb_u_1\n", env)
+
+    def test_a_failed_clone_falls_back_to_create_and_migrate(self):
+        # Postgres refuses a template while something is connected to it.
+        r, env = self.prepare("--db-template", "hive_pb_run_template", FAKE_DOCKER_FAIL="TEMPLATE")
+        self.assertEqual(sum("TEMPLATE hive_pb_run_template" in c for c in self.calls()), 3)
+        self.assertIn("the test setup creates and migrates it", r.stderr)
+        self.assertIn("127.0.0.1:55432/hive_pb_u_1\n", env)  # still private; the suite creates it
+
+    def test_a_profiled_project_clones_or_keeps_the_shared_database(self):
+        self.profiled()
+        r, env = self.prepare("--db-template", "tpl")
+        self.assertIn("CREATE DATABASE hive_pb_u_1 TEMPLATE tpl", self.calls())  # no _test suffix by default
+        self.assertIn("DATABASE_URL=postgres://hive_app:a@localhost:55432/hive_pb_u_1\n", env)  # own host kept
+        git("worktree", "remove", "--force", os.path.join(self.repo, ".claude", "worktrees", "u-1"), cwd=self.repo)
+        git("branch", "-D", "feat/u-1", cwd=self.repo)
+        r, env = self.prepare("--db-template", "tpl", FAKE_DOCKER_FAIL="TEMPLATE")
+        self.assertIn("shares the database in .env", r.stderr)
+        self.assertIn("localhost:55432/hive_factory\n", env)
+
+    def test_remove_worktree_drops_the_worktree_database(self):
+        self.prepare("--db-template", "tpl")
+        r = self.run_it("remove-worktree.sh", self.repo, "u-1", "feat/u-1")
+        self.assertIn("DROP DATABASE IF EXISTS hive_pb_u_1_test WITH (FORCE)", self.calls()[-1], r.stderr)
+
+    def test_a_project_without_a_database_never_calls_docker(self):
+        os.remove(os.path.join(self.repo, ".env"))
+        self.assertIn("DB-TEMPLATE none", self.run_it("db-template.sh", self.repo, "run").stdout)
+        r = self.run_it("prepare-worktree.sh", self.repo, "u-1", "feat/u-1", "--no-install", "--db-template", "tpl")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.run_it("remove-worktree.sh", self.repo, "u-1", "feat/u-1")
+        self.assertEqual(self.calls(), [])
+
+
 class LinuxTests(unittest.TestCase):
     """sonar-zero-5: two Linux-only verifier tests (skipIf win32) failed first
     on CI, because the Windows verify host never runs them."""

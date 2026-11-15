@@ -44,3 +44,7 @@ Keep turns few and context small:
   returns within 100 s), repeated while it prints still running. Never
   wrap a wait in a loop, `timeout` or `sleep`, and never start a command with
   `sleep N`: the harness blocks it.
+- After a compaction, take the script paths from
+  `cat "$(git -C <worktree> rev-parse --absolute-git-dir)/bmad/scripts.env"`
+  (SCRIPTS is `<skill>/scripts`), which prepare-worktree.sh wrote. Never
+  search the disk for another copy: the guard refuses those.

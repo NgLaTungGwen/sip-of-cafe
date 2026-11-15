@@ -137,8 +137,12 @@ commands in the project profile, `<root>/.claude/bmad-batch-project.json`
   never Edit the file: Claude Code asks before every edit under `.claude/`)
   where they differ (they win: "use bun, never npm" changes every command)
   and fill in what the draft left empty. Every command runs from its `dir`
-  without prompting; `targeted.test` keeps the `<files>` placeholder; leave
-  `database.per_worktree` false. When the project is a web app or an API
+  without prompting; `targeted.test` keeps the `<files>` placeholder. For a project
+  with a database, keep `database.per_worktree` on and set `database.migrate`
+  (`{"dir", "cmd"}`, the command that migrates the database DATABASE_URL names)
+  and `database.test_suffix` when the suite appends one to that name; every
+  worktree then gets a private test database cloned from a migrated template
+  (see `profile.py`). Without `migrate` the worktrees share the database. When the project is a web app or an API
   that a script can drive, and the docs say how to start it, set `app`
   (`{"dir", "start", "url"}`, with `{port}` where the start command takes its
   port; see the docstring of `profile.py`): every unit is then checked in the
@@ -557,9 +561,9 @@ with the workers.
    ```
    Run the Postgres check only for a project without a profile whose
    `<root>/.env` has `DATABASE_URL`, or whose profile sets
-   `database.per_worktree`; skip the Docker check when the project doesn't
-   use Docker. When a profile lists a database without `per_worktree`, tell
-   the user the test suite may need it running. If either is down,
+   `database.per_worktree` on; skip the Docker check when the project doesn't
+   use Docker. When a profile turns `per_worktree` off, tell the user the
+   test suite may need the database running. If either is down,
    notify and ask `Docker is down. Start it, then check again?` (or
    Postgres, or both in one sentence), with **Check again (Recommended)**,
    "I started it; run the check again", and **Stop**, "End the run; nothing
@@ -573,7 +577,13 @@ with the workers.
    the project.
 1. Fetch once with `git -C "<root>" fetch origin <base> --quiet`. Concurrent
    fetches into one `.git` race on `FETCH_HEAD`, which is why the scripts never
-   fetch.
+   fetch. Then make the run's template test database, once, in the
+   foreground: `bash "<skill>/scripts/db-template.sh" "<root>" "<slug>"`. It
+   prints `DB-TEMPLATE <template>`, which every worker's step 0a passes as
+   `--db-template <template>`, or `DB-TEMPLATE none: <why>` (no database, no
+   migrate command, a main checkout ahead of the base, Postgres down), after
+   which the workers leave the flag out and fall back. Record the line in the
+   run file. It never blocks the run.
 2. In **one message**, send all of the following:
    - **The tickets** (skip with `TICKETS off`): write `<runs>/<slug>-tickets.json`
      in the format documented in `<skill>/scripts/<tickets script>`. Then make
@@ -591,7 +601,8 @@ The ticket call finishes long before the workers; its notification may arrive
 while they run. Just note it.
 
 Each worktree gets its own `.env` that points at a private test database,
-`hive_pb_<name>_test`, which the test setup creates. Workers and synthesis then
+`hive_pb_<name>_test`, cloned from the template (or, when that failed, created
+and migrated by the test setup). Workers and synthesis then
 run the DB suites side by side without deleting each other's rows. Never `cd`
 your own shell into a worktree.
 
@@ -901,6 +912,9 @@ To clean up, run this for each worktree:
 ```bash
 bash "<skill>/scripts/remove-worktree.sh" "<root>" "<name>" "<branch>"
 ```
+
+It drops the worktree's test database too. Once every worktree is gone, drop
+the run's template with `bash "<skill>/scripts/db-template.sh" "<root>" "<slug>" --drop`.
 
 When wave 1 ran in parallel, the first unit's worktree is on the run's branch, so pass
 `<run branch>` for it, then delete that unit's own branch with
