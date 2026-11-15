@@ -120,6 +120,27 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.16.0:** fixes from an eval of 64 runs (PRs #8–#12).
+  - Each unit runs only the tests its change affects (`affected-tests.sh`), and the
+    full suite runs once, in synthesis. Changes to contracts, migrations, config or
+    lockfiles still force a full suite. `verify.sh` runs only the checks for code
+    that changed, caches results by tree, and fails when the test database is down.
+  - Every worktree gets its own test database, cloned from a template made once per
+    run (`db-template.sh`), and it is dropped when the worktree is removed.
+  - Review is sized by risk: the blind hunter has no minimum finding count, the
+    intent auditor runs only for L units or changed interfaces, and both run on
+    Sonnet.
+  - `heavy.sh`: `--priority` for synthesis, ticket heartbeats, backfill with aging,
+    no double-counted memory, and on Windows it ends orphaned process trees.
+    Parallel width is capped by RAM.
+  - Lane estimates include synthesis. The p80 comes from recorded runs per mode.
+  - Workers wait for their subagents (`bg.sh expect/done`) instead of handing back,
+    and `setup.sh` warns when fork mode is on. You set a gate policy once, at
+    approval. User wait is split into `min_ask` and `min_typed`.
+  - Metrics rows are keyed by (session, slug), so a session with several runs keeps
+    one row per run.
+  - Self-test is green on Windows. Parked fixes: apps vitest runner, and stories are
+    not closed while they have open children, in both ADO and GitHub.
 - **0.15.4:** the plan's time estimate (sonar-zero-5 was estimated at 6 h and
   took 13.4 h).
   - A unit with `items` takes 40 min plus 2.2 per item plus 30 per 1000 lines
