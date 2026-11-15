@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Gate one worker's unit before synthesis.
 #
-# usage: check-unit.sh [--bug] <worktree> <branch> <spec file> [<base rev>]
+# usage: check-unit.sh [--bug] [--intake <intake.md> --unit <id> --iface-file <file>
+#                      --reply-interfaces "<text>"] <worktree> <branch> <spec file> [<base rev>]
 #
 # <base rev> defaults to origin/<the project profile's base>, else origin/main. In lane mode the units share one branch,
 # so pass the HEAD recorded before the unit started.
@@ -22,14 +23,27 @@
 # app-check.sh, run through bg.sh as app-<spec file name without .md>: its rc
 # file is 0, and no code outside _bmad-output changed after the HEAD it
 # checked.
+#
+# --intake <intake.md> --unit <id> --iface-file <file> --reply-interfaces "<text>"
+# (a unit dispatched with an intake): <text> is the worker reply's INTERFACES
+# value. Every `;`-separated item marked CHANGED that names an interface listed
+# under the intake's `## Shared interfaces` needs an entry for this unit and that
+# interface in the interface-changes file (`- <ISO> U<id> <symbol>: ...`, from
+# `intake.py iface add` after an approved exception). Without one the unit fails:
+# it changed a pinned interface on its own.
 set -uo pipefail
 
-bug= args=()
-for a in "$@"; do
-  case $a in
+bug= intake= unit= iface_file= reply_ifaces= args=()
+while [ $# -gt 0 ]; do
+  case $1 in
     --bug) bug=1 ;;
-    *) args+=("$a") ;;
+    --intake) intake=$2; shift ;;
+    --unit) unit=$2; shift ;;
+    --iface-file) iface_file=$2; shift ;;
+    --reply-interfaces) reply_ifaces=$2; shift ;;
+    *) args+=("$1") ;;
   esac
+  shift
 done
 set -- "${args[@]}"
 wt=$1 branch=$2 spec=$3
@@ -71,6 +85,33 @@ if profile_get "$wt" app.start > /dev/null; then
     checked=$(sed -nE 's/^HEAD ([0-9a-f]+).*/\1/p' "$dir/$name.log" | head -1)
     if [ -z "$checked" ] || ! git -C "$wt" diff --quiet "$checked" "$branch" -- . ':(exclude)_bmad-output' 2>/dev/null; then
       reasons+=("code changed after the app check ($name): run it again")
+    fi
+  fi
+fi
+
+if [ -n "$intake" ]; then
+  if [ ! -f "$intake" ]; then
+    reasons+=("intake not found: $intake")
+  else
+    u=${unit#U}
+    # The symbols pinned under ## Shared interfaces: "- <symbol>: <old> -> <new> | owner U1".
+    pinned=$(awk '/^## / {f = ($0 ~ /^## Shared interfaces/); next}
+      f && /^- / { s = substr($0, 3); i = index(s, ": "); if (i > 0) s = substr(s, 1, i - 1);
+                   gsub(/^[ \t`]+|[ \t`]+$/, "", s); if (s != "" && s != "none") print s }' "$intake" | tr -d '\r')
+    if [ -n "$pinned" ]; then
+      IFS=';' read -r -a items <<< "$reply_ifaces"
+      while IFS= read -r sym; do
+        [ -n "$sym" ] || continue
+        for it in "${items[@]}"; do
+          case $it in *CHANGED*) ;; *) continue ;; esac
+          printf '%s' "$it" | grep -qF -- "$sym" || continue
+          if [ -n "$u" ]; then want=" U$u $sym:"; else want=" $sym:"; fi
+          if [ -z "$iface_file" ] || [ ! -f "$iface_file" ] || ! tr -d '\r' < "$iface_file" | grep -qF -- "$want"; then
+            reasons+=("pinned interface '$sym' marked CHANGED with no approved entry for U${u:-?} in ${iface_file:-the interface-changes file} (intake.py iface add)")
+          fi
+          break
+        done
+      done <<< "$pinned"
     fi
   fi
 fi
