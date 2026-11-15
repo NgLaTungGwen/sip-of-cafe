@@ -215,6 +215,21 @@ class Profile(Layouts):
         self.assertEqual([c.split(" @ ")[0] for c in calls if c.startswith("bun ")], ["bun run typecheck"])
         self.assertNotIn("apps-test.rc", r.stdout)
 
+    def test_verify_apps_runs_the_apps_test_script_when_it_has_one(self):
+        # ti-port: threat-intel's apps/ tests are "vitest run --coverage", and
+        # bun test is bun's own runner, which ignores vitest.config.
+        write(os.path.join(self.repo, "package.json"), '{"name": "x"}')
+        write(os.path.join(self.repo, "package-lock.json"), "{}")
+        write(os.path.join(self.repo, "apps", "package.json"),
+              '{"name": "web", "scripts": {"test": "vitest run --coverage"}}')
+        write(os.path.join(self.repo, "apps", "bun.lock"), "")
+        os.makedirs(os.path.join(self.repo, "apps", "node_modules"))
+        r, calls = self.run_script("verify.sh", self.repo, "--apps")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        apps = [c.split(" @ ")[0] for c in calls if c.replace("\\", "/").endswith("/apps")]
+        self.assertEqual(apps, ["bun run typecheck", "bun run test"])
+        self.assertIn("apps-test.rc:0", r.stdout)
+
     def fail_on(self, word):
         # The fake npm and bun exit 2 when their arguments contain <word>.
         for tool in ("npm", "bun"):
@@ -439,7 +454,7 @@ class HeavyQueue(unittest.TestCase):
             r = subprocess.run([BASH, os.path.join(SCRIPTS, "heavy.sh"), "echo started"], capture_output=True,
                                text=True, env=env, timeout=60)
         finally:
-            blocker.kill()
+            self.stop_blocker(blocker, d)
         self.assertIn("starting anyway", r.stderr)
         self.assertIn("started", r.stdout)
 
@@ -452,6 +467,8 @@ class HeavyQueue(unittest.TestCase):
         self.assertEqual(out["kind"], "test")
         self.assertGreaterEqual(int(out["weight"]), 2)
         self.assertEqual(self.heavy("--explain", "npm run typecheck").stdout.split()[1], "weight=1")
+        # The apps/ suite of a bun package with a test script (ti-port).
+        self.assertIn("kind=test", self.heavy("--explain", "cd apps && bun run test").stdout)
 
     def test_a_weight_above_the_slots_is_capped(self):
         r = self.heavy("--explain", "--weight", "9", "echo x", env=self.env(BMAD_HEAVY_SLOTS="2"))
@@ -491,9 +508,28 @@ class HeavyQueue(unittest.TestCase):
             self.assertIn("test  weight 2", status)
             self.assertIn("free RAM", status)
         finally:
-            blocker.kill()
-            blocker.wait()  # a zombie still answers kill -0
-        self.assertEqual(self.heavy("--count", env=env).stdout.strip(), "0")
+            self.stop_blocker(blocker, d)
+        # heavy.sh drops the entry once its pid is gone; give it a moment.
+        deadline = time.time() + 30
+        count = self.heavy("--count", env=env).stdout.strip()
+        while count != "0" and time.time() < deadline:
+            time.sleep(0.2)
+            count = self.heavy("--count", env=env).stdout.strip()
+        self.assertEqual(count, "0")
+
+    @staticmethod
+    def stop_blocker(blocker, d):
+        """Ends a blocker and the sleep under it. On Windows, Popen.kill ends
+        bash.exe only: its `sleep 60` lives on under the MSYS pid that the
+        run.<pid> entry records and heavy.sh checks with kill -0, so the pid
+        is killed from bash first."""
+        for f in os.listdir(d):
+            if f.startswith("run."):
+                pid = f.split(".", 1)[1]
+                if pid.isdigit():
+                    subprocess.run([BASH, "-c", f"kill -9 {pid}"], capture_output=True)
+        blocker.kill()
+        blocker.wait()  # a zombie still answers kill -0
 
     def test_a_machine_with_no_memory_left_says_overloaded_instead_of_starting(self):
         env = self.env(BMAD_HEAVY_MAX_WAIT="2", BMAD_HEAVY_POLL="1", BMAD_HEAVY_FLOOR_MB="99999999",
@@ -508,7 +544,7 @@ class HeavyQueue(unittest.TestCase):
                 time.sleep(0.1)
             r = self.heavy("echo started", env=env)
         finally:
-            blocker.kill()
+            self.stop_blocker(blocker, d)
         self.assertEqual(r.returncode, 75)
         self.assertIn("overloaded", r.stderr)
         self.assertNotIn("started", r.stdout)

@@ -30,7 +30,10 @@ usage: python ado_tickets.py <plan.json> --link-pr <pr id> --merged <unit,unit,.
 Links the PR to the stories of the merged units and to their tasks, never to a
 left-out unit's task. When every task in the plan was merged it also turns on
 close-on-complete. Prints the IDs ADO then reports as linked, and whether
-close-on-complete is on, in one call instead of three slow ones.
+close-on-complete is on, in one call instead of three slow ones. With
+close-on-complete on, a story that still has open child tasks outside this PR
+(a reused story with other work under it) is not linked, because completing
+the PR would close it; the script prints which, and the PR description names it.
 
 usage: python ado_tickets.py <plan.json> --link-pr <pr id> --merged <unit> --unit-pr
 
@@ -146,22 +149,57 @@ def main(path: str) -> None:
         sys.exit(1)
 
 
-def link_targets(plan: dict, merged: set, unit_pr: bool = False):
+CLOSED_STATES = "'Closed','Done','Removed','Resolved','Completed'"
+
+
+def open_children(story_id) -> set:
+    """IDs of the story's child work items that are not closed yet."""
+    out = az("boards", "query", "--wiql",
+             f"SELECT [System.Id] FROM WorkItems WHERE [System.Parent] = {int(story_id)}"
+             f" AND [System.State] NOT IN ({CLOSED_STATES})",
+             "--query", "[].id", "-o", "tsv")
+    return {int(i) for i in out.split()}
+
+
+def link_targets(plan: dict, merged: set, unit_pr: bool = False, children=None, skipped=None):
     """(story ids, task ids, close-on-complete) for a PR holding the merged units.
     One PR for the run links the stories too and closes only when no unit was
-    left out; a unit's own PR (unit_pr) links its task alone and closes it."""
+    left out; a unit's own PR (unit_pr) links its task alone and closes it.
+    With close-on-complete on and `children` (story id -> open child ids)
+    given, a story with open children outside this PR is left out, since
+    completing the PR would close it; it goes to `skipped` as (id, others)."""
     tasks = [t for t in plan["tasks"] if t.get("id") is not None and str(t["unit"]) in merged]
+    task_ids = [t["id"] for t in tasks]
     if unit_pr:
-        return [], [t["id"] for t in tasks], bool(tasks)
+        return [], task_ids, bool(tasks)
     keys = {t["story"] for t in tasks}
     stories = [s["id"] for s in plan["stories"] if s["key"] in keys and s.get("id") is not None]
-    return stories, [t["id"] for t in tasks], len(tasks) == len(plan["tasks"])
+    close = len(tasks) == len(plan["tasks"])
+    if close and children is not None:
+        kept = []
+        for sid in stories:
+            try:
+                others = sorted(set(children(sid)) - {int(i) for i in task_ids})
+            except Exception as exc:  # unknown children: never risk closing the story
+                others = [f"unknown ({exc})"]
+            if others:
+                if skipped is not None:
+                    skipped.append((sid, others))
+            else:
+                kept.append(sid)
+        stories = kept
+    return stories, task_ids, close
 
 
 def link(path: str, pr: str, merged: set, unit_pr: bool = False) -> None:
     with open(path, encoding="utf-8") as f:
         plan = json.load(f)
-    stories, tasks, close = link_targets(plan, merged, unit_pr)
+    skipped: list = []
+    stories, tasks, close = link_targets(plan, merged, unit_pr, open_children, skipped)
+    for sid, others in skipped:
+        names = " ".join(o if isinstance(o, str) else f"#{o}" for o in others)
+        print(f"story #{sid} not linked: open tasks outside this PR ({names}), and "
+              "close-on-complete would close the story; name it in the PR description")
     ids = [str(i) for i in stories + tasks]
     if not ids:
         sys.exit("no merged unit has a ticket id")

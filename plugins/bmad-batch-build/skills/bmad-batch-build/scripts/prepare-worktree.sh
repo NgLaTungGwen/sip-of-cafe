@@ -168,6 +168,8 @@ if [ ! -d "$wt/api" ] && [ ! -f "$wt/package.json" ]; then
   [ -n "$first" ] && checks="$wt/$first"
 fi
 # The project profile's commands, when it has them.
+profiled=""
+if profile_get "$root" suite > /dev/null || profile_get "$root" targeted > /dev/null; then profiled=1; fi
 if profile_get "$root" base > /dev/null && ! profile_get "$root" suite > /dev/null; then
   suite_cmd=""
 elif s=$(profile_get "$root" suite); then
@@ -197,16 +199,28 @@ fi
 # api/root commands above sent apps units to api/ and npx vitest
 # (sonar-zero-4, intake-toolchain-ux). Added to them, since a unit can touch both.
 apps_clause=""
-if [ -f "$wt/apps/package.json" ] && { [ -f "$wt/apps/bun.lock" ] || [ -f "$wt/apps/bun.lockb" ]; }; then
+# A bun apps/ that declares vitest (threat-intel) runs it through bunx and its
+# test script: bun test is bun's own runner and ignores vitest.config (no jsdom,
+# no coverage thresholds; ti-port, 5 workers).
+# The suite is its own test script whenever it has one, as verify.sh runs it.
+. "$(dirname "${BASH_SOURCE[0]}")/lib-packages.sh"
+apps_test="bun test <files>" apps_suite="bun test"
+has_script "$wt/apps" test && apps_suite="bun run test"
+if [ -f "$wt/apps/package.json" ] && grep -q '"vitest"' "$wt/apps/package.json"; then
+  apps_test="bunx vitest run <files>" apps_suite="bun run test"
+fi
+# A project profile's commands already say where and how apps/ is checked;
+# the clause would contradict them.
+if [ -z "$profiled" ] && [ -f "$wt/apps/package.json" ] && { [ -f "$wt/apps/bun.lock" ] || [ -f "$wt/apps/bun.lockb" ]; }; then
   if [ -z "$suite_cmd" ] && [ -z "$t_test" ]; then
     apps_clause=" Files under apps/ get their typecheck inside apps/ with bun, never npm: \`bash $heavy 'cd $wt/apps && bun run typecheck'\`."
   else
-    apps_clause=" Files under apps/ are checked inside apps/ with bun, never npm or npx: test files with \`cd $wt/apps && bun test <files>\`, and the typecheck through the queue with \`bash $heavy 'cd $wt/apps && bun run typecheck'\`."
+    apps_clause=" Files under apps/ are checked inside apps/ with bun, never npm or npx: test files with \`cd $wt/apps && $apps_test\`, and the typecheck through the queue with \`bash $heavy 'cd $wt/apps && bun run typecheck'\`."
   fi
 fi
 # The root suite never reaches apps/ (sonar-zero-5 units 6 and 7 ran it by hand).
 if [ -n "$apps_clause" ] && [ -n "$suite_cmd" ]; then
-  suite_fact="$suite_fact If this unit changed files under apps/, run the apps/ suite the same way beside it: \`bash $bg run $wt apps-suite \\\"bash $heavy 'cd $wt/apps && bun test'\\\"\` and \`bash $bg wait $wt apps-suite\`; it is a full suite too, and the root one does not reach apps/."
+  suite_fact="$suite_fact If this unit changed files under apps/, run the apps/ suite the same way beside it: \`bash $bg run $wt apps-suite \\\"bash $heavy 'cd $wt/apps && $apps_suite'\\\"\` and \`bash $bg wait $wt apps-suite\`; it is a full suite too, and the root one does not reach apps/."
 fi
 [ -n "$t_test" ] || t_test="the project's test command, limited to those files"
 [ -n "$t_tc" ] || t_tc="the project's typecheck or build check"
