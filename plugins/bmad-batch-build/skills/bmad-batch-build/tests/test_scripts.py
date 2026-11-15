@@ -2598,5 +2598,172 @@ class Scheduling(unittest.TestCase):
         self.assertEqual(got, [{"id": 1, "size": "M", "min": 45, "est": 104}])
 
 
+INTAKE_SPEC = """# spec
+
+## Review Triage Log
+
+### 2026-10-26 — Review pass
+- findings: high 1, medium 2
+  - `[medium]` `patch` `[intent-alignment]` AC-2 not covered — fixed: test added.
+  - `[low]` `reject` [intent-alignment] Not in the ACs.
+  - `[low]` `[dismissed]` `[intent-alignment]` Already covered by AC-1.
+  - `[medium]` `defer` [intent-alignment] Later story.
+  - `[high]` `patch` `[edge-case]` Null from the API — fixed.
+  - `[low]` `reject` (blind) Older row without a tag.
+
+## Spec Change Log
+- `[low]` `reject` [intent-alignment] Outside the triage log, not counted.
+"""
+
+
+class IntakeMetrics(unittest.TestCase):
+    """The intake stage's fields on a run row (references/metrics.md): the
+    question round and the approval split the user's questions and wait at
+    the gate, the intent auditor's reject rate comes from tagged triage rows,
+    and the holdout scenarios from <slug>-scenarios.json."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.store = os.path.join(self.dir, "store")
+        self.root = os.path.join(self.dir, "repo")
+        self.env = mock.patch.dict(os.environ, {"BMAD_RUNS_DIR": self.store})
+        self.env.start()
+        self.session = os.path.join(self.dir, "s1.jsonl")
+        subs = os.path.join(self.dir, "s1", "subagents")
+        os.makedirs(subs)
+        self.spec = os.path.join(self.dir, "spec-u1.md")
+        with open(self.spec, "w", encoding="utf-8") as fh:
+            fh.write(INTAKE_SPEC)
+        self.cost = load("cost_report_intake", "cost-report.py")
+        self.runs = self.cost.run_dir.run_dir(self.root, "gamma", create=True)
+        write_jsonl(self.session, [
+            {"type": "user", "timestamp": "2026-10-26T10:00:00Z",
+             "message": {"content": "<command-name>/bmad-batch-build</command-name>"}},
+            call(1, "Bash", {"command": 'python "D:/s/scripts/run_dir.py" gamma --root D:/repo'}, "2026-10-26T10:01:00Z"),
+            call(2, "Write", {"file_path": f"{self.runs}/gamma.md", "content": "x"}, "2026-10-26T10:02:00Z"),
+            # The question round (2 questions, 5 min), then the approval (1, 3 min).
+            call(3, "AskUserQuestion", {"questions": [{"question": "a"}, {"question": "b"}]}, "2026-10-26T10:03:00Z"),
+            result(3, "answered", "2026-10-26T10:08:00Z", error=False),
+            call(4, "AskUserQuestion", {"questions": [{"question": "approve?"}]}, "2026-10-26T10:09:00Z"),
+            result(4, "approved", "2026-10-26T10:12:00Z", error=False),
+            call(5, "Bash", {"command": 'python "D:/s/scripts/intake.py" freeze D:/store/gamma-intake.md'},
+                 "2026-10-26T10:13:00Z"),
+            result(5, "frozen", "2026-10-26T10:13:00Z", error=False),
+            call(6, "Agent", {"description": "Unit 1 worker", "prompt": "Project root: D:/repo/.claude/worktrees/gamma-1"},
+                 "2026-10-26T10:14:00Z"),
+            result(6, "Async agent launched", "2026-10-26T10:14:00Z", error=False),
+            # After the gate: a nudge (6 min typed) and a blocker question (4 min).
+            {"type": "user", "timestamp": "2026-10-26T10:20:00Z", "message": {"content": "go on"}},
+            call(7, "AskUserQuestion", {"questions": [{"question": "blocked"}]}, "2026-10-26T10:30:00Z"),
+            result(7, "skip it", "2026-10-26T10:34:00Z", error=False),
+            call(8, "Agent", {"description": "gamma synthesis", "prompt": "merge"}, "2026-10-26T10:40:00Z"),
+            result(8, "RESULT: pr", "2026-10-26T11:00:00Z", error=False),
+        ])
+        worker = os.path.join(subs, "agent-w1")
+        write_jsonl(worker + ".jsonl", [
+            {"type": "user", "timestamp": "2026-10-26T10:14:00Z",
+             "message": {"content": "You are a Build Auto worker for one unit.\nUnit: 1"}},
+            {"type": "assistant", "timestamp": "2026-10-26T10:38:00Z", "message": {"id": "w9", "content": [
+                {"type": "text", "text": f"SPEC: {self.spec}\nSTATUS: done\n"}]}},
+        ])
+        json.dump({"agentType": "bmad-batch-worker", "toolUseId": "t6"}, open(worker + ".meta.json", "w"))
+        self.run_file("INTAKE start 2026-10-26T10:02:30Z\nINTAKE questions 2 2026-10-26T10:03:00Z\n"
+                      "INTAKE approved 2026-10-26T10:12:30Z\n")
+        with open(os.path.join(self.runs, "gamma-intake.md"), "w", encoding="utf-8") as fh:
+            fh.write("# Intake: gamma\n")
+        with open(os.path.join(self.runs, "gamma-scenarios.json"), "w", encoding="utf-8") as fh:
+            json.dump({"scenarios": [{"id": "SC-1", "result": "pass"}, {"id": "SC-2", "result": "fail"}],
+                       "pass_rate": 0.5, "assert_edits": 1, "escapes": [{"unit": "U1", "what": "x"}]}, fh)
+
+    def tearDown(self):
+        self.env.stop()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def run_file(self, text):
+        with open(os.path.join(self.runs, "gamma.md"), "w", encoding="utf-8") as fh:
+            fh.write("# gamma\nMode: lane\n" + text)
+
+    def row(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            row = self.cost.report([self.session], "gamma")[0]
+        return self.cost.intake_facts(row, self.session, "gamma", self.root)
+
+    def test_questions_and_wait_split_at_the_approval(self):
+        r = self.row()
+        self.assertTrue(r["intake"])
+        self.assertEqual(r["intake_min"], 10)
+        self.assertEqual((r["questions"], r["min_ask"], r["min_typed"]), (4, 12, 6))
+        # The approval call, answered just before INTAKE approved, counts at the gate.
+        self.assertEqual((r["questions_at_gate"], r["questions_after_gate"]), (3, 1))
+        self.assertEqual((r["wait_min_gate"], r["wait_min_after_gate"]), (8, 10))
+        self.assertEqual(r["wait_min_gate"] + r["wait_min_after_gate"], r["min_ask"] + r["min_typed"])
+
+    def test_a_clock_that_is_off_falls_back_to_the_freeze_line(self):
+        # The approval a day early (outside the run's span): by time, nothing
+        # would be at the gate; by the order of the log, the first two calls are.
+        for approved in ("2026-10-25T00:00:00Z", "2026-10-26T10:00:00"):
+            self.run_file(f"INTAKE start 2026-10-26T10:02:30Z\n- INTAKE approved {approved}\n")
+            r = self.row()
+            self.assertEqual((r["questions_at_gate"], r["questions_after_gate"]), (3, 1), approved)
+            self.assertEqual((r["wait_min_gate"], r["wait_min_after_gate"]), (8, 10), approved)
+            self.assertIsNone(r["intake_min"])  # an approval before the start is no duration
+
+    def test_scenarios_file(self):
+        r = self.row()
+        self.assertEqual((r["scenario_pass_rate"], r["assert_edits"], r["escape_count"]), (0.5, 1, 1))
+        os.remove(os.path.join(self.runs, "gamma-scenarios.json"))
+        r = self.row()
+        self.assertEqual((r["scenario_pass_rate"], r["assert_edits"], r["escape_count"]), (None, None, None))
+
+    def test_reject_rate_from_tagged_triage_rows(self):
+        r = self.row()
+        # 4 intent-alignment rows in the triage log: reject and dismissed are
+        # rejected, patch and defer are not; the untagged (blind) row and the
+        # row outside the log are not counted.
+        self.assertEqual(r["layer_findings"], {"intent-alignment": {"total": 4, "rejected": 2},
+                                               "edge-case": {"total": 1, "rejected": 0}})
+        self.assertEqual(r["intent_auditor_reject_rate"], 0.5)
+        self.assertEqual(r["fix_merge_commits"], 0)
+
+    def test_a_run_without_intake_has_nulls(self):
+        os.remove(os.path.join(self.runs, "gamma-intake.md"))
+        os.remove(os.path.join(self.runs, "gamma-scenarios.json"))
+        r = self.row()
+        self.assertFalse(r["intake"])
+        for k in ("intake_min", "questions_at_gate", "questions_after_gate", "wait_min_gate",
+                  "wait_min_after_gate", "scenario_pass_rate", "assert_edits", "escape_count"):
+            self.assertIsNone(r[k], k)
+        # A spec without tagged rows has no rate.
+        with open(self.spec, "w", encoding="utf-8") as fh:
+            fh.write(SPEC.format(extra=""))
+        r = self.row()
+        self.assertIsNone(r["intent_auditor_reject_rate"])
+        self.assertIsNone(r["layer_findings"])
+
+    def test_exported_and_summarised(self):
+        r = self.row()
+        r.update({"session": "s1", "slug": "gamma", "skill_version": "0.17.0", "turn_budget_hit": [],
+                  "mtok_w1h_subagents": 1, "project": "repo"})
+        old = dict(r, slug="old", intake=False, questions=2, min_user_wait=9,
+                   **{k: None for k in self.cost.INTAKE_FIELDS})
+        with open(os.path.join(self.store, "runs.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(old) + "\n" + json.dumps(r) + "\n")
+        m = load("metrics_intake", "metrics.py")
+        run = [x for x in m.bundle()["runs"] if x["intake"]][0]
+        self.assertEqual((run["questions_after_gate"], run["wait_min_gate"], run["intent_auditor_reject_rate"],
+                          run["scenario_pass_rate"], run["escape_count"]), (1, 8, 0.5, 0.5, 1))
+        summary = load("runs_summary_intake", "runs-summary.py")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            summary.main([])
+        text = out.getvalue()
+        self.assertIn("Intake, medians per run", text)
+        with_line = next(line for line in text.splitlines() if line.startswith("with intake"))
+        self.assertEqual(with_line.split()[2:9], ["1", "10m", "3", "1", "8m", "10m", "50%"])
+        without = next(line for line in text.splitlines() if line.startswith("without"))
+        self.assertIn("2*", without)
+        self.assertIn("9m*", without)
+
+
 if __name__ == "__main__":
     unittest.main()

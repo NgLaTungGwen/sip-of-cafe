@@ -255,30 +255,42 @@ def wait_kind(block):
     return block["name"]
 
 
-def profile(lines, lab, acc, edits, waits, spans=None):
+def profile(lines, lab, acc, edits, waits, spans=None, user_events=None, base=0):
     """Adds token and cost totals to acc[lab], and tool waits to waits.
 
     spans, when given, collects each tool call's (start, end) per (lab, kind),
     so parallel calls can be counted once (see union()).
+    user_events, when given, gets one (line, timestamp, "ask", seconds,
+    questions) per wait on the user that this adds to waits: an
+    AskUserQuestion answer or a permission prompt. line is the index in the
+    session log (base + the index in lines), so the intake gate can split
+    them (intake_facts()).
     Returns (first, last) timestamps of the agent, or None.
     """
     calls = {}
     pending = {}
+    asked = {}  # AskUserQuestion tool_use id -> (line, timestamp, questions)
     stamps = [x["timestamp"] for x in lines if x.get("timestamp")]
-    for x in lines:
+    for i, x in enumerate(lines):
         m = x.get("message")
         if x.get("type") == "user" and isinstance(m, dict) and isinstance(m.get("content"), list):
             for b in m["content"]:
                 if b.get("type") == "tool_result" and b.get("tool_use_id") in pending and x.get("timestamp"):
                     t0, kind = pending.pop(b["tool_use_id"])
+                    sec = (ts(x["timestamp"]) - ts(t0)).total_seconds()
                     waits[(lab, kind)][0] += 1
-                    waits[(lab, kind)][1] += (ts(x["timestamp"]) - ts(t0)).total_seconds()
+                    waits[(lab, kind)][1] += sec
+                    if user_events is not None and kind == "AskUserQuestion":
+                        n = asked.pop(b["tool_use_id"], (0, 0, 0))[2]
+                        user_events.append((base + i, x["timestamp"], "ask", sec, n))
                     # The user answered a permission prompt for this call: the
                     # whole call counts as waiting on them (an upper bound).
                     by = str((x.get("permissionDecision") or {}).get("source") or "")
                     if by.startswith("user") and kind != "AskUserQuestion":
                         waits[(lab, "user permission")][0] += 1
-                        waits[(lab, "user permission")][1] += (ts(x["timestamp"]) - ts(t0)).total_seconds()
+                        waits[(lab, "user permission")][1] += sec
+                        if user_events is not None:
+                            user_events.append((base + i, x["timestamp"], "ask", sec, 0))
                     if spans is not None:
                         spans[(lab, kind)].append((ts(t0), ts(x["timestamp"])))
             continue
@@ -287,6 +299,9 @@ def profile(lines, lab, acc, edits, waits, spans=None):
         for b in m.get("content", []) if isinstance(m.get("content"), list) else []:
             if b.get("type") == "tool_use" and x.get("timestamp"):
                 pending[b["id"]] = (x["timestamp"], wait_kind(b))
+                if b.get("name") == "AskUserQuestion":
+                    asked[b["id"]] = (base + i, x["timestamp"],
+                                      len((b.get("input") or {}).get("questions") or [None]))
         # One message is logged as one line per content block, each carrying
         # usage; only the last line has the final output count, so keep the
         # first timestamp and the last usage.
@@ -329,6 +344,10 @@ def profile(lines, lab, acc, edits, waits, spans=None):
             c["usd_idle"] += cw_usd
             acc["_idle"][(lab, prev[1])] += cw_usd
         prev = (t, tool)
+    if user_events is not None:
+        # A question never answered (the log ends first) still counts, at its call.
+        for line, t0, n in asked.values():
+            user_events.append((line, t0, "ask", 0.0, n))
     return (stamps[0], stamps[-1]) if stamps else None
 
 
@@ -351,6 +370,9 @@ def union(intervals):
 
 # (session path, slug) -> ((start, end), subagent logs) of each run run() split out.
 RUN_PARTS = {}
+# (session path, slug) -> the main session's waits on the user, with their
+# times and log lines, and the line of the intake freeze (see run()).
+USER_EVENTS = {}
 
 
 def load_subagents(base):
@@ -390,7 +412,8 @@ def run(session_path, slug=None):
         subs = {f: v for f, v in subs.items() if owner.get(f) == k}
         # The journal of this run reads the same part of the session.
         RUN_PARTS[(session_path, slug)] = ((s, e), set(subs))
-    main_ts = profile(lines[s:e], "main", acc, edits, waits, ivals)
+    user_events = []
+    main_ts = profile(lines[s:e], "main", acc, edits, waits, ivals, user_events, base=s)
     ends = {}
     acc["main"]["agents"] += 1
     for f, (meta, sub) in subs.items():
@@ -428,10 +451,15 @@ def run(session_path, slug=None):
     ask = waits.get(("main", "AskUserQuestion"), [0, 0.0])[1] + waits.get(("main", "user permission"), [0, 0.0])[1]
     typed_wait = 0.0
     prev = None
-    for x in lines[s:e]:
+    freeze_line = None
+    for i, x in enumerate(lines[s:e], s):
         for b in blocks_of(x):
             if b.get("type") == "tool_use" and b.get("name") == "AskUserQuestion":
                 acc["main"]["questions"] += len((b.get("input") or {}).get("questions") or [None])
+            if b.get("type") == "tool_use" and b.get("name") in ("Bash", "PowerShell") and re.search(
+                    r"intake\.py[\"']?\s+freeze\b", (b.get("input") or {}).get("command") or ""):
+                # Where the intake was approved, by the order of the log (intake_facts()).
+                freeze_line = i if freeze_line is None else freeze_line
         t = x.get("timestamp")
         if not t:
             continue
@@ -441,9 +469,15 @@ def run(session_path, slug=None):
         ) and "<task-notification>" not in json.dumps(c or "") and c
         if typed and prev and x.get("type") == "user" and not x.get("isMeta"):
             # Clock skew between lines can make a gap negative; it is no wait.
-            typed_wait += max((ts(t) - ts(prev)).total_seconds(), 0)
+            gap = max((ts(t) - ts(prev)).total_seconds(), 0)
+            typed_wait += gap
+            user_events.append((i, t, "typed", gap, 0))
         if x.get("type") != "queue-operation":
             prev = t
+    # What intake_facts() splits at the intake approval, once the run file is known.
+    USER_EVENTS[(session_path, slug)] = {"events": user_events, "freeze_line": freeze_line,
+                                         "first": main_ts[0] if main_ts else None,
+                                         "last": main_ts[1] if main_ts else None}
     acc["main"]["user_ask"] += ask
     acc["main"]["user_typed"] += typed_wait
     acc["main"]["user_wait"] += ask + typed_wait
@@ -483,10 +517,11 @@ def unit_quality(lines, kids):
     spec = re.findall(r"^SPEC: *(\S.*?\.md)\s*$", text, flags=re.M)
     q = {"haiku": any(k.get("agentType") == "haiku-implementer" for k in kids),
          "reviewed": any(re.search(r"review|hunter|audit", k.get("description", ""), re.I) for k in kids),
-         "high": None, "medium": None, "passes": 0, "loops": 0}
+         "high": None, "medium": None, "passes": 0, "loops": 0, "layers": {}}
     if spec and os.path.exists(spec[-1]):
         t = open(spec[-1], encoding="utf-8").read()
         log = t.split("## Review Triage Log", 1)[1].split("\n## ", 1)[0] if "## Review Triage Log" in t else ""
+        q["layers"] = layer_findings(log)
         passes = re.split(r"^### .*Review pass", log, flags=re.M)[1:]
         q["passes"] = len(passes)
         if passes:
@@ -497,6 +532,33 @@ def unit_quality(lines, kids):
         lp = re.search(r"review_loop_iteration: *'?(\d+)", t)
         q["loops"] = int(lp.group(1)) if lp else 0
     return q
+
+
+# The review layer tag every triage row carries (references/review.md), and
+# the triage actions that mean the finding was not real.
+LAYERS = ("blind-hunter", "edge-case", "verification-gap", "intent-alignment")
+REJECTED = {"reject", "rejected", "dismiss", "dismissed", "false", "false-positive"}
+
+
+def layer_findings(log):
+    """{layer: {"total", "rejected"}} over the triage rows of one spec's
+    Review Triage Log that carry a layer tag (`[intent-alignment]`, with or
+    without backticks). A row is rejected when its action (`reject`,
+    `[reject]`, `dismissed`, `false`, ...) says so; a deferred one is not.
+    Rows with the older (intent) / (blind) form carry no tag and are not
+    counted, so runs before the tags have no rates."""
+    out = {}
+    for line in log.splitlines():
+        if not re.match(r"\s*-\s", line):
+            continue
+        tokens = [t.lower() for t in re.findall(r"`\[?([\w-]+)\]?`|\[([\w-]+)\]", line) for t in t if t]
+        layer = next((t for t in tokens if t in LAYERS), None)
+        if not layer:
+            continue
+        c = out.setdefault(layer, {"total": 0, "rejected": 0})
+        c["total"] += 1
+        c["rejected"] += any(t in REJECTED for t in tokens)
+    return out
 
 
 def mins(sec):
@@ -543,6 +605,13 @@ def report(paths, slug=None):
         rest_s = max(wall - ask - union(quality["busy_iv"]), 0)
         q = quality["workers"]
         scored_q = [u for u in q if u["high"] is not None or u["medium"] is not None]
+        layers = {}
+        for u in q:
+            for lay, c in (u.get("layers") or {}).items():
+                tot = layers.setdefault(lay, {"total": 0, "rejected": 0})
+                tot["total"] += c["total"]
+                tot["rejected"] += c["rejected"]
+        intent = layers.get("intent-alignment")
         rows.append({
             "session": os.path.basename(p)[:-6], "start": start,
             "usd": round(sum(usd.values()), 2),
@@ -562,6 +631,10 @@ def report(paths, slug=None):
             "first_review_high_medium": round(sum((u["high"] or 0) + (u["medium"] or 0) for u in scored_q) / len(scored_q), 1) if scored_q else None,
             "units_with_high": sum(1 for u in scored_q if u["high"]),
             "fix_merge_commits": quality["fix_merge"],
+            # Triage rows per review layer tag over the run's unit specs, and
+            # the share of the intent auditor's findings that were rejected.
+            "layer_findings": layers or None,
+            "intent_auditor_reject_rate": round(intent["rejected"] / intent["total"], 3) if intent else None,
             "max_turns": dict(quality["max_turns"]),
             "worker_spans": quality["worker_spans"],
             # Code discovery per role: how many turns, how large the context each
@@ -822,6 +895,94 @@ def add_journal(row, session, slug, root, run_copy=False):
     return journal.headline(j), paths[-1]
 
 
+def find_run_file(root, slug, suffix):
+    """The run's file <slug><suffix>: in the run folder of root's project (or
+    the legacy _runs folder), else the one file of that name in any project's
+    run folder. --collect passes the session's folder as root, which is not
+    always the checkout the run was planned in (review-merged-history: started
+    in the home folder, planned under hive-factory), so its files were lost."""
+    path = run_dir.find(root, slug, suffix) if root else None
+    if not path:
+        found = glob.glob(os.path.join(glob.escape(store_dir()), "runs", "*", glob.escape(slug),
+                                       f"{glob.escape(slug)}{suffix}"))
+        path = found[0] if len(found) == 1 else None
+    return path
+
+
+INTAKE_FIELDS = ("intake_min", "questions_at_gate", "questions_after_gate", "wait_min_gate", "wait_min_after_gate")
+
+
+def marker_time(text, name):
+    """The time of the first `INTAKE <name> ... <ISO>` marker in the run file,
+    as an aware datetime (a time without a zone is UTC), or None."""
+    m = re.search(rf"INTAKE {name}\b[^\n]*?(\d{{4}}-\d\d-\d\dT[\d:.]+(?:Z|[+-]\d\d:?\d\d)?)", text or "")
+    if not m:
+        return None
+    try:
+        t = ts(m.group(1))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
+
+
+def gate_split(events, approved, freeze_line, first, last):
+    """(questions at, after, wait seconds at, after) the intake approval. A
+    wait is at the gate when it ended (its answer, or the typed message) at
+    or before `approved`, so the approval itself counts at the gate. When
+    that time is off (outside the run's own span of the main log), the order
+    of the log decides: at or before the line that ran `intake.py freeze`.
+    None when neither is known."""
+    span_ok = approved and first and last and ts(first) - dt.timedelta(minutes=1) <= approved <= ts(last) + dt.timedelta(minutes=1)
+    if span_ok:
+        before = [ts(e[1]) <= approved for e in events]
+    elif freeze_line is not None:
+        before = [e[0] <= freeze_line for e in events]
+    else:
+        return None
+    at = [e for e, b in zip(events, before) if b]
+    after = [e for e, b in zip(events, before) if not b]
+    return (sum(e[4] for e in at), sum(e[4] for e in after), sum(e[3] for e in at), sum(e[3] for e in after))
+
+
+def intake_facts(row, session, slug, root):
+    """Adds the intake stage's fields to the row (references/metrics.md).
+
+    intake: whether the run had <slug>-intake.md. Without it, the gate fields
+    are null. intake_min: from the run file's `INTAKE start` to `INTAKE
+    approved`. The questions and the user wait of the main session split at
+    the approval (gate_split()). The scenario fields come from
+    <slug>-scenarios.json, null without it."""
+    intake = find_run_file(root, slug, "-intake.md") if slug else None
+    row["intake"] = bool(intake)
+    for k in INTAKE_FIELDS:
+        row[k] = None
+    if intake:
+        path = find_run_file(root, slug, ".md")
+        text = open(path, encoding="utf-8", errors="ignore").read() if path else ""
+        start, approved = marker_time(text, "start"), marker_time(text, "approved")
+        if start and approved and approved >= start:
+            row["intake_min"] = round((approved - start).total_seconds() / 60)
+        # An approval before the start is a clock that is off: the log order decides.
+        ok = approved if approved and (not start or approved >= start) else None
+        info = USER_EVENTS.get((session, slug)) or {}
+        split = gate_split(info.get("events") or [], ok, info.get("freeze_line"), info.get("first"), info.get("last"))
+        if split:
+            row["questions_at_gate"], row["questions_after_gate"] = split[0], split[1]
+            row["wait_min_gate"], row["wait_min_after_gate"] = round(split[2] / 60), round(split[3] / 60)
+    row["scenario_pass_rate"] = row["assert_edits"] = row["escape_count"] = None
+    spath = find_run_file(root, slug, "-scenarios.json") if slug else None
+    if spath:
+        try:
+            sc = json.load(open(spath, encoding="utf-8"))
+        except ValueError:
+            sc = None
+        if isinstance(sc, dict):
+            row["scenario_pass_rate"] = sc.get("pass_rate")
+            row["assert_edits"] = sc.get("assert_edits")
+            row["escape_count"] = len(sc.get("escapes") or [])
+    return row
+
+
 def unit_minutes(row, slug, root):
     """Each unit's size and worker minutes, from the run's plan file, so
     plan-waves.py can calibrate its model from real runs
@@ -830,14 +991,7 @@ def unit_minutes(row, slug, root):
     name, <slug>-<n>; a lane worker without the line can't be matched. When a
     unit was dispatched twice, the last worker counts. Returns None without a
     plan file."""
-    path = run_dir.find(root, slug, "-plan.json") if root else None
-    if not path:
-        # --collect passes the session's folder as root, which is not always the
-        # checkout the run was planned in (review-merged-history: started in the
-        # home folder, planned under hive-factory), so its sizes and estimates
-        # were lost. Take the one plan of that slug in any project's folder.
-        found = glob.glob(os.path.join(glob.escape(store_dir()), "runs", "*", glob.escape(slug), f"{glob.escape(slug)}-plan.json"))
-        path = found[0] if len(found) == 1 else None
+    path = find_run_file(root, slug, "-plan.json")
     if not path:
         return None
     try:
@@ -889,6 +1043,7 @@ def record(slug, root):
     # Workarounds the agents needed for the skill's own scripts and settings.
     row["skill_issues"] = issues
     row["unit_minutes"] = unit_minutes(row, slug, root)
+    intake_facts(row, session, slug, root)
     # The version that actually ran: this script's own skill copy, at the end
     # of the run. version_for() only guesses from dates, for collected runs.
     vfile = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
@@ -907,6 +1062,13 @@ def record(slug, root):
           f"first-review high+medium {row['first_review_high_medium']}, fix(merge) {row['fix_merge_commits']}, "
           f"1h-TTL writes {row['mtok_w1h_subagents']} Mtok, turn budget hit: {', '.join(row['turn_budget_hit']) or 'none'}, "
           f"skill issues: {len(issues)}")
+    if row["intake"]:
+        print(f"intake: {row['intake_min'] if row['intake_min'] is not None else '-'}m to approval; "
+              f"questions {row['questions_at_gate']} at the gate, {row['questions_after_gate']} after; "
+              f"wait {row['wait_min_gate']}m at the gate, {row['wait_min_after_gate']}m after; "
+              f"intent auditor rejected {row['intent_auditor_reject_rate']}; "
+              f"scenarios pass {row['scenario_pass_rate']}, assert edits {row['assert_edits']}, "
+              f"escapes {row['escape_count']}")
     print(head)
     print(f"report: {os.path.join(runs, slug + '-cost.txt')}; journal: {jpath}; data: {path}")
     return 0
@@ -1028,6 +1190,7 @@ def collect(quiet=False, refresh=False):
                 mode, system_map, issues = run_file_facts(cwd, slug)
                 row, text = build_row(path, slug, project, (old or {}).get("mode") or mode)
                 row["unit_minutes"] = unit_minutes(row, slug, cwd)
+                intake_facts(row, path, slug, cwd)
                 row["system_map"] = (old or {}).get("system_map") or system_map
                 row["skill_issues"] = (old or {}).get("skill_issues") or issues
                 if (old or {}).get("version_exact"):
