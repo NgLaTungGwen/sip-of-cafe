@@ -14,6 +14,16 @@ fresh review before the PR opens; never skip it. After the PR opens you watch
 its pipelines and fix what fails, but merging the PR, starting a deploy or
 approving one stays with the user: the plugin's guard denies those.
 
+In a run with an intake, its Goal, Non-goals and acceptance criteria settle
+what the merged code should do when a conflict or a repair makes you choose,
+not the raw prompt. After the last green verify you run the intake's holdout
+scenarios as scratch tests kept in `<runs>/scenarios/`, never committed, and
+`scripts/assert-guard.py`; every changed assertion it reports is listed and
+justified in the PR under "Changed assertions". You record each escape (a
+problem in a unit's own files that its own verify should have caught) and
+write `<runs>/<slug>-scenarios.json`; your reply carries SCENARIOS, ASSERT
+EDITS and ESCAPES. Your dispatch prompt (section 3c) says how.
+
 Never end your turn while an agent you launched (the fresh reviewer) is still
 running: you are a subagent, so ending your turn hands you back without your
 `RESULT:` line (sonar-zero-5: two synthesis replies like that). Before the

@@ -2598,5 +2598,257 @@ class Scheduling(unittest.TestCase):
         self.assertEqual(got, [{"id": 1, "size": "M", "min": 45, "est": 104}])
 
 
+# A minimal intake in the contract's format (references: intake-contract,
+# 0.17.0). Parsers key on the ## headings.
+INTAKE_MD = """# Intake: demo
+
+## Source prompt
+Add a total to the invoice API.
+
+## Goal
+Invoices return their total.
+
+## Non-goals
+- Currency conversion.
+
+## Acceptance criteria
+- AC-1: Given an invoice with two lines, When it is fetched, Then total is their sum.
+
+## Shared interfaces
+- InvoiceDto: {id, lines} -> {id, lines, total} | owner U1
+
+## Units
+- U1 Invoice total | size M | risk med | depends on: - | touches: api/src/invoice.ts | ACs: AC-1 | items: 2
+
+## Coupling map
+U1 alone.
+
+## Mode decision
+parallel: one unit
+
+## Verification scenarios
+- SC-1: Given an invoice with lines 2 and 3, When GET /invoices/1, Then total is 5.
+
+## Assumptions and defaults applied
+- none
+
+## Open risks
+- none
+
+## Changes after approval
+"""
+INTAKE_PY = os.path.join(SCRIPTS, "intake.py")
+
+
+def write_intake(d=None):
+    d = d or tempfile.mkdtemp().replace("\\", "/")
+    path = d + "/demo-intake.md"
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(INTAKE_MD)
+    return path
+
+
+class IntakeReview(unittest.TestCase):
+    """0.17.0: review layers go by the intake's Risk:, the intent auditor reads
+    the intake instead of the raw prompt, and triage rows carry layer tags."""
+    pinned = PrepareWorktree.pinned
+    tomllib_ok = PrepareWorktree.tomllib_ok
+
+    def layers(self, toml):
+        import tomllib
+        doc = tomllib.loads(toml)["workflow"]
+        return doc, {l["id"]: l for l in doc["review_layers"]}
+
+    def test_when_lines_go_by_risk_and_keep_the_size_rules_without_one(self):
+        _, toml = self.pinned(with_api=False)
+        self.tomllib_ok(toml)
+        doc, layers = self.layers(toml)
+        bh, ia = layers["blind-hunter"]["when"], layers["intent-alignment"]["when"]
+        # low: edge-case and verification-gap only (they keep their defaults).
+        self.assertNotIn("edge-case-hunter", layers)
+        self.assertIn("`Risk: low`, skip this layer", bh)
+        self.assertIn("`Risk: med` or `Risk: high`", bh)
+        self.assertIn("`Risk: high`", ia)
+        self.assertIn("interface", ia.split("`Risk: high`")[0])  # an interface change, at any risk
+        # No Risk line: the 0.16.0 size rules, word for word.
+        self.assertIn("With no Risk line", bh)
+        self.assertIn("Size: S", bh)
+        self.assertIn("With no Size line, run it", bh)
+        self.assertIn("with no Risk line, the 0.16.0 rule", ia)
+        self.assertIn("Size: L", ia)
+        facts = " ".join(doc["persistent_facts"])
+        self.assertIn("reads the `Risk:` line of your worker prompt", facts)
+
+    def test_every_triage_row_carries_its_layer_tag(self):
+        _, toml = self.pinned(with_api=False)
+        doc, _ = self.layers(toml)
+        facts = " ".join(doc["persistent_facts"])
+        for tag in ("[blind-hunter]", "[edge-case]", "[verification-gap]", "[intent-alignment]"):
+            self.assertIn(tag, facts)
+        self.assertIn("`[medium]` `patch` [edge-case]", facts)
+
+    def test_review_findings_reads_a_bracketed_layer_tag(self):
+        d = tempfile.mkdtemp()
+        spec = os.path.join(d, "spec-u3.md")
+        with open(spec, "w", encoding="utf-8") as f:
+            f.write("# s\n\n## Review Triage Log\n\n### 2026-11-15 - Review pass\n"
+                    "- `[high]` `patch` [edge-case] Empty list crashes - fixed.\n")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "review-findings.py"), spec],
+                           capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip().split("\t")[:3], ["spec-u3", "high", "edge-case"], r.stdout)
+
+    def test_without_intake_nothing_intake_related_is_written(self):
+        wt, toml = self.pinned(with_api=False)
+        self.assertNotIn("intake.py", toml)
+        self.assertNotIn("blocked-interface", toml)
+        _, layers = self.layers(toml)
+        self.assertIn("{verbatim_intent}", layers["intent-alignment"]["instruction"])
+        gd = subprocess.run(["git", "-C", wt, "rev-parse", "--absolute-git-dir"],
+                            capture_output=True, text=True).stdout.strip()
+        env = open(os.path.join(gd, "bmad", "scripts.env"), encoding="utf-8").read()
+        self.assertNotIn("INTAKE=", env)
+        self.assertNotIn("IFACE=", env)
+
+    def test_an_intake_feeds_the_auditor_and_the_interface_broadcast(self):
+        d = tempfile.mkdtemp().replace("\\", "/") + "/runs dir"  # a space, as in real paths
+        os.makedirs(d)
+        intake = write_intake(d)
+        wt, toml = self.pinned(with_api=False, extra=("--intake", intake, "--unit", "U1"))
+        self.tomllib_ok(toml)
+        doc, layers = self.layers(toml)
+        facts = " ".join(doc["persistent_facts"])
+        mine = SCRIPTS.replace(chr(92), "/")
+        self.assertIn(f'python "{mine}/intake.py" unit "{intake}" 1', facts)
+        self.assertIn("replaces step-04's definition of {verbatim_intent}", facts)
+        iface = d + "/demo-interface-changes.md"
+        self.assertIn(f'iface show "{iface}"', facts)
+        self.assertIn("Before you start the affected tests or a full-suite run", facts)
+        self.assertIn("blocked-interface", facts)
+        gd = subprocess.run(["git", "-C", wt, "rev-parse", "--absolute-git-dir"],
+                            capture_output=True, text=True).stdout.strip()
+        env = open(os.path.join(gd, "bmad", "scripts.env"), encoding="utf-8").read()
+        self.assertIn(f"INTAKE='{intake}'", env)
+        self.assertIn(f"IFACE='{iface}'", env)
+        self.assertIn("UNIT='1'", env)
+
+    def test_the_worker_dispatch_carries_the_intake_lines(self):
+        worker = open(os.path.join(SKILL_DIR, "references", "worker.md"), encoding="utf-8").read()
+        for line in ("Intake: <intake>", "Risk: <risk>", "Interface changes: <iface>", "Size: <size>",
+                     "STATUS: blocked-interface", 'intake.py" unit "<intake>" <n>',
+                     'intake.py" iface add "<iface>"', 'intake.py" iface show "<iface>"',
+                     '--intake "<intake>" --unit <n> --iface "<iface>"', "--reply-interfaces"):
+            self.assertIn(line, worker)
+        synth = open(os.path.join(SKILL_DIR, "references", "synthesis.md"), encoding="utf-8").read()
+        for line in ('intake.py" scenarios "<intake>"', "<runs>/scenarios/", "<runs>/<slug>-scenarios.json",
+                     "assert-guard.py", "## Changed assertions", "SCENARIOS:", "ESCAPES:", '"assert_edits"'):
+            self.assertIn(line, synth)
+
+
+class InterfaceGate(unittest.TestCase):
+    """A unit may change a pinned interface only with an approved entry in the
+    interface-changes file."""
+
+    def setUp(self):
+        self.root, _, self.spec = unit_repo()
+        self.intake = write_intake()
+        self.iface = os.path.join(os.path.dirname(self.intake), "demo-interface-changes.md")
+
+    def check(self, reply, unit="1"):
+        return gate("--intake", self.intake, "--unit", unit, "--iface-file", self.iface,
+                    "--reply-interfaces", reply, self.root, "u1", self.spec, "main")
+
+    def test_a_changed_pinned_interface_without_an_entry_fails(self):
+        rc, out = self.check("GET /invoices/:id -> InvoiceDto {id, lines, total, tax} CHANGED; util.sum(a, b)")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("pinned interface 'InvoiceDto' marked CHANGED with no approved entry for U1", out)
+
+    def test_an_approved_entry_passes(self):
+        with open(self.iface, "w", encoding="utf-8") as f:
+            f.write("- 2026-11-15T10:00:00Z U1 InvoiceDto: {id, lines} -> {id, lines, total, tax} (reason: tax shown)\n")
+        rc, out = self.check("InvoiceDto {id, lines, total, tax} CHANGED")
+        self.assertEqual(rc, 0, out)
+        # Another unit's entry does not cover this one (U12 is not U1).
+        with open(self.iface, "w", encoding="utf-8") as f:
+            f.write("- 2026-11-15T10:00:00Z U12 InvoiceDto: a -> b (reason: r)\n")
+        rc, out = self.check("InvoiceDto CHANGED", unit="U1")
+        self.assertEqual(rc, 1, out)
+
+    def test_unchanged_or_unpinned_interfaces_pass(self):
+        self.assertEqual(self.check("InvoiceDto {id, lines, total}")[0], 0)
+        self.assertEqual(self.check("util.sum(a, b, c) CHANGED")[0], 0)
+        self.assertEqual(gate(self.root, "u1", self.spec, "main")[0], 0)  # no --intake: as before
+
+
+class AssertGuard(unittest.TestCase):
+    BASE = ("import { sum } from '../src/sum'\n"
+            "it('adds', () => {\n"
+            "  expect(sum(1, 2)).toBe(3)\n"
+            "  expect(sum(0, 0)).toBe(0)\n"
+            "  expect(sum(-1, 1)).toBe(0)\n"
+            "})\n")
+
+    def run_guard(self, new_test, other=None):
+        root, git = git_repo({"tests/sum.test.ts": self.BASE, "src/sum.ts": "assert(x)\n"})
+        subprocess.run(git + ["checkout", "-q", "-b", "u1"], check=True)
+        with open(os.path.join(root, "tests", "sum.test.ts"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(new_test)
+        if other:
+            for p, t in other.items():
+                os.makedirs(os.path.dirname(os.path.join(root, p)), exist_ok=True)
+                with open(os.path.join(root, p), "w", encoding="utf-8", newline="\n") as f:
+                    f.write(t)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "change"], check=True)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "assert-guard.py"), root, "main"],
+                           capture_output=True, text=True)
+        return r.returncode, r.stdout
+
+    def test_a_removed_and_an_edited_assertion_are_caught(self):
+        new = self.BASE.replace("  expect(sum(0, 0)).toBe(0)\n", "") \
+                       .replace("expect(sum(-1, 1)).toBe(0)", "expect(sum(-1, 1)).toBeDefined()")
+        rc, out = self.run_guard(new, other={"src/sum.ts": "x\n"})  # a non-test assert line is ignored
+        self.assertEqual(rc, 1, out)
+        self.assertIn("ASSERT-EDIT tests/sum.test.ts:4 expect(sum(0, 0)).toBe(0)", out)
+        self.assertIn("ASSERT-EDIT tests/sum.test.ts:5 expect(sum(-1, 1)).toBe(0)", out)
+        self.assertIn("assert-guard: 2 edits", out)
+        self.assertNotIn("src/sum.ts", out)
+
+    def test_moved_lines_and_new_assertions_do_not_count(self):
+        lines = self.BASE.splitlines(keepends=True)
+        moved = lines[:2] + [lines[4], lines[2], "  expect(sum(2, 2)).toBe(4)\n"] + lines[5:]
+        # One assertion moves to another test file, re-indented.
+        rc, out = self.run_guard("".join(moved), other={"src/other.spec.ts": "    expect(sum(0, 0)).toBe(0)\n"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("assert-guard: 0 edits", out)
+
+
+@unittest.skipUnless(os.path.exists(INTAKE_PY), "intake.py arrives with the intake track")
+class IntakeFixture(unittest.TestCase):
+    """Once intake.py is merged: the fixture above is a valid intake, and the
+    id form the worker passes (the plan's numeric id) is accepted."""
+
+    def test_the_fixture_is_ready_and_unit_prints_the_worker_view(self):
+        intake = write_intake()
+        r = subprocess.run([sys.executable, INTAKE_PY, "check", intake], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = subprocess.run([sys.executable, INTAKE_PY, "unit", intake, "1"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("AC-1", r.stdout)
+        self.assertIn("InvoiceDto", r.stdout)
+        self.assertNotIn("SC-1", r.stdout)
+
+    def test_iface_add_writes_what_the_gate_reads(self):
+        root, _, spec = unit_repo()
+        intake = write_intake()
+        iface = os.path.join(os.path.dirname(intake), "demo-interface-changes.md")
+        r = subprocess.run([sys.executable, INTAKE_PY, "iface", "add", iface, "--unit", "1", "--iface", "InvoiceDto",
+                            "--change", "{id, lines} -> {id, lines, total, tax}", "--reason", "tax"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rc, out = gate("--intake", intake, "--unit", "1", "--iface-file", iface,
+                       "--reply-interfaces", "InvoiceDto CHANGED", root, "u1", spec, "main")
+        self.assertEqual(rc, 0, out)
+
+
 if __name__ == "__main__":
     unittest.main()

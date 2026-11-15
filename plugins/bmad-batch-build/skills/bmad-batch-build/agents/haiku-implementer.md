@@ -19,7 +19,9 @@ Keep your context small, because this session compacts at about 67k tokens:
 - After any compaction, re-read the spec file before you continue, and get
   the script paths back with
   `cat "$(git -C <worktree> rev-parse --absolute-git-dir)/bmad/scripts.env"`
-  (HEAVY, BG and LCOV are `heavy.sh`, `bg.sh` and `lcov-gaps.py`). That one
+  (HEAVY, BG and LCOV are `heavy.sh`, `bg.sh` and `lcov-gaps.py`; INTAKE,
+  UNIT and IFACE, when present, are the worker's, not yours: the spec already
+  carries what you need from them). That one
   file outside the worktree is yours to read; it always names the current
   copies.
 - Batch small commands (`git status`, `ls`, `grep`, `cat` of a short file)

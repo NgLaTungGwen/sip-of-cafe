@@ -3,6 +3,14 @@
 #
 # usage: prepare-worktree.sh <main-root> <name> <branch> [--apps] [--no-install] [--base <rev>]
 #                            [--agents <prefix>] [--db-template <template>]
+#                            [--intake <intake.md> --unit <id> [--iface <file>]]
+#
+# --intake and --unit come from the dispatch's Intake: and Unit: lines. They
+# add INTAKE, UNIT and IFACE to scripts.env, and the facts that make the
+# worker read the interface broadcast before its tests run and give the intent
+# auditor the intake (intake.py unit) instead of the raw prompt. --iface is the
+# dispatch's Interface changes: file; it defaults to the intake's
+# <runs>/<slug>-interface-changes.md. Without --intake nothing changes.
 #
 # --db-template is the run's migrated template database (db-template.sh). The
 # worktree's test database is cloned from it; see the database section below.
@@ -31,7 +39,7 @@ root=${root//\\//}
 shift 3
 . "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/lib-db.sh"
-apps=0 install=1 base=$(base_ref "$root") agents="" db_template=""
+apps=0 install=1 base=$(base_ref "$root") agents="" db_template="" intake="" unit="" iface=""
 while [ $# -gt 0 ]; do
   case $1 in
     --apps) apps=1 ;;
@@ -39,10 +47,26 @@ while [ $# -gt 0 ]; do
     --base) base=$2; shift ;;
     --agents) agents=$2; shift ;;
     --db-template) db_template=$2; shift ;;
+    --intake) intake=$2; shift ;;
+    --unit) unit=$2; shift ;;
+    --iface) iface=$2; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
 done
+if [ -n "$intake" ] && [ -z "$unit" ]; then
+  echo "--intake needs --unit <id>" >&2
+  exit 2
+fi
+if [ -n "$intake" ]; then
+  # Forward slashes, as for the root: these paths go into TOML strings.
+  intake=$(cygpath -m "$intake" 2>/dev/null || printf '%s' "$intake")
+  intake=${intake//\\//}
+  [ -n "$iface" ] || iface="${intake%-intake.md}-interface-changes.md"
+  iface=$(cygpath -m "$iface" 2>/dev/null || printf '%s' "$iface")
+  iface=${iface//\\//}
+  unit=${unit#U}
+fi
 
 wt="$root/.claude/worktrees/$name"
 if [ -e "$wt" ]; then
@@ -153,7 +177,21 @@ lcov=$(cygpath -m "$scripts/lcov-gaps.py" 2>/dev/null || echo "$scripts/lcov-gap
 scripts_env="$(git -C "$wt" rev-parse --absolute-git-dir)/bmad/scripts.env"
 mkdir -p "$(dirname "$scripts_env")"
 printf "HEAVY='%s'\nBG='%s'\nLCOV='%s'\nAPP_CHECK='%s'\nSCRIPTS='%s'\n" "$heavy" "$bg" "$lcov" "$app" "$scripts" > "$scripts_env"
+[ -z "$intake" ] || printf "INTAKE='%s'\nUNIT='%s'\nIFACE='%s'\n" "$intake" "$unit" "$iface" >> "$scripts_env"
 paths_lookup="cat \\\"\$(git -C $wt rev-parse --absolute-git-dir)/bmad/scripts.env\\\""
+
+# A unit dispatched with an intake (Intake: and Unit: lines) reads it through
+# intake.py: the intent auditor gets the unit's view of the frozen intake
+# (Goal, Non-goals, Shared interfaces, its ACs) instead of the raw intent, and
+# the worker re-reads the interface broadcast before each test run, so a pinned
+# interface another unit was allowed to change reaches it before its tests do.
+intake_fact=""
+if [ -n "$intake" ]; then
+  intake_py=$(cygpath -m "$scripts/intake.py" 2>/dev/null || echo "$scripts/intake.py")
+  unit_cmd="python \\\"$intake_py\\\" unit \\\"$intake\\\" $unit"
+  show_cmd="python \\\"$intake_py\\\" iface show \\\"$iface\\\""
+  intake_fact="  \"This unit was planned in an intake: $intake, unit $unit. \`$unit_cmd\` prints its view (Goal, Non-goals, Shared interfaces, this unit's block and the full text of its acceptance criteria); read it before planning and keep the spec's acceptance criteria to those ACs. This replaces step-04's definition of {verbatim_intent} for the Intent Alignment Auditor: run \`$unit_cmd\` just before launching that layer and put its whole output where its prompt says {verbatim_intent}, never the raw intent. A pinned interface (one listed under Shared interfaces) keeps the shape listed there: if the unit cannot be built without changing one, stop and reply STATUS: blocked-interface as your worker prompt says. Before you start the affected tests or a full-suite run, every time, run \`$show_cmd\`: it prints the interface changes the orchestrator approved for other units, or none. Adapt this unit's code to each change that touches an interface it provides or consumes, through the implementation subagent, before the tests start.\","
+fi
 
 # A project whose profile names an app gets each unit checked in the running
 # app (app-check.sh). Every worktree gets its own port, so parallel units
@@ -272,7 +310,9 @@ persistent_facts = [
   "Dependencies install in the background while you plan; planning needs only the checkout. Before any command that needs node_modules (tests, typecheck, build, lint), run \`bash $bg wait $wt install\`, again while it prints still running. If it prints failed, halt with its output as the blocking condition.",
   "Testing has one owner per check. The implementation subagent runs the targeted test files and the typecheck of each workspace it touched, after its first pass and after every review fix, and reports the results. You do not re-run them: if it reports one it could not get green, send that back to it. $suite_fact Synthesis builds, so skip the build unless the intent, the spec's Verification or AGENTS.md requires one; then run it once, after the implementation subagent returns, through the queue: \`bash $heavy 'cd $wt && <the project build command>'\`.",
   "When the intent starts with \`Kind: bug\`, reproduce the bug before fixing it. The plan's first task is a test that shows the bug; the implementation subagent runs it before the fix, where it must fail, and after, where it must pass, and reports both result lines. Keep a test for each item of the intent's Unchanged behaviour list too. Record the reproduction in the spec under \`## Reproduction\`, one line each: \`RED: <command> -> <the failing line>\` and \`GREEN: <command> -> <the passing line>\`. In a project that runs no tests, reproduce it through the app check when there is one, otherwise write \`RED: traced: <file:line and why it fails>\` and \`GREEN: traced: <what the fix changes there>\`. The gate rejects a bug unit without both lines.",
-  "Review is sized by risk. This replaces step-04's rule that all review subagents run at the same model capability as the current session: launch the Blind Hunter (\`blind-hunter\`) and the Intent Alignment Auditor (\`intent-alignment\`) with \`model: sonnet\` in their Agent calls, and the Edge Case Hunter and the Verification Gap Reviewer at the session model (no \`model\`). Each layer's 'Run only when' line reads the \`Size:\` line of your worker prompt (S, M or L; with none, run every layer) and the diff: count its changed lines, insertions plus deletions, with \`git -C $wt diff --shortstat <baseline_revision>\`. Announce each skipped layer with the reason.",
+  "Review is sized by risk. This replaces step-04's rule that all review subagents run at the same model capability as the current session: launch the Blind Hunter (\`blind-hunter\`) and the Intent Alignment Auditor (\`intent-alignment\`) with \`model: sonnet\` in their Agent calls, and the Edge Case Hunter and the Verification Gap Reviewer at the session model (no \`model\`). Each layer's 'Run only when' line reads the \`Risk:\` line of your worker prompt (low, med or high) and, when there is none, its \`Size:\` line (S, M or L; with neither, run every layer), and the diff: count its changed lines, insertions plus deletions, with \`git -C $wt diff --shortstat <baseline_revision>\`. The Edge Case Hunter and the Verification Gap Reviewer always run. Announce each skipped layer with the reason.",
+  "Every finding row you write in the spec's Review Triage Log carries the tag of the layer that raised it, right after its verdict and route, as in: - \`[medium]\` \`patch\` [edge-case] <finding> — <evidence>. The tags are [blind-hunter], [edge-case], [verification-gap] and [intent-alignment]; a finding two layers raised carries both tags. A row without a tag cannot be traced to the layer that found it.",
+$intake_fact
 $app_fact
   "file:AGENTS.md",
 ]
@@ -300,7 +340,7 @@ Launch a subagent with no prior conversation context, using the \`${impl_type}\`
 [[workflow.review_layers]]
 id = "blind-hunter"
 name = "Blind Hunter"
-when = "the unit is not small and low-risk. It is small and low-risk only when all three hold: your worker prompt says \`Size: S\`; the diff has fewer than 400 changed lines (insertions plus deletions, from \`git -C $wt diff --shortstat <baseline_revision>\`); and it touches no contract, migration or auth code (no changed path in a contracts package or a migrations folder, none with auth, session, permission or role in its path, and no change to an interface the intent agreed on). With no Size line, run it."
+when = "your worker prompt has a \`Risk:\` line and it says \`Risk: med\` or \`Risk: high\` (with \`Risk: low\`, skip this layer whatever the size). With no Risk line, the 0.16.0 size rule: the unit is not small and low-risk. It is small and low-risk only when all three hold: your worker prompt says \`Size: S\`; the diff has fewer than 400 changed lines (insertions plus deletions, from \`git -C $wt diff --shortstat <baseline_revision>\`); and it touches no contract, migration or auth code (no changed path in a contracts package or a migrations folder, none with auth, session, permission or role in its path, and no change to an interface the intent agreed on). With no Size line, run it."
 instruction = """
 Launch a context-free subagent with \`model: sonnet\` (the review-sizing fact replaces step-04's same-model rule for this layer), with this prompt:
 
@@ -318,7 +358,7 @@ Do not invoke any skill, and do not spawn subagents of your own: you are the rev
 [[workflow.review_layers]]
 id = "intent-alignment"
 name = "Intent Alignment Auditor"
-when = "your worker prompt says \`Size: L\` (or larger), or the diff changes an interface this unit provides or consumes from the shape the intent agreed (a route, payload, type or method signature you will mark CHANGED in your reply). With no Size line, run it."
+when = "the diff changes an interface this unit provides or consumes from the agreed shape (any Risk), or: with a \`Risk:\` line in your worker prompt, it says \`Risk: high\` (skip this layer for \`Risk: low\` and \`Risk: med\` unless an interface changed); with no Risk line, the 0.16.0 rule: your worker prompt says \`Size: L\` (or larger), or the diff changes an interface this unit provides or consumes from the shape the intent agreed (a route, payload, type or method signature you will mark CHANGED in your reply). With no Size line, run it."
 instruction = """
 Launch a subagent with \`model: sonnet\` (the review-sizing fact replaces step-04's same-model rule for this layer), with this prompt:
 

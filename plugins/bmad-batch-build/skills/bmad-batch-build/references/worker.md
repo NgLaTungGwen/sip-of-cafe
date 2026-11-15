@@ -45,10 +45,13 @@ That agent (`agents/bmad-batch-worker.md`) runs on Opus with a 1-hour
 prompt cache, so its context survives the waits on its coder, its reviewers
 and the test suite. The worker plans, verifies and triages the review. The
 review is sized by risk through the pinned toml's per-layer `when` gates,
-which read the `Size:` line below: an S unit under 400 changed lines that
-touches no contract, migration or auth code gets only the edge-case and
-verification-gap layers; the intent auditor runs only for L units or when an
-interface changed from the agreed shape. Those two layers run at the worker's
+which read the `Risk:` line below: `low` gets the edge-case and
+verification-gap layers, `med` adds the blind hunter, and `high`, or an
+interface changed from the agreed shape, adds the intent auditor. A dispatch
+with no `Risk:` line (no intake) keeps the 0.16.0 rules, which read `Size:`:
+an S unit under 400 changed lines that touches no contract, migration or auth
+code gets only the edge-case and verification-gap layers; the intent auditor
+runs only for L units or when an interface changed. Those two layers run at the worker's
 model; the blind hunter and the intent auditor run on Sonnet (a pinned fact
 replaces step-04's same-model rule for them). All keep the default 5-minute
 cache. Opus, not Sonnet: Sonnet workers skipped the review in 31 of 47 units
@@ -64,6 +67,12 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 - `<budget>` and `<estimate>`: the unit's `budget` and `p50` under `unit_estimates` in the
   plan file, in minutes
 - `<size>`: the unit's size from the split (S, M or L)
+- `<intake>`: `<runs>/<slug>-intake.md`, the frozen intake, and `<risk>` the
+  unit's `risk` there (low, med or high). `<iface>` is
+  `<runs>/<slug>-interface-changes.md`, which may not exist yet. A run without
+  an intake leaves out the `Intake:`, `Risk:` and `Interface changes:` lines,
+  the `--intake`, `--unit` and `--iface` arguments and the Intake section of
+  the prompt.
 - `<template>`: the `DB-TEMPLATE` name from SKILL.md section 4; leave out
   `--db-template` when it printed `none`
 - `<wt>`: `<root>/.claude/worktrees/<name>`
@@ -75,7 +84,10 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 ```text
 You are a Build Auto worker for one unit of a BMAD batch build.
 Unit: <n>
-Size: <size>   (the review layers' `Run only when` lines read this)
+Size: <size>
+Risk: <risk>   (the review layers' `Run only when` lines read this, and Size: when there is no Risk:)
+Intake: <intake>
+Interface changes: <iface>
 Budget: <budget> min (about <estimate> expected). Run `date +%s` first and keep the number.
 
 Project root: <wt>   (a git worktree on branch <branch>, which you create in step 0)
@@ -83,7 +95,7 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
 
 0. Prepare the worktree:
    a. As one foreground Bash call with `timeout: 600000`:
-      bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<name>" "<branch>" --no-install --agents "<agents>" [--base <base>] [--db-template <template>]
+      bash "<skill>/scripts/prepare-worktree.sh" "<root>" "<name>" "<branch>" --no-install --agents "<agents>" [--base <base>] [--db-template <template>] [--intake "<intake>" --unit <n> --iface "<iface>"]
       If it fails, reply with:
       SPEC: none
       STATUS: blocked
@@ -96,6 +108,31 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
       (add `--apps` only if this unit touches apps/). It queues through
       heavy.sh and retries each step once. Planning needs only the checkout;
       the workflow's pinned facts say when to wait for the install.
+   c. Read your part of the intake, once, before planning:
+      python "<skill>/scripts/intake.py" unit "<intake>" <n>
+      It prints the Goal, the Non-goals, the Shared interfaces, your unit's
+      block and the full text of its acceptance criteria. Those ACs are the
+      ones your spec must meet, and they are part of the intent below.
+      Shared interfaces are pinned: keep each one in the shape listed there.
+      You may not change a pinned interface. If the unit cannot be built
+      without changing one, stop (start no further implementation round) and
+      reply with:
+      SPEC: <the spec path, or none>
+      STATUS: blocked-interface
+      BLOCKED: <the interface, why it must change, and the shape you need: <old> -> <new>>
+      HEAD: <output of `git -C <wt> rev-parse HEAD`>
+      INTERFACES: <as in step 3>
+      The orchestrator decides. When it approves, it redispatches you with a
+      line `Approved interface change: <symbol>: <old> -> <new>`. Then, before
+      changing the code, record it for the other units:
+      python "<skill>/scripts/intake.py" iface add "<iface>" --unit <n> --iface "<symbol>" --change "<old> -> <new>" --reason "<why>"
+      Name the interface exactly as Shared interfaces spells it, here and in
+      your INTERFACES line: the gate matches the two.
+      Before every affected-test or full-suite run, run
+      python "<skill>/scripts/intake.py" iface show "<iface>"
+      It prints the changes approved for other units, or `none`. Adapt your
+      code to any that touch an interface you provide or consume before the
+      tests start (the pinned facts repeat this at that point).
 1. Run this exactly once, from any directory:
    uv run --no-cache "<wt>/_bmad/scripts/render_skill.py" --project-root "<wt>" --skill "<wt>/.claude/skills/bmad-build-auto"
 2. Read the one absolute workflow.md path it prints, and follow it to its end
@@ -137,12 +174,13 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
 3. When the workflow halts, and only once every implementation subagent you
    launched has returned, reply with exactly these lines and nothing else:
    SPEC: <absolute path of the spec or result file the workflow wrote>
-   STATUS: <the status in its frontmatter>
+   STATUS: <the status in its frontmatter, or blocked-interface (step 0c)>
    BLOCKED: <blocking condition, or none>
    HEAD: <output of `git -C <wt> rev-parse HEAD`>
    INTERFACES: <each interface this unit provides or consumes, as built:
    route and payload, type, or method signature, one per `;`. Mark any that
-   differ from the intent's agreed shape with "CHANGED". Or "none".>
+   differ from the intent's agreed shape with "CHANGED"; a pinned one by its
+   Shared interfaces name. Or "none".>
    REMAINING: <the findings or acceptance criteria you did not finish because the
    budget ran out, one per `;`, or "none">
    SKILL ISSUES: <each time a skill script, its settings or these
@@ -171,6 +209,16 @@ done
 
 The fourth field is `--bug` for a unit whose intent starts with `Kind: bug`,
 and empty otherwise.
+
+In a run with an intake, add the interface check to each unit's call, with
+the worker's `INTERFACES` value:
+`--intake "<intake>" --unit <n> --iface-file "<iface>" --reply-interfaces "<INTERFACES>"`.
+It fails the unit when an item marked `CHANGED` names an interface listed
+under Shared interfaces and `<iface>` has no entry for that unit and
+interface (`pinned interface '<symbol>' marked CHANGED with no approved
+entry ...`): the worker changed a pinned interface without an approved
+exception. A `STATUS: blocked-interface` reply is not gated: it is a failed
+unit that needs the user's decision on the interface (SKILL.md section 6).
 
 The script prints `READY <commits>` or `NOT READY: <reasons>` for each unit.
 It checks the spec status (`done`, `built` or `in-review`), and the workflow's
