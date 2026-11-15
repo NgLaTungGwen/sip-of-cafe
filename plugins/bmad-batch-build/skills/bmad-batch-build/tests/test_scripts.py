@@ -537,7 +537,7 @@ class BgWait(unittest.TestCase):
 
 
 class PrepareWorktree(unittest.TestCase):
-    def pinned(self, with_api, extra=(), with_apps=False, graph=False):
+    def pinned(self, with_api, extra=(), with_apps=False, graph=False, apps_pkg="", profile=None):
         bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
         root = tempfile.mkdtemp().replace("\\", "/")
         os.makedirs(os.path.join(root, "_bmad", "custom"))
@@ -547,7 +547,8 @@ class PrepareWorktree(unittest.TestCase):
             open(os.path.join(root, "api", "package.json"), "w").close()
         if with_apps:
             os.makedirs(os.path.join(root, "apps"))
-            open(os.path.join(root, "apps", "package.json"), "w").close()
+            with open(os.path.join(root, "apps", "package.json"), "w") as f:
+                f.write(apps_pkg)
             open(os.path.join(root, "apps", "bun.lock"), "w").close()
         open(os.path.join(root, "package.json"), "w").close()
         git = ["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t"]
@@ -555,6 +556,9 @@ class PrepareWorktree(unittest.TestCase):
         subprocess.run(git + ["add", "package.json"] + (["api"] if with_api else [])
                        + (["apps"] if with_apps else []), check=True)
         subprocess.run(git + ["commit", "-q", "-m", "init"], check=True)
+        if profile is not None:
+            with open(os.path.join(root, ".claude", "bmad-batch-project.json"), "w") as f:
+                json.dump(profile, f)
         if graph:
             os.makedirs(os.path.join(root, "graphify-out", "cache"))
             for f in ("graph.json", "GRAPH_REPORT.md", os.path.join("cache", "big.bin")):
@@ -588,6 +592,36 @@ class PrepareWorktree(unittest.TestCase):
         self.tomllib_ok(toml)
         wt, toml = self.pinned(with_api=True)
         self.assertNotIn(wt + "/apps", toml)
+
+    def test_handoff_runs_vitest_in_a_bun_apps_that_declares_it(self):
+        # ti-port: bun test is bun's own runner and ignored vitest.config
+        # (no jsdom, no coverage thresholds); 5 workers worked around it.
+        pkg = '{"scripts": {"test": "vitest run --coverage"}, "devDependencies": {"vitest": "^4"}}'
+        wt, toml = self.pinned(with_api=True, with_apps=True, apps_pkg=pkg)
+        self.assertIn("cd " + wt + "/apps && bunx vitest run <files>", toml)
+        self.assertIn("cd " + wt + "/apps && bun run test'", toml)
+        self.assertNotIn("bun test", toml)
+        self.tomllib_ok(toml)
+
+    def test_the_apps_suite_is_its_test_script_when_it_has_one(self):
+        # hive-factory's apps "test" is "bun test"; running the script keeps
+        # whatever it really is, as verify.sh does.
+        pkg = '{"scripts": {"test": "bun test --coverage"}}'
+        wt, toml = self.pinned(with_api=True, with_apps=True, apps_pkg=pkg)
+        self.assertIn("cd " + wt + "/apps && bun run test'", toml)
+        self.assertIn("cd " + wt + "/apps && bun run test <files>", toml)
+        self.assertNotIn("bun test <files>", toml)
+
+    def test_a_profile_with_commands_gets_no_apps_clause(self):
+        # The profile already names where and how apps/ is checked.
+        prof = {"base": "main", "install": [], "checks": [],
+                "suite": {"dir": "apps", "cmd": "bun run test"},
+                "targeted": {"dir": "apps", "test": "bunx vitest run <files>", "typecheck": "bun run typecheck"}}
+        wt, toml = self.pinned(with_api=True, with_apps=True, profile=prof)
+        self.assertNotIn("Files under apps/", toml)
+        self.assertNotIn(" apps-suite", toml)
+        self.assertIn("cd " + wt + "/apps && bunx vitest run <files>", toml)
+        self.tomllib_ok(toml)
 
     def test_every_subagent_gets_the_current_scripts_and_the_run_rules(self):
         # sonar-zero-5: coders used another project's or an old version's
@@ -924,12 +958,18 @@ class Setup(unittest.TestCase):
                                   ("repos/acme/app/issues/5/sub_issues", {"sub_issue_id": 1012}),
                                   ("repos/acme/app/issues/10/sub_issues", {"sub_issue_id": 1013})])
 
-    def link_case(self, merged, base="main", closing=None):
-        """Runs link() on a two-unit plan; returns (stdout, the body written, the calls, exit code)."""
+    def link_case(self, merged, base="main", closing=None, open_subs="4\n5"):
+        """Runs link() on a two-unit plan; returns (stdout, the body written, the calls, exit code).
+        `open_subs` is what the story's open sub-issues query prints, or an
+        exception it raises."""
         tickets = load("gh_tickets", "gh_tickets.py")
         written = []
 
         def replies(args, stdin):
+            if any(a.endswith("/issues/3/sub_issues") for a in args):
+                if isinstance(open_subs, Exception):
+                    raise open_subs
+                return open_subs
             if args[:2] == ("pr", "view") and "body,baseRefName" in args:
                 return json.dumps({"body": "Summary\n\n🤖 Generated with x", "baseRefName": base})
             if args[:2] == ("pr", "edit"):
@@ -971,6 +1011,24 @@ class Setup(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("close-on-complete: off (the PR targets develop", out)
         self.assertFalse(any("closingIssuesReferences" in a for a, _ in calls))
+
+    def test_gh_story_with_other_open_sub_issues_is_not_closed(self):
+        # db-pool-error-handler: a reused story with open tasks outside the run
+        # was closed by the run's PR (the ADO side; GitHub had the same bug).
+        out, body, _, code = self.link_case(["1", "2"], closing=["4", "5"], open_subs="4\n5\n7")
+        self.assertEqual(code, 0)
+        self.assertIn("Work items: Refs #3, Closes #4, Closes #5\n", body)
+        self.assertIn("story #3 not closed: open sub-issues outside this PR (#7)", out)
+        # The query failing never risks closing the story.
+        out, body, _, code = self.link_case(["1", "2"], closing=["4", "5"],
+                                            open_subs=RuntimeError("gh api failed"))
+        self.assertEqual(code, 0)
+        self.assertIn("Work items: Refs #3, Closes #4, Closes #5\n", body)
+        self.assertIn("story #3 not closed", out)
+        # Only the run's own sub-issues open: the story closes with them.
+        _, body, calls, _ = self.link_case(["1", "2"], closing=["3", "4", "5"])
+        self.assertIn("Work items: Closes #3, Closes #4, Closes #5\n", body)
+        self.assertTrue(any("repos/acme/app/issues/3/sub_issues" in a for a, _ in calls))
 
     def test_gh_link_missing_reference(self):
         _, _, _, code = self.link_case(["1", "2"], closing=["3", "4"])
@@ -1494,6 +1552,43 @@ class SynthesisDiff(unittest.TestCase):
         status = subprocess.run(["git", "-C", root, "status", "--porcelain"], capture_output=True, text=True).stdout
         self.assertEqual(status, "")
 
+    def test_a_merge_of_the_base_adds_nothing(self):
+        # db-pool-error-handler: merging origin/<base> counted the base's own
+        # commits as synthesis commits, with 0 resolved merges.
+        root, git = git_repo({"a.txt": "one\n"})
+
+        def commit(path, body, msg):
+            with open(os.path.join(root, path), "w", newline="\n") as f:
+                f.write(body)
+            subprocess.run(git + ["add", path], check=True)
+            subprocess.run(git + ["commit", "-q", "-m", msg], check=True)
+        subprocess.run(git + ["checkout", "-q", "-b", "u1", "main"], check=True)
+        commit("u1.txt", "unit file\n", "feat: u1")
+        # The base moves on meanwhile, with a commit and a merge of its own.
+        subprocess.run(git + ["checkout", "-q", "-b", "up", "main"], check=True)
+        commit("base.txt", "base work\n", "feat: base work")
+        subprocess.run(git + ["checkout", "-q", "-b", "side", "up"], check=True)
+        commit("side.txt", "side work\n", "feat: side work")
+        subprocess.run(git + ["checkout", "-q", "up"], check=True)
+        subprocess.run(git + ["merge", "-q", "--no-ff", "side", "-m", "Merge PR side"], check=True)
+        subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "up"], check=True)
+        subprocess.run(git + ["checkout", "-q", "main"], check=True)
+        start = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+        def run():
+            return subprocess.run([bash_path(), os.path.join(SCRIPTS, "synthesis-diff.sh"), root, start, "u1"],
+                                  capture_output=True, text=True).stdout.strip()
+        subprocess.run(git + ["merge", "-q", "--no-ff", "u1", "-m", "merge: u1"], check=True)
+        subprocess.run(git + ["merge", "-q", "--no-ff", "origin/main", "-m", "merge: origin/main"], check=True)
+        self.assertEqual(run(), "SYNTH-DIFF none")
+        commit("c.txt", "repair\n", "fix(merge): repair")
+        self.assertIn("1 commits, 0 resolved merges", run())
+        with open(os.path.join(root, ".git", "bmad", "synthesis.diff"), encoding="utf-8") as f:
+            diff = f.read()
+        self.assertIn("fix(merge): repair", diff)
+        self.assertNotIn("base work", diff)
+        self.assertNotIn("side work", diff)
+
 
 class ReviewFindings(unittest.TestCase):
     def test_only_fixed_findings_are_listed(self):
@@ -1668,10 +1763,15 @@ class Guard(unittest.TestCase):
         other = tempfile.mkdtemp(dir=os.path.dirname(SCRIPTS))
         self.addCleanup(shutil.rmtree, other, True)
         # Not under /tmp either: the guard allows /tmp/ (Git Bash's temp folder),
-        # which on Linux is where this test's repository itself sits.
-        outside = tempfile.mkdtemp(dir=os.path.dirname(SCRIPTS)).replace("\\", "/")
-        self.addCleanup(shutil.rmtree, outside, True)
-        patch = mock.patch.dict(os.environ, {"TEMP": other, "TMP": other, "TMPDIR": other})
+        # which on Linux is where this test's repository itself sits. Nor next
+        # to the skill's scripts: run from a worktree (.claude/worktrees/<x>/)
+        # or from the enhancer's store worktree, that is an allowed place. The
+        # guard reads only the path, so it need not exist.
+        drive = os.path.splitdrive(SCRIPTS)[0]
+        outside = f"{drive}/bmad-guard-outside-{os.getpid()}"
+        # Its own run store too, so the user's store never decides the answer.
+        patch = mock.patch.dict(os.environ, {"TEMP": other, "TMP": other, "TMPDIR": other,
+                                             "BMAD_RUNS_DIR": os.path.join(other, "store")})
         patch.start()
         self.addCleanup(patch.stop)
         api = f"{self.wt}/api"
@@ -1978,6 +2078,25 @@ class TicketsUnitPr(unittest.TestCase):
         self.assertEqual(ado.link_targets(self.PLAN, {"1"}, unit_pr=True), ([], [11], True))
         self.assertEqual(ado.link_targets(self.PLAN, {"1"}), ([10], [11], False))
         self.assertEqual(ado.link_targets(self.PLAN, {"1", "2"}), ([10], [11, 12], True))
+
+    def test_ado_story_with_other_open_tasks_is_not_closed(self):
+        """A reused story with open tasks outside the run stays unlinked when
+        close-on-complete is on (db-pool-error-handler, qa-postgres-b2s)."""
+        ado = load("ado_tickets", "ado_tickets.py")
+        skipped = []
+        self.assertEqual(ado.link_targets(self.PLAN, {"1", "2"}, children=lambda s: {11, 12, 15},
+                                          skipped=skipped), ([], [11, 12], True))
+        self.assertEqual(skipped, [(10, [15])])
+        self.assertEqual(ado.link_targets(self.PLAN, {"1", "2"}, children=lambda s: {11, 12}),
+                         ([10], [11, 12], True))
+        self.assertEqual(ado.link_targets(self.PLAN, {"1"}, children=lambda s: {11, 12, 15}),
+                         ([10], [11], False))
+
+        def fails(_):
+            raise RuntimeError("az boards query failed")
+        skipped = []
+        self.assertEqual(ado.link_targets(self.PLAN, {"1", "2"}, children=fails, skipped=skipped)[0], [])
+        self.assertEqual(skipped[0][0], 10)
 
     def test_github(self):
         gh = load("gh_tickets", "gh_tickets.py")

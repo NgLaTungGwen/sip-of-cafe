@@ -192,7 +192,7 @@ status() {
 # first, before it queues for the machine, and waits for the run ahead of it.
 is_test() {
   case $1 in
-    *vitest*|*"bun test"*|*"npm test"*|*"npm run test"*|*"npm t "*|*jest*|*pytest*|*--coverage*|*"go test"*|*"cargo test"*) return 0 ;;
+    *vitest*|*"bun test"*|*"bun run test"*|*"npm test"*|*"npm run test"*|*"npm t "*|*jest*|*pytest*|*--coverage*|*"go test"*|*"cargo test"*) return 0 ;;
   esac
   return 1
 }

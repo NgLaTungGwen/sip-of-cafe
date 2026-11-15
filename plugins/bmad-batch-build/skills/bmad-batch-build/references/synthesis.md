@@ -128,7 +128,8 @@ Commit each repair as its own `fix(merge): ...` commit.
 ## 3. Verify
 
 `verify.sh` runs build + typecheck, the test suite, the `apps/` typecheck, lint and
-`bun test` suite (installing `apps/` first when it has no `node_modules`), and the
+test suite (`bun run test` when `apps/package.json` has a test script, otherwise
+`bun test`; installing `apps/` first when it has no `node_modules`), and the
 `infra/` typecheck at the same time; in a project with a profile
 (`.claude/bmad-batch-project.json`) it runs the profile's checks instead and
 ignores `--apps` and `--infra`. Either way it also runs the count ratchets the
@@ -156,8 +157,10 @@ so the tree stays clean. Read only the failing part of each log whose check
 didn't return 0.
 
 While fixing, re-run only what failed: the failing test files
-(`cd api && npx vitest run <files>`, `cd apps && bun test <files>`), or the one
-check that failed. Run the full verify above once more after the last fix,
+(`cd api && npx vitest run <files>`; in `apps/`, `cd apps && bunx vitest run <files>`
+when `apps/package.json` declares vitest, `cd apps && bun run test <files>` when it
+has a test script, and `cd apps && bun test <files>` only when it has neither),
+or the one check that failed. Run the full verify above once more after the last fix,
 before the PR. Anything that may take over 10 minutes goes through `bg.sh`
 the same way; never wrap a wait in a loop, `timeout` or `sleep`.
 
@@ -297,13 +300,17 @@ python "<skill>/scripts/<tickets script>" "<tickets json>" --link-pr <pr id> --m
 
 It links the PR to the merged units' stories and tasks, never to a left-out
 unit's task, because that work isn't in this PR. When no unit was left out it
-also turns on close-on-complete. It prints the linked IDs and whether
+also turns on close-on-complete, and then leaves out a story that still has
+open tasks outside this PR (it prints `story #<id> not linked`): name that
+story in the PR description instead. It prints the linked IDs and whether
 close-on-complete is on, and exits non-zero if an ID didn't link. The `az`
 calls take up to a minute each.
 
 With `gh_tickets.py` the links are the PR description's `Work items:` line,
 which the script rewrites: `Closes #n` for each issue when no unit was left
-out, so GitHub closes them when the PR merges, otherwise `Refs #n`. GitHub
+out, so GitHub closes them when the PR merges, otherwise `Refs #n`. A story
+issue that still has open sub-issues outside this PR gets `Refs` even then
+(it prints `story #<n> not closed`), so its other work keeps it open. GitHub
 closes issues only on merges into the default branch; for a PR into another
 branch the script says close-on-complete is off.
 

@@ -122,7 +122,10 @@ if [ "$apps" = 1 ]; then
     bun run typecheck > "$v/apps.log" 2>&1; echo $? > "$v/apps.rc"
     if has_ratchet apps; then run_ratchets apps
     elif has_script . lint; then bun run lint > "$v/apps-lint.log" 2>&1; echo $? > "$v/apps-lint.rc"; fi
-    [ "$notest" = 1 ] || { bun test > "$v/apps-test.log" 2>&1; echo $? > "$v/apps-test.rc"; }; }) &
+    # Its own test script when it has one: bun test is bun's own runner and
+    # ignores a vitest.config (threat-intel's "test": "vitest run --coverage"; ti-port).
+    apps_test="bun test"; has_script . test && apps_test="bun run test"
+    [ "$notest" = 1 ] || { $apps_test > "$v/apps-test.log" 2>&1; echo $? > "$v/apps-test.rc"; }; }) &
 fi
 if [ "$infra" = 1 ]; then
   (cd infra && npm ci --no-audit --no-fund --loglevel=error > "$v/infra.log" 2>&1 && npm run typecheck >> "$v/infra.log" 2>&1; echo $? > "$v/infra.rc"
