@@ -59,6 +59,13 @@ at least that often.
 | `units_reviewed`, `units_haiku`, `units_with_high` | Units with a review, implemented by Haiku, with a high finding |
 | `first_review_high_medium` | Mean high+medium findings per unit at first review |
 | `fix_merge_commits` | `fix(merge)` commits synthesis needed |
+| `intake` | Whether the run had an intake (`<slug>-intake.md`); null on rows recorded before 0.17.0 |
+| `intake_min` | Minutes from `INTAKE start` to `INTAKE approved` in the run file, the question round included; null without an intake or an approval |
+| `questions_at_gate`, `questions_after_gate` | `AskUserQuestion` questions in the main session answered at or before the intake approval (the approval call itself counts at the gate), and after it. Split at the `INTAKE approved` time; when that time is off (outside the run's span of the log, or before `INTAKE start`), at the line that ran `intake.py freeze`. Null without an intake |
+| `wait_min_gate`, `wait_min_after_gate` | `min_ask` + `min_typed` split the same way, minutes (each rounded on its own). Null without an intake |
+| `layer_findings` | Triage rows per review layer tag over the run's unit specs: `{layer: {total, rejected}}`, layers `blind-hunter`, `edge-case`, `verification-gap`, `intent-alignment`. Only tagged rows count (`[intent-alignment]`, with or without backticks); rejected means the action was `reject`, `dismissed` or `false`, not `defer`. Null when no spec had a tagged row |
+| `intent_auditor_reject_rate` | Share of `[intent-alignment]` findings that were rejected, 0-1; null with no such finding |
+| `scenario_pass_rate`, `assert_edits`, `escape_count` | From `<slug>-scenarios.json` (synthesis's holdout scenarios): `pass_rate`, `assert_edits`, and the number of `escapes`. Null without that file |
 | `max_turns`, `turn_budget_hit` | Most turns per role; roles that hit their turn budget |
 | `by_role` | Per role: `agents`, `turns`, `ktok_ctx_per_turn`, `read`, `grep_glob`, `bash_other` |
 | `system_map` | `ok`, `stale`, `none` or null: the system-map check for the split |
