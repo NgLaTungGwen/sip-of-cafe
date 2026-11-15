@@ -143,7 +143,7 @@ nothing the test suite covers (only docs, pipeline YAML, or scripts outside
 the workspaces):
 
 ```bash
-bash "<skill>/scripts/bg.sh" run "<iwt>" verify "bash '<skill>/scripts/heavy.sh' --weight 3 \"bash '<skill>/scripts/verify.sh' '<iwt>' [--apps] [--infra] [--no-test]\""
+bash "<skill>/scripts/bg.sh" run "<iwt>" verify "bash '<skill>/scripts/heavy.sh' --priority --weight 6 --mem 5000 \"bash '<skill>/scripts/verify.sh' '<iwt>' [--apps] [--infra] [--no-test]\""
 ```
 
 as a Bash call with `run_in_background: true`, then

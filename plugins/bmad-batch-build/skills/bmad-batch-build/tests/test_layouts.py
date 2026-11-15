@@ -580,5 +580,133 @@ class PluginAgents(unittest.TestCase):
             self.assertEqual(a, b, f)
 
 
+class HeavySchedule(unittest.TestCase):
+    """Priority, heartbeats, backfill and reservations, on a fixed free RAM
+    (BMAD_HEAVY_FREE_MB), with fake run entries and tickets written by bash
+    sleepers so that kill -0 sees their pids."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dir = os.path.join(self.tmp, "h")
+        os.makedirs(self.dir)
+        self.procs = []
+
+    def tearDown(self):
+        for p in self.procs:
+            p.kill()
+            p.wait()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def env(self, free=8000, **kw):
+        return dict(os.environ, BMAD_RUNS_DIR=os.path.join(self.tmp, "s"), BMAD_HEAVY_DIR=self.dir,
+                    BMAD_HEAVY_FREE_MB=str(free), BMAD_HEAVY_SLOTS="8", BMAD_HEAVY_SWAP_PCT="101",
+                    BMAD_HEAVY_POLL="1", BMAD_HEAVY_MAX_WAIT="3", BMAD_HEAVY_HARD_MB="99999999",
+                    **{k: str(v) for k, v in kw.items()})
+
+    def sleeper(self, script, marker):
+        """Runs `script` in a bash that then sleeps, once `marker` exists in the state dir."""
+        p = subprocess.Popen([BASH, "-c", f'd="{self.dir}"; {script}; sleep 60'])
+        self.procs.append(p)
+        for _ in range(100):
+            if any(f.startswith(marker) for f in os.listdir(self.dir)):
+                return p
+            time.sleep(0.1)
+        self.fail(f"the sleeper never wrote {marker}")
+
+    def running(self, mem, age, f0=""):
+        """A running command of weight 1 that started `age` seconds ago."""
+        self.sleeper(f'echo "$$ 1 {mem} $(( $(date +%s) - {age} )) other {f0}" > "$d/run.$$"', "run.")
+
+    def waiting(self, mem, age=0, priority=False):
+        """A live ticket that arrived `age` seconds ago and needs `mem` MB."""
+        name = "wait.0." if priority else "wait."
+        self.sleeper(f'echo "1 {mem} {int(priority)}" > "$d/need.$$"; '
+                     f'echo $$ > "$d/{name}$(( $(date +%s) - {age} ))000000000.$$"', "wait.")
+
+    def heavy(self, *args, env):
+        return subprocess.run([BASH, os.path.join(SCRIPTS, "heavy.sh"), *args], capture_output=True, text=True,
+                              env=env, timeout=120)
+
+    def test_a_priority_command_goes_before_the_queue(self):
+        self.running(0, 3600)
+        self.waiting(100)   # fits, so it is not waiting on RAM: nothing may backfill past it
+        self.assertEqual(self.heavy("echo started", env=self.env()).returncode, 75)
+        r = self.heavy("--priority", "echo started", env=self.env())
+        self.assertEqual((r.returncode, r.stdout), (0, "started\n"), r.stderr)
+        self.assertIn("priority=1", self.heavy("--explain", "--priority", "echo x", env=self.env()).stdout)
+
+    def test_a_ticket_nobody_touches_is_dropped(self):
+        # Its pid is alive, but its waiter stopped polling 5 minutes ago.
+        self.running(0, 3600)
+        self.waiting(100)
+        ticket = [os.path.join(self.dir, f) for f in os.listdir(self.dir) if f.startswith("wait.")][0]
+        old = time.time() - 300
+        os.utime(ticket, (old, old))
+        r = self.heavy("echo started", env=self.env())
+        self.assertEqual((r.returncode, r.stdout), (0, "started\n"), r.stderr)
+        self.assertFalse(os.path.exists(ticket))
+
+    def test_a_small_command_backfills_past_one_waiting_for_ram(self):
+        self.running(0, 3600)
+        self.waiting(50000)  # needs far more than the 8000 MB free
+        r = self.heavy("echo started", env=self.env(BMAD_HEAVY_AGING=600))
+        self.assertEqual((r.returncode, r.stdout), (0, "started\n"), r.stderr)
+        self.assertIn("starting ahead of 1", r.stderr)
+
+    def test_no_backfill_once_the_head_has_waited_long_enough(self):
+        self.running(0, 3600)
+        self.waiting(50000, age=2000)
+        self.assertEqual(self.heavy("echo started", env=self.env(BMAD_HEAVY_AGING=1000)).returncode, 75)
+
+    def test_no_backfill_past_a_priority_command(self):
+        self.running(0, 3600)
+        self.waiting(50000, priority=True)
+        self.assertEqual(self.heavy("echo started", env=self.env()).returncode, 75)
+
+    def test_memory_a_running_command_already_took_is_not_reserved_again(self):
+        # 2500 MB wanted + 2048 floor out of 6000 free. A 4000 MB command that
+        # started 80 s ago is mostly in the free figure already.
+        self.running(4000, 80)
+        r = self.heavy("echo started", env=self.env(free=6000))
+        self.assertEqual((r.returncode, r.stdout), (0, "started\n"), r.stderr)
+
+    def test_a_command_that_just_started_is_still_reserved(self):
+        self.running(4000, 0)
+        r = self.heavy("echo started", env=self.env(free=6000))
+        self.assertEqual(r.returncode, 75, r.stderr)
+
+    def test_what_free_memory_fell_since_a_start_counts_as_taken(self):
+        # Started just now with 9000 MB free; 6000 free now: 3000 of its 4000 are taken.
+        self.running(4000, 0, f0=9000)
+        r = self.heavy("echo started", env=self.env(free=6000))
+        self.assertEqual((r.returncode, r.stdout), (0, "started\n"), r.stderr)
+
+
+def _git_bash_without_setsid():
+    if not BASH:
+        return False
+    r = subprocess.run([BASH, "-c", '! command -v setsid && command -v taskkill && [ -r /proc/$$/winpid ]'],
+                       capture_output=True)
+    return r.returncode == 0
+
+
+class HeavyWindowsTree(unittest.TestCase):
+    @unittest.skipUnless(_git_bash_without_setsid(), "needs Git Bash: taskkill and /proc/<pid>/winpid, no setsid")
+    def test_the_time_limit_ends_the_commands_children(self):
+        # Git Bash has no setsid; timeout ended only the bash, and what it started lived on.
+        tmp = tempfile.mkdtemp()
+        child = os.path.join(tmp, "child").replace("\\", "/")
+        env = dict(os.environ, BMAD_RUNS_DIR=os.path.join(tmp, "s"), BMAD_HEAVY_DIR=os.path.join(tmp, "h"),
+                   BMAD_HEAVY_TIMEOUT="3")
+        r = subprocess.run([BASH, os.path.join(SCRIPTS, "heavy.sh"), f"sleep 307 & echo $! > '{child}'; wait"],
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 124, r.stderr)
+        alive = subprocess.run([BASH, "-c", f"sleep 1; kill -0 $(cat '{child}')"], capture_output=True)
+        if alive.returncode == 0:
+            subprocess.run([BASH, "-c", f"kill -9 $(cat '{child}')"])
+        self.assertNotEqual(alive.returncode, 0, "the command's child outlived the time limit")
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

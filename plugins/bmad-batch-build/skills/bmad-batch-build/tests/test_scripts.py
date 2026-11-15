@@ -240,7 +240,7 @@ class PlanEstimates(unittest.TestCase):
         self.assertIsNone(waves.long_run({"waves": [{"units": [1], "run": "lane"}]}, 900))
 
     def test_accuracy_says_whether_estimates_run_low(self):
-        rows = [{"project": "a", "mode": "Mode: waves (≈100 min; x)", "min_wall": 250,
+        rows = [{"project": "a", "mode": "Mode: waves (≈100 min; x)", "min_wall": 250, "workers": 1,
                  "unit_minutes": [{"id": 1, "size": "M", "min": 250, "est": 100},
                                   {"id": 2, "size": "S", "min": 120}]}]
         text = "\n".join(waves.accuracy(rows=rows))
@@ -1986,6 +1986,129 @@ class TicketsUnitPr(unittest.TestCase):
         self.assertEqual(gh.work_items_line(self.PLAN, {"2"})[0], "Work items: Refs #10, Refs #12")
         self.assertEqual(gh.work_items_line(self.PLAN, {"1", "2"})[0],
                          "Work items: Closes #10, Closes #11, Closes #12")
+
+
+def lane_run(ratio, est=100, wait=0, workers=1, mode="lane"):
+    """A recorded run whose active minutes are `ratio` times its estimate."""
+    return {"project": "p", "mode": f"Mode: {mode} (≈{est} min; x)", "min_wall": round(ratio * est) + max(wait, 0),
+            "min_user_wait": wait, "workers": workers}
+
+
+class Scheduling(unittest.TestCase):
+    """The RAM cap, the lane's synthesis term and the p80 from recorded runs."""
+
+    def test_the_cap_also_fits_the_ram(self):
+        self.assertEqual(waves.cap_for(0, 99999, 3000), 4)          # RAM allows more than the CPU cap
+        self.assertEqual(waves.cap_for(0, 9000, 3000), 2)           # (9000 - 2048) / 3000
+        self.assertEqual(waves.cap_for(0, 1000, 3000), 1)           # never 0
+        self.assertEqual(waves.cap_for(2, 99999, 3000), 2)          # other runs still count
+        with mock.patch.dict(os.environ, {"BMAD_MEM_AVAILABLE_MB": "9000", "BMAD_UNIT_PEAK_MB": "3000"}):
+            cap, why = waves.parallel_cap(0)
+        self.assertEqual(cap, 2)
+        self.assertIn("capped by RAM", why)
+        self.assertIn("9000 MB", why)
+
+    def test_the_unit_peak_is_a_default_until_suites_were_measured(self):
+        d = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"BMAD_HEAVY_DIR": d}):
+            os.environ.pop("BMAD_UNIT_PEAK_MB", None)
+            self.assertEqual(waves.unit_peak_mb(), (waves.UNIT_PEAK_MB, "default"))
+            with open(os.path.join(d, "peaks.test"), "w") as f:
+                f.write("4000\n5000\n6000\n")
+            self.assertEqual(waves.unit_peak_mb()[0], 6000)
+
+    def test_the_plan_line_says_why_the_cap_is_what_it_is(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "plan.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"units": [unit(i) for i in range(1, 5)]}, f)
+        env = dict(os.environ, BMAD_RUNS_DIR=d, BMAD_MEM_AVAILABLE_MB="8200", BMAD_UNIT_PEAK_MB="3000")
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "plan-waves.py"), path, "--root", d],
+                           capture_output=True, text=True, encoding="utf-8", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("parallel cap: 2 workers per wave (capped by RAM", r.stdout)
+
+    def test_a_lane_total_includes_synthesis(self):
+        units = [unit(1, "S"), unit(2, "S")]
+        with_synth, without = waves.plan(units), waves.plan(units, synth=0)
+        self.assertEqual(with_synth["lane"] - without["lane"], waves.SYNTH)
+        self.assertEqual(with_synth["mode"], "lane")
+        self.assertEqual(with_synth["estimate"], with_synth["lane"])
+        # A parallel wave's MERGE already covers it: the parallel estimate is unchanged.
+        three = [unit(1), unit(2), unit(3)]
+        self.assertEqual(waves.plan(three)["parallel"], waves.plan(three, synth=0)["parallel"])
+
+    def test_synthesis_minutes_come_from_recorded_runs(self):
+        self.assertEqual(waves.synthesis_minutes([]), waves.SYNTH)
+        rows = [{"workers": 2, "min_synthesis": m} for m in (20, 40, 90)] + [{"workers": 0, "min_synthesis": 900}]
+        self.assertEqual(waves.synthesis_minutes(rows), 40)
+
+    def test_the_p80_is_the_order_statistic(self):
+        self.assertEqual(waves.order_stat(list(range(1, 11))), 9)    # ceil(11 x 0.8) = 9th of 10
+        self.assertEqual(waves.order_stat([1, 2, 3, 4, 5]), 5)       # small n: the largest
+        self.assertEqual(waves.order_stat(list(range(1, 21))), 17)   # ceil(21 x 0.8) = 17th
+
+    def test_a_mode_needs_five_runs_before_its_own_p80(self):
+        four = [lane_run(r) for r in (1.0, 1.5, 2.0, 4.0)]
+        self.assertEqual(waves.mode_spread("lane", four, 1.6)[0], 1.6)
+        five = four + [lane_run(1.2)]
+        self.assertEqual(waves.mode_spread("lane", five, 1.6)[0], 4.0)
+        self.assertEqual(waves.mode_spread("waves", five, 1.6)[0], 1.6)  # per mode
+        self.assertEqual(waves.mode_spread("lane", five + [lane_run(9.0)] * 3, 1.6)[0], waves.SPREAD_CAP)
+
+    def test_run_ratios_use_active_minutes_of_runs_with_workers(self):
+        rows = [lane_run(2.0, wait=300), lane_run(9.0, workers=0), lane_run(1.0, wait=-36)]
+        self.assertEqual(waves.run_ratios(rows), {"lane": [2.0, 1.0]})
+
+    def test_accuracy_reports_whole_runs_per_mode(self):
+        rows = [{"project": "p", "unit_minutes": [{"id": 1, "size": "M", "min": 100}]}] + \
+               [lane_run(r) for r in (1, 2, 3, 4, 5)] + [lane_run(0.5, mode="waves"), lane_run(7, workers=0)]
+        text = "\n".join(waves.accuracy(rows=rows))
+        self.assertIn("whole runs: 6 with workers", text)
+        self.assertIn("lane: n=5, median 3.00x, p80 5.00x", text)
+        self.assertIn("waves: n=1, median 0.50x, p80 needs 5 runs", text)
+
+    def test_the_plan_uses_the_mode_p80_and_budgets_cover_it(self):
+        d = tempfile.mkdtemp()
+        write_jsonl(os.path.join(d, "runs.jsonl"), [lane_run(r) for r in (1.0, 1.2, 1.5, 2.0, 3.0)])
+        path = os.path.join(d, "plan.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"units": [unit(1), unit(2, deps=[1])]}, f)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "plan-waves.py"), path, "--root", d],
+                           capture_output=True, text=True, encoding="utf-8", env=dict(os.environ, BMAD_RUNS_DIR=d))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        saved = json.load(open(path, encoding="utf-8"))
+        self.assertEqual(saved["mode"], "lane")
+        self.assertEqual(saved["estimate_p80"], round(saved["estimate"] * 3.0))
+        self.assertIn("order statistic of 5 lane run(s)", r.stdout)
+        for e in saved["unit_estimates"].values():
+            self.assertEqual(e["p80"], round(e["p50"] * 3.0))
+            self.assertGreaterEqual(e["budget"], e["p80"] + 30)
+
+    def test_a_budget_stays_past_the_p80(self):
+        self.assertEqual(waves.budget(100), 200)
+        self.assertEqual(waves.budget(100, 300), 330)
+        self.assertEqual(waves.budget(100, 120), 200)
+
+    def test_straggler_takes_a_budget_under_the_p80_as_the_p80(self):
+        old = {"unit_estimates": {"1": {"p50": 100, "p80": 300, "budget": 200}}}
+        self.assertEqual(straggler.check(old, {1: 250}), [])   # past the old budget, not past the p80
+        self.assertEqual([lvl for lvl, _ in straggler.check(old, {1: 310})], ["straggler"])
+
+    def test_cost_report_finds_the_plan_under_another_project(self):
+        # --collect passed the session's folder (the home folder), not the
+        # checkout the run was planned in, so the unit estimates were lost.
+        cost = load("cost_report_any", "cost-report.py")
+        run_dir = load("run_dir_any", "run_dir.py")
+        store = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"BMAD_RUNS_DIR": store}):
+            folder = run_dir.run_dir(os.path.join(tempfile.mkdtemp(), "hive"), "s2", create=True)
+            with open(os.path.join(folder, "s2-plan.json"), "w", encoding="utf-8") as f:
+                json.dump({"units": [unit(1)], "unit_estimates": {"1": {"p50": 104, "p80": 176, "budget": 208}}}, f)
+            got = cost.unit_minutes({"worker_spans": [{"unit": 1, "start": "a", "min": 45}]}, "s2",
+                                    os.path.join(tempfile.mkdtemp(), "Quy"))
+        self.assertEqual(got, [{"id": 1, "size": "M", "min": 45, "est": 104}])
+
 
 if __name__ == "__main__":
     unittest.main()
