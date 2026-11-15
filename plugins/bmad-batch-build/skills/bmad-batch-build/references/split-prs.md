@@ -11,6 +11,9 @@ Placeholders come from the synthesis prompt, plus:
 - `<split json>`: `<runs>/<slug>-split.json`, which the orchestrator kept
   while the run went: each unit's `from` and `to` commits, `depends_on`, and
   the units left out (format in `<skill>/scripts/split-prs.py`).
+- `<intake>`: `<runs>/<slug>-intake.md`, the frozen intake the synthesis
+  prompt names. `python "<skill>/scripts/intake.py" unit "<intake>" <id>`
+  prints a unit's view, its acceptance criteria in full.
 - `<footer>`: the line every commit ends with,
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
@@ -100,15 +103,19 @@ description, under 4000 characters:
 
 1. The unit's title as the PR title, in the repository's commit convention.
 2. **What changed:** the unit's behaviour, in a few bullets.
-3. **Stack:** "1 of 1" for a PR into `<base>` with nothing above it;
+3. **Acceptance criteria:** the unit's ACs, one bullet each (`AC-<n>: ...`),
+   from the `## Acceptance criteria` part of `intake.py unit "<intake>" <id>`,
+   each marked met or not by the verify and the scenario results. Without an
+   intake, the criteria from the unit's spec.
+4. **Stack:** "1 of 1" for a PR into `<base>` with nothing above it;
    otherwise "Part <k> of <m>: merge after <the PR it targets>", and the
    whole stack in merge order with links once known.
-4. A `Story:` line naming the unit's story as `#id`, and a `Work items:`
+5. A `Story:` line naming the unit's story as `#id`, and a `Work items:`
    line with the unit's task as `#id`.
-5. `## Not included`, in the first PR only, when units were left out.
-6. `## Open review findings`, in the PR of the unit whose files they are,
+6. `## Not included`, in the first PR only, when units were left out.
+7. `## Open review findings`, in the PR of the unit whose files they are,
    from section 3b.
-7. It ends with
+8. It ends with
    `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
 After a PR in a stack is opened, edit the PR below it to name it, when the

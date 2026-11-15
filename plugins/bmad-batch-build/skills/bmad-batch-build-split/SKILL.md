@@ -29,19 +29,21 @@ changes below. Where they don't say otherwise, `<core>/SKILL.md` wins.
 
 ## Changes to bmad-batch-build
 
-### Section 1: the run file
+### Section 1: the intake
+
+Run the intake of `<core>/SKILL.md` section 1 as written: draft, readiness,
+one question round, schedule, the single approval, freeze. Its changes here:
 
 Write `PR mode: one per unit` into `<runs>/<slug>.md`, so a resumed run keeps
 it.
 
-### Section 2: splitting
+**Step 1, the units.** The split rules are the same, and **disjoint files**
+matter more here: each file goes into exactly one unit's PR, and a file two
+independent units both touch joins them into one stack. Each unit should also
+be reviewable alone: one behaviour, one PR a reviewer can approve on its own,
+so give each unit the ACs its own PR delivers.
 
-The rules are the same, and **disjoint files** matter more here: each file
-goes into exactly one unit's PR, and a file two independent units both touch
-joins them into one stack. Each unit should also be reviewable alone: one
-behaviour, one PR a reviewer can approve on its own.
-
-After `plan-waves.py`, run
+**Schedule the units.** After `plan-waves.py` (and its `Set mode` command), run
 
 ```bash
 python "<core>/scripts/split-prs.py" stacks "<runs>/<slug>-plan.json"
@@ -49,14 +51,13 @@ python "<core>/scripts/split-prs.py" stacks "<runs>/<slug>-plan.json"
 
 It prints where each unit's PR goes (`PR 3 -> on 1`) and a `PRS:` line.
 
-### Section 3: approval
+**Step 4, the single approval.** Add a **PR into** column to the table
+(`base`, or `on <unit id>`), and paste the `PRS:` line under the Mode line.
+The approval question counts PRs too, for example `Approve the split: 4
+units, 4 PRs in 2 stacks, about 300 min?`. The Approve option's preview ends
+with the `PRS:` line.
 
-Add a **PR into** column to the table (`base`, or `on <unit id>`), and paste
-the `PRS:` line under the Mode line. The approval question counts PRs too,
-for example `Approve the split: 4 units, 4 PRs in 2 stacks, about 300 min?`.
-The Approve option's preview ends with the `PRS:` line.
-
-After approval, create `<runs>/<slug>-split.json` (format in
+After approval and the freeze, create `<runs>/<slug>-split.json` (format in
 `<core>/scripts/split-prs.py`) with `ibranch` and one entry per approved unit
 with `id`, `title` and `depends_on`. Re-write it if the split changes later.
 
@@ -66,8 +67,8 @@ dependency order, **one commit series per unit**, with `base`,
 `from` (the head before it) and `to` (the head after it) in
 `<runs>/<slug>-split.json`. Then, instead of one PR, follow
 `<core>/references/split-prs.md` yourself in that worktree, from S1, with
-`<iwt>` being it and `<ibranch>` its branch, after a full verify of the
-branch.
+`<iwt>` being it, `<ibranch>` its branch and `<intake>` the run's intake,
+after a full verify of the branch.
 
 ### Section 4: launch
 
@@ -99,7 +100,7 @@ Build the prompt from `<core>/references/synthesis.md` as usual. For the
 final synthesis (`<final>` = `yes`) only, add this line at the top of its
 prompt:
 
-`Split PRs: this run ends in one PR per unit. After section 3b, skip sections 4, 5 and 5b and follow <core>/references/split-prs.md instead (it runs section 4b too), with the split file <runs>/<slug>-split.json, which you may also write; reply in its format (S6).`
+`Split PRs: this run ends in one PR per unit. After section 3b, skip sections 4, 5 and 5b and follow <core>/references/split-prs.md instead (it runs section 4b too), with the split file <runs>/<slug>-split.json, which you may also write, and the intake <runs>/<slug>-intake.md, whose intake.py unit output gives each PR its acceptance criteria; reply in its format (S6).`
 
 Wave syntheses (`<final>` = `no`) are unchanged.
 
