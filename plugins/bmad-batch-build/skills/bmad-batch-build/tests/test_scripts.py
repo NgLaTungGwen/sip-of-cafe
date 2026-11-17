@@ -2511,7 +2511,11 @@ class Scheduling(unittest.TestCase):
         path = os.path.join(d, "plan.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"units": [unit(i) for i in range(1, 5)]}, f)
-        env = dict(os.environ, BMAD_RUNS_DIR=d, BMAD_MEM_AVAILABLE_MB="8200", BMAD_UNIT_PEAK_MB="3000")
+        # HOME/USERPROFILE point at the empty temp dir so other_active_runs() sees no
+        # session logs: otherwise live batch-build sessions on this machine change the
+        # cap reason to "other active run(s)" and the test fails on machine state.
+        env = dict(os.environ, BMAD_RUNS_DIR=d, BMAD_MEM_AVAILABLE_MB="8200", BMAD_UNIT_PEAK_MB="3000",
+                   HOME=d, USERPROFILE=d)
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "plan-waves.py"), path, "--root", d],
                            capture_output=True, text=True, encoding="utf-8", env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -2659,6 +2663,19 @@ class Intake(unittest.TestCase):
                          r"INTAKE start \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
         pf = os.path.join(self.runs, "prompt.txt")
         self.assertEqual(self.run_intake("new", self.runs, "demo", "--prompt-file", pf).returncode, 1)
+
+    def test_angle_brackets_inside_code_spans_are_not_placeholders(self):
+        # qa-scan-gate-errors: an AC quoting `http://127.0.0.1:<port>/` was dropped as a placeholder,
+        # so check said "U2 names AC-6, which is not under Acceptance criteria".
+        path = self.new()
+        self.fill(path, **{"Acceptance criteria": FILLED_INTAKE["Acceptance criteria"]
+                           + "\n- AC-3: Given DAST When boot-ready is not `http://127.0.0.1:<port>/` Then a reason shows"},
+                  Units=FILLED_INTAKE["Units"].replace("ACs: AC-1, AC-2", "ACs: AC-1, AC-2, AC-3"))
+        r = self.run_intake("check", path)
+        self.assertEqual(r.stdout.strip(), "READY", r.stdout)
+        # A bare placeholder outside backticks still counts as unfilled.
+        self.fill(path, **{"Acceptance criteria": "- AC-1: <testable, one behaviour>"})
+        self.assertEqual(self.run_intake("check", path).returncode, 2)
 
     def test_readiness_stops_a_vague_intake_with_missing_lines(self):
         path = self.new()

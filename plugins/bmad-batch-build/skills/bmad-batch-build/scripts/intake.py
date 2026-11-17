@@ -196,10 +196,15 @@ def replace_body(text, name, new_body):
     return "\n".join(lines[:a] + new_body.rstrip("\n").split("\n") + [""] + lines[b:])
 
 
+def has_placeholder(value):
+    """True when a <...> placeholder is left outside `code` spans; `http://127.0.0.1:<port>/` is real text."""
+    return bool(PLACEHOLDER.search(re.sub(r"`[^`\n]*`", "", value or "")))
+
+
 def empty(value):
     """True for text that is blank or still holds a <...> placeholder."""
     v = (value or "").strip()
-    return not v or bool(PLACEHOLDER.search(v)) or not re.search(r"\w", v)
+    return not v or has_placeholder(v) or not re.search(r"\w", v)
 
 
 def items_of(block):
@@ -371,7 +376,7 @@ def refuse_frozen(intake, what):
 
 def add_to_section(text, name, line):
     """Appends a line to a section, dropping the template's placeholder lines."""
-    kept = [ln for ln in body(text, name).split("\n") if ln.strip() and not (PLACEHOLDER.search(ln) and
+    kept = [ln for ln in body(text, name).split("\n") if ln.strip() and not (has_placeholder(ln) and
                                                                                ln.lstrip("- ").startswith("<"))]
     return replace_body(text, name, "\n".join(kept + [line]))
 
