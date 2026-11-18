@@ -385,10 +385,8 @@ Once every check is green and Final is `yes`:
 4. Keep the description under 4000 characters.
 5. Add a `Work items:` line that lists the stories and the merged units'
    tasks as `#id`, so a reviewer can click through.
-6. End the PR description with:
-   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`
-7. Every commit you make ends with:
-   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
+6. No AI attribution: no "Generated with" line, session link or Co-Authored-By trailer
+   in the PR description or in any commit you make.
 
 ## 4b. Propose checks for repeated mistakes
 

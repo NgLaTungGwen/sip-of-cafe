@@ -77,7 +77,7 @@ Self-test roots: <roots>
    --force "<wt>"; git -C "<src>" branch -D enhance/<today>-<slug>) and reply
    ENHANCE: failed.
    On success, commit, then remove the worktree (the branch keeps the draft):
-     git -C "<wt>" add -A && git -C "<wt>" commit -q -m "fix(bmad-batch-build): <what changed>" -m "<the problem, its evidence (runs and count), and why this prevents it>" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+     git -C "<wt>" add -A && git -C "<wt>" commit -q -m "fix(bmad-batch-build): <what changed>" -m "<the problem, its evidence (runs and count), and why this prevents it>"
      git -C "<src>" worktree remove "<wt>"
 
 6. Append to <store>/enhance-log.md (create it with a "# Enhancement log"

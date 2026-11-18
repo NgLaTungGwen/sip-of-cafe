@@ -14,8 +14,6 @@ Placeholders come from the synthesis prompt, plus:
 - `<intake>`: `<runs>/<slug>-intake.md`, the frozen intake the synthesis
   prompt names. `python "<skill>/scripts/intake.py" unit "<intake>" <id>`
   prints a unit's view, its acceptance criteria in full.
-- `<footer>`: the line every commit ends with,
-  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
 You may write `<split json>` as well as `<state>`; nothing else outside
 `<iwt>`.
@@ -31,7 +29,7 @@ When only one unit is in the run, there is nothing to split: follow sections
 In `<iwt>`, on `<ibranch>`, with everything committed:
 
 ```bash
-cd <iwt> && python "<skill>/scripts/split-prs.py" cut "<split json>" --footer "<footer>"
+cd <iwt> && python "<skill>/scripts/split-prs.py" cut "<split json>"
 ```
 
 It gives every file `<ibranch>` changed to the unit that touched it, groups
@@ -115,8 +113,8 @@ description, under 4000 characters:
 6. `## Not included`, in the first PR only, when units were left out.
 7. `## Open review findings`, in the PR of the unit whose files they are,
    from section 3b.
-8. It ends with
-   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+8. No AI attribution: no "Generated with" line, session link or Co-Authored-By trailer
+   in the description or the commits.
 
 After a PR in a stack is opened, edit the PR below it to name it, when the
 PR tool allows. Record each PR's number and URL in `<state>`.
