@@ -659,6 +659,49 @@ class PrepareWorktree(unittest.TestCase):
         self.assertIn("cd " + wt + "/apps && bunx vitest run <files>", toml)
         self.tomllib_ok(toml)
 
+    def test_profile_commands_with_quotes_and_backslashes_stay_valid_toml(self):
+        # fix-flaky-login-token: a suite command with "$(cat '...')" went into a
+        # TOML basic string unescaped, and render_skill.py halted on the file.
+        suite = 'GOOGLE_CREDENTIALS="$(cat \'a\\b.json\')" npm run test:all'
+        prof = {"base": "main", "install": [], "checks": [],
+                "suite": {"dir": "api", "cmd": suite},
+                "targeted": {"dir": "api", "test": 'npx jest "<files>"', "typecheck": 'echo "\\ok"'}}
+        _, toml = self.pinned(with_api=True, profile=prof)
+        try:
+            import tomllib
+        except ImportError:
+            self.skipTest("tomllib needs Python 3.11")
+        doc = tomllib.loads(toml)["workflow"]
+        self.assertIn(suite, " ".join(doc["persistent_facts"]))
+        self.assertIn('npx jest "<files>"', doc["implementation_handoff"])
+        self.assertIn('echo "\\ok"', doc["implementation_handoff"])
+
+    def test_the_worktree_env_stays_out_of_git_status(self):
+        # fix-flaky-login-token: the main checkout had no .env, so the worktree's
+        # .env held only the Vitest caps; untracked, it failed check-unit's
+        # clean-tree check and forced the full suite in affected-tests.sh.
+        wt, _ = self.pinned(with_api=True)
+        self.assertTrue(os.path.isfile(os.path.join(wt, ".env")))
+        st = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True).stdout
+        self.assertEqual(st, "")
+
+    def test_remove_worktree_unlinks_directory_symlinks_without_cygpath(self):
+        # fix-flaky-login-token: on Linux, remove-worktree.sh called cygpath for
+        # every symlinked folder (npm workspace links) and failed.
+        wt, _ = self.pinned(with_api=True)
+        root = os.path.dirname(os.path.dirname(os.path.dirname(wt)))
+        os.makedirs(os.path.join(wt, "node_modules"))
+        try:
+            os.symlink(os.path.join(wt, "api"), os.path.join(wt, "node_modules", "api"), target_is_directory=True)
+        except OSError:
+            self.skipTest("no symlinks here")
+        bash = os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
+        r = subprocess.run([bash, os.path.join(SCRIPTS, "remove-worktree.sh"), root, "u1", "b1"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(wt))
+        self.assertTrue(os.path.isfile(os.path.join(root, "api", "package.json")))  # the link's target is kept
+
     def test_every_subagent_gets_the_current_scripts_and_the_run_rules(self):
         # sonar-zero-5: coders used another project's or an old version's
         # heavy.sh, called TaskStop, committed with their own trailer, parsed

@@ -137,8 +137,19 @@ class Profile(Layouts):
         self.assertEqual([c.split(" @ ")[0] for c in calls], ["bun install --frozen-lockfile"])
         os.remove(self.calls)
         r, calls = self.run_script("verify.sh", self.repo)
-        self.assertEqual([c.split(" @ ")[0] for c in calls], ["bun run typecheck"])
+        # No check runs the full suite, so verify adds it (fix-flaky-login-token:
+        # the api suite never ran in synthesis because "checks" left it out).
+        self.assertEqual(sorted(c.split(" @ ")[0] for c in calls), ["bun run typecheck", "npm run test"])
         self.assertIn("types.rc:0", r.stdout)
+        self.assertIn("suite.rc:0", r.stdout)
+
+    def test_verify_runs_the_suite_once_when_a_check_already_runs_it(self):
+        self.ioc_like()
+        self.profile("detect", self.repo, "--write")  # checks include app-test = the suite
+        r, calls = self.run_script("verify.sh", self.repo)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c.split(" @ ")[0] for c in calls].count("npm run test"), 1)
+        self.assertNotIn("suite.rc", r.stdout)
 
     def prepared(self, with_profile):
         # With a profile the base is the repository's own default branch
