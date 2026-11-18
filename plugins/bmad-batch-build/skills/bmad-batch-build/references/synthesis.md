@@ -368,10 +368,10 @@ The next wave branches off `<ibranch>` as you leave it, so commit everything.
 
 Once every check is green and Final is `yes`:
 
-1. If a `create-pr` skill is available, load it (Skill tool) and follow it
-   from `<iwt>`; its precondition checks must pass. Otherwise open the PR
-   with the PR tool from `<iwt>`: `az repos pr create` for `az`, `gh pr create`
-   for `gh`. Push first with `git push -u origin HEAD`. With `none`, push the
+1. Open the PR with the PR tool from `<iwt>`: `az repos pr create` for `az`,
+   `gh pr create` for `gh`. Don't use a `create-pr` skill: it stops for the
+   user to confirm its dry run, and nobody can answer a subagent, so the run
+   would wait forever (fix-flaky-login-token). Push first with `git push -u origin HEAD`. With `none`, push the
    branch when the repository has an origin remote (skip the push when it has
    none), don't try a CLI, and reply `PR: none (<branch> pushed; open the PR
    in the browser)` or `PR: none (local branch <branch>)`, with the

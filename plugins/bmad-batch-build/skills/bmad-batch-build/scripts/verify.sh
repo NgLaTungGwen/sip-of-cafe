@@ -185,11 +185,19 @@ finish() {
   exit 0
 }
 
-# The project profile's checks, all at once, when the project has a profile;
-# with none listed, its full suite. --apps and --infra don't apply.
+# The project profile's checks, all at once, when the project has a profile,
+# and its full suite as the check "suite" unless a check already runs it (one
+# in the suite's dir with the same command or a name ending in "test"): with
+# "checks" listed, the suite never ran, and synthesis is where it runs once.
+# --apps and --infra don't apply.
 if profile_get "$wt" base > /dev/null; then
   checks=$(profile_get "$wt" checks)
-  [ -n "$checks" ] || checks=$(profile_get "$wt" suite | awk -F'\t' '{a[$1]=$2} END {if (a["cmd"] != "") print "suite\t" a["dir"] "\t" a["cmd"]}')
+  suite=$(profile_get "$wt" suite | awk -F'\t' '{a[$1]=$2} END {if (a["cmd"] != "") print "suite\t" a["dir"] "\t" a["cmd"]}')
+  # ENVIRON, not -v: awk -v would turn a backslash in the command into an escape.
+  if [ -n "$suite" ] && ! printf '%s\n' "$checks" | SD=$(cut -f2 <<< "$suite") SC=$(cut -f3- <<< "$suite") \
+       awk -F'\t' '$2 == ENVIRON["SD"] && ($3 == ENVIRON["SC"] || $1 ~ /test$/) {f=1} END {exit !f}'; then
+    checks=$(printf '%s\n%s\n' "$checks" "$suite" | sed '/^$/d')
+  fi
   [ -n "$checks" ] || { echo "no checks: the project profile lists none"; exit 0; }
   rows=$(printf '%s\n' "$checks" | awk -F'\t' 'NF {print $1 "\t" $2 "\t" (($1 ~ /test$/ || $1 == "suite") ? "test" : "check")}')
   # The pipeline's ratchets, unless the profile already carries a capped check.

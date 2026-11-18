@@ -15,8 +15,9 @@ wt="$root/.claude/worktrees/$name"
 [ -d "$wt" ] || { echo "no worktree at $wt" >&2; exit 1; }
 
 # Git Bash reports junctions as symlinks; find does not descend into them.
+# Elsewhere (no cygpath) a symlink is a plain link, and rm removes only it.
 find "$wt" -path "$wt/.git" -prune -o -type l -print | while IFS= read -r link; do
-  if [ -d "$link" ]; then
+  if [ -d "$link" ] && command -v cygpath > /dev/null; then
     cmd //c rmdir "$(cygpath -w "$link")"
   else
     rm -f "$link"

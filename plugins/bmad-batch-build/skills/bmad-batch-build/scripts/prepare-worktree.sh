@@ -163,6 +163,10 @@ fi
 # conflict") when that is above the maximum.
 vt=$(( $(nproc 2>/dev/null || echo 8) / 4 )); [ "$vt" -lt 2 ] && vt=2
 printf '\nVITEST_MAX_FORKS=%s\nVITEST_MAX_THREADS=%s\nVITEST_MIN_FORKS=1\nVITEST_MIN_THREADS=1\n' "$vt" "$vt" >> "$wt/.env"
+# A project that doesn't ignore .env (the main checkout had none to copy) would
+# see it as untracked: the gate's clean-tree check fails and affected-tests.sh
+# runs the full suite for it.
+hide .env
 
 scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 heavy="$scripts/heavy.sh" bg="$scripts/bg.sh" app="$scripts/app-check.sh"
@@ -244,6 +248,12 @@ if s=$(profile_get "$root" targeted); then
   t_test=$(printf '%s\n' "$s" | awk -F'\t' '$1=="test"{print $2}')
   t_tc=$(printf '%s\n' "$s" | awk -F'\t' '$1=="typecheck"{print $2}')
 fi
+# These go into TOML basic strings below, where a bare " or \ breaks the file
+# (a suite of GOOGLE_CREDENTIALS="$(cat '...')" halted render_skill.py), so
+# they are escaped once here; nothing outside the TOML uses them.
+toml_esc() { local s=${1//\\/\\\\}; printf '%s' "${s//\"/\\\"}"; }
+suite_cmd=$(toml_esc "$suite_cmd") suite_dir=$(toml_esc "$suite_dir") checks=$(toml_esc "$checks")
+t_test=$(toml_esc "$t_test") t_tc=$(toml_esc "$t_tc")
 # The suite part of the testing fact, or what to do when there is no suite.
 # A unit runs only the tests its change affects (affected-tests.sh, from the
 # commit the worktree starts at); the full suite runs once, in synthesis,
