@@ -304,6 +304,13 @@ field counts as empty):
   and its ticket.
 - **Coupling map:** which units are independent, which must run in order, and
   why.
+- **Architecture (C4):** Mermaid C4 diagrams of what the run changes, each
+  in its own ` ```mermaid ` block, drawn from the code map. Give a
+  `C4Context` (the system, its users and the external systems it talks to)
+  and a `C4Container` (the apps, services and stores, with what this run
+  changes in each one's description). Keep labels short and leave out
+  double quotes inside them. The approval page draws these, plus a component
+  view of the units that it builds itself, so don't draw the units here.
 - **Verification scenarios:** `- SC-<n>: Given ... When ... Then ...` lines
   that exercise the acceptance criteria end to end. They are the holdout:
   synthesis runs them on the merged result, and workers never see them.
@@ -564,8 +571,9 @@ descriptions in Markdown instead.
 
 ### Step 4. The single approval
 
-Show the intake summary, the plan and the gate policy in one message, then
-ask once.
+The user approves on the plan page ("Asking for approval: the plan page"
+below), which shows everything listed here. The chat message and
+`AskUserQuestion` are the fallback when the page can't be used.
 
 **The intake summary:** the Goal, the Non-goals, the units table, the Mode
 line and the Open risks, plus the Assumptions the question round applied by
@@ -618,8 +626,9 @@ adjust and cancel. Building directly means:
 
 Approving it still approves the new tickets.
 
-Otherwise ask with `AskUserQuestion` whether to approve, adjust or cancel. In
-the same call, ask the **gate policy** once (skip it for a single unit, or
+Otherwise the choice is approve, adjust or cancel. With it, the **gate
+policy** is asked once (on the page with `--gate`; in the fallback, in the same
+`AskUserQuestion` call) (skip it for a single unit, or
 when every unit is in one lane): `If a unit nothing depends on fails its gate,
 what then?`, with **Re-dispatch once, then leave it out (Recommended)**, "A
 fresh worker builds it once more; if that fails too, its task stays open and
@@ -634,9 +643,53 @@ call holds no other question.
 again. Iterate until the user approves. The approval waits for a real answer
 ("How to ask"). **Cancel** ends the run: record it (section 8).
 
-#### Asking for approval
+#### Asking for approval: the plan page
 
-Follow "How to ask" above:
+The user reviews the plan as a web page with C4 diagrams. They can comment on
+any section, AC or unit, and they choose there. Build the page once the Mode
+line is set:
+
+```bash
+python "<skill>/scripts/plan-review.py" render "<runs>/<slug>-intake.md" --out "<runs>/<slug>-plan.html" --plan "<runs>/<slug>-plan.json" [--gate] [--note "<runs>/<slug>-plan-note.txt"]
+```
+
+`--gate` adds the gate-policy choice (leave it out for a single unit, or when
+every unit is in one lane). The plan's Advice puts **Build directly** first.
+Then serve it, as a Bash call with `run_in_background: true`:
+
+```bash
+python "<skill>/scripts/plan-review.py" serve "<runs>/<slug>-plan.html" --result "<runs>/<slug>-plan-review.json" --run "<runs>/<slug>.md" --open
+```
+
+It opens the browser and writes the page's URL to `<runs>/<slug>-plan.html.url`.
+Read that file, and send a short message: the URL, the story line, the unit
+count, the Mode line and the run facts (worktree, branch, base commit,
+whether anything is pushed or written to the tracker). Leave the full table
+and diagrams to the page. Send a `PushNotification` that the plan is waiting,
+then end your turn. The server's exit wakes you, and its output is the
+answer:
+
+- `DECISION approve`: the comments, if any, are small changes. Write each
+  into the intake (Assumptions, an AC's wording), run `check`, and go on to
+  the freeze. A comment that changes a unit, an AC, a dependency or an
+  interface makes it `adjust` instead.
+- `DECISION adjust`: apply every comment to the intake, then run `check`,
+  `to-plan`, `plan-waves.py` and `set-mode` again. Write one line per comment
+  into `<runs>/<slug>-plan-note.txt`, saying what you changed or why you
+  didn't. Render with `--note` and serve again.
+- `DECISION build-directly` and `DECISION cancel`: as below.
+- `GATE <option>`: write `Gate policy: <option>` into the run file.
+- `TIMEOUT` (4 hours with no answer): ask once with `AskUserQuestion` as
+  below. Without an answer, stop and record the run.
+
+When the user answers in the chat instead (they type "approve", or paste the
+`DECISION` lines the page copied when it couldn't reach the server), stop the
+server with `TaskStop` and use that answer. When the page can't be opened at
+all (a cloud session, or no browser), ask with `AskUserQuestion`.
+
+#### Asking for approval in the chat
+
+The fallback, when the page can't be used. Follow "How to ask" above:
 
 - **The message holds the plan**: the intake summary, the story line, the
   table, the Mode line, any Advice, Combined, map and "Project commands"

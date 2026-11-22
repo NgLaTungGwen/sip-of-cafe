@@ -120,6 +120,20 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.20.0:** the plan is approved on a web page with C4 diagrams and
+  comments, instead of a markdown table and a question.
+  - The intake has a required `## Architecture (C4)` section: Mermaid
+    `C4Context` and `C4Container` diagrams of what the run changes.
+  - `plan-review.py render` builds one page from the intake: the goal, ACs,
+    interfaces, units, mode and scenarios. It draws those diagrams plus a C4
+    component view of the units (a boundary per folder, an arrow per
+    dependency). Every section, AC and unit has a comment box, and drafts
+    are kept in the browser.
+  - `plan-review.py serve` serves the page on 127.0.0.1 behind a token. Send
+    writes `<slug>-plan-review.json` (decision, gate policy, comments) and
+    exits, which wakes the run. "Request changes" applies the comments and
+    shows the page again, with a note of what changed. `AskUserQuestion` is
+    the fallback when the page can't be opened.
 - **0.19.0:** `split-prs.py describe` writes the parts of each split PR's
   description that the split decides. Hand-written versions were most of
   review-workspace-pr-size's first-round findings.

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -2837,6 +2838,125 @@ class ReviewPack(unittest.TestCase):
         self.assertIn("RULES " + os.path.join(rules, "github.com__contoso__web-app.md"), printed)
 
 
+class PlanReview(unittest.TestCase):
+    """The approval plan as an HTML page with C4 diagrams and comment boxes,
+    and the local server that brings the user's comments and decision back."""
+
+    def setUp(self):
+        self.pr = load("plan_review", "plan-review.py")
+        self.dir = tempfile.mkdtemp()
+        self.intake = os.path.join(self.dir, "demo-intake.md")
+        with open(self.intake, "w", encoding="utf-8") as f:
+            f.write(INTAKE_MD.replace("- U1 Invoice total |", '- U1 Invoice total & "sum" <img src=x onerror=1 |')
+                    .replace("touches: api/src/invoice.ts |", "touches: api/src/invoice.ts, api/src/dto.ts, web/x.tsx |"))
+
+    def run_pr(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = self.pr.main(list(args))
+        return rc, out.getvalue()
+
+    def test_render_draws_the_c4_blocks_and_the_units_and_has_comment_boxes(self):
+        page = os.path.join(self.dir, "plan.html")
+        rc, out = self.run_pr("render", self.intake, "--out", page)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("(1 units, 1 ACs, 2 diagrams)", out)
+        html_ = open(page, encoding="utf-8").read()
+        self.assertIn('<pre class="mermaid">C4Container\ntitle Invoices', html_)
+        self.assertIn("Container_Boundary(b0, &quot;api/&quot;)", html_)  # 2 of 3 files are in api/
+        self.assertIn("3 files in api/, web/", html_)
+        self.assertNotIn("<img src=x", html_)  # intake text is escaped, in the table and in the diagram
+        self.assertIn("Invoice total &amp; &quot;sum&quot; &lt;img src=x onerror=1", html_)
+        for target in ("U1", "AC-1", "section:Goal", "section:Architecture (C4)", "general"):
+            self.assertIn(f'data-target="{target}"', html_)
+        self.assertIn('KEY = "plan-review:demo"', html_)  # a JS string, not HTML-escaped
+        self.assertEqual(self.pr.js_string("a</script>&"), '"a\\u003c/script\\u003e\\u0026"')
+        self.assertNotIn('name="gate"', html_)
+        self.assertNotIn('value="build-directly"', html_)
+        note = os.path.join(self.dir, "note.txt")
+        open(note, "w").write("U1 now owns `dto.ts`\n\n")
+        plan = os.path.join(self.dir, "plan.json")
+        json.dump({"advice": ["build directly"], "waves": [{"units": [1], "run": "lane"}],
+                   "unit_estimates": {"1": {"p50": 42}}}, open(plan, "w"))
+        self.assertEqual(self.run_pr("render", self.intake, "--out", page, "--gate", "--note", note, "--plan", plan)[0], 0)
+        html_ = open(page, encoding="utf-8").read()
+        self.assertIn('name="gate" value="Re-dispatch once, then leave it out" checked', html_)
+        self.assertIn('value="build-directly" checked', html_)  # the advice puts it first
+        self.assertIn("What changed since your comments", html_)
+        self.assertIn("<code>dto.ts</code>", html_)
+        self.assertIn("≈42 min, wave 1 (lane)", html_)
+
+    def test_component_view_quotes_and_dependencies(self):
+        units = [{"id": "U1", "title": 'say "hi"', "size": "S", "risk": "low", "deps": [], "touches": ["a/x"]},
+                 {"id": "U2", "title": "t", "size": "M", "risk": "", "deps": [{"id": "U1", "reason": "r"}],
+                  "touches": ["b/y", "b/z", "a/w"]}]
+        v = self.pr.component_view("s", units)
+        self.assertIn('Component(u1, "U1 say \'hi\'", "S · low", "1 file in a/")', v)
+        self.assertIn('Component(u2, "U2 t", "M", "3 files in b/, a/")', v)
+        self.assertIn('Rel(u2, u1, "depends on")', v)
+
+    def serve(self, page, run=None, timeout="1"):
+        result = os.path.join(self.dir, "review.json")
+        box = {}
+
+        def go():
+            box["rc"], box["out"] = self.run_pr("serve", page, "--result", result, "--timeout-min", timeout,
+                                                *(["--run", run] if run else []))
+
+        t = threading.Thread(target=go)
+        t.start()
+        for _ in range(200):
+            if os.path.exists(page + ".url"):
+                break
+            t.join(0.05)
+        return t, box, result, open(page + ".url").read().strip()
+
+    def post(self, url, data, token):
+        import urllib.request, urllib.error
+        base = url.split("/?", 1)[0]
+        req = urllib.request.Request(base + "/submit", data=json.dumps(data).encode(), method="POST",
+                                     headers={"Content-Type": "application/json", **({"X-Plan-Token": token} if token else {})})
+        try:
+            return urllib.request.urlopen(req, timeout=5).status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_serve_takes_one_valid_review_with_the_token_and_exits(self):
+        import urllib.request
+        page = os.path.join(self.dir, "plan.html")
+        self.run_pr("render", self.intake, "--out", page, "--gate")
+        run = os.path.join(self.dir, "demo.md")
+        t, box, result, url = self.serve(page, run)
+        token = url.split("?t=", 1)[1]
+        got = urllib.request.urlopen(url, timeout=5).read().decode()
+        self.assertIn(f'var TOKEN = "{token}"', got)
+        self.assertNotIn(self.pr.TOKEN, got)
+        self.assertEqual(self.post(url, {"decision": "approve"}, None), 403)
+        self.assertEqual(self.post(url, {"decision": "approve"}, "wrong"), 403)
+        self.assertEqual(self.post(url, {"decision": "ship it"}, token), 400)
+        self.assertEqual(self.post(url, {"decision": "adjust", "gate": "whatever"}, token), 400)
+        self.assertFalse(os.path.exists(result))
+        review = {"decision": "adjust", "gate": "Ask me",
+                  "comments": [{"target": "U1", "text": "split it\nin two"}, {"target": "general", "text": "  "}]}
+        self.assertEqual(self.post(url, review, token), 200)
+        t.join(10)
+        self.assertEqual(box["rc"], 0, box.get("out"))
+        self.assertIn("DECISION adjust\nGATE Ask me\nCOMMENT U1: split it / in two", box["out"])
+        saved = json.load(open(result, encoding="utf-8"))
+        self.assertEqual(saved["comments"], [{"target": "U1", "text": "split it\nin two"}])  # blank ones dropped
+        self.assertRegex(open(run).read(), r"PLAN-REVIEW \S+Z adjust 1 comments")
+        rc, out = self.run_pr("show", result)
+        self.assertEqual(out.splitlines()[0], "DECISION adjust")
+
+    def test_serve_times_out_without_an_answer(self):
+        page = os.path.join(self.dir, "plan.html")
+        self.run_pr("render", self.intake, "--out", page)
+        t, box, result, url = self.serve(page, timeout="0.002")
+        t.join(10)
+        self.assertEqual((box["rc"], box["out"].strip().splitlines()[-1]), (4, "TIMEOUT"))
+        self.assertFalse(os.path.exists(result))
+
+
 FILLED_INTAKE = {
     "Goal": "Show live counts on the dashboard.",
     "Non-goals": "- No new charts.",
@@ -2849,6 +2969,9 @@ FILLED_INTAKE = {
              "- U2 Counts widget | size S | risk low | depends on: U1 (imports the counts type) | touches: "
              "web/src/Counts.tsx | ACs: AC-1, AC-2 | items: 2",
     "Coupling map": "U2 needs U1's type, so it runs after it.",
+    "Architecture (C4)": "```mermaid\nC4Container\ntitle Counts\nPerson(user, \"Visitor\")\n"
+                         "Container(api, \"api\", \"Node\", \"gets GET /api/counts\")\n"
+                         "Rel(user, api, \"reads counts\")\n```",
     "Verification scenarios": "- SC-1: Given HOLDOUT-SECRET-SCENARIO When it runs Then it passes",
 }
 
@@ -2897,6 +3020,16 @@ class Intake(unittest.TestCase):
                          r"INTAKE start \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
         pf = os.path.join(self.runs, "prompt.txt")
         self.assertEqual(self.run_intake("new", self.runs, "demo", "--prompt-file", pf).returncode, 1)
+
+    def test_the_architecture_needs_a_c4_diagram(self):
+        # The approval page draws it; a plain mermaid flowchart or prose is not enough.
+        path = self.new()
+        self.fill(path, **{"Architecture (C4)": "```mermaid\nflowchart LR\na-->b\n```"})
+        r = self.run_intake("check", path)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("MISSING: Architecture (C4) has no C4 diagram", r.stdout)
+        self.fill(path, **{"Architecture (C4)": "```mermaid\n%% comment\nC4Context\nPerson(a, \"A\")\n```"})
+        self.assertEqual(self.run_intake("check", path).stdout.strip(), "READY")
 
     def test_angle_brackets_inside_code_spans_are_not_placeholders(self):
         # qa-scan-gate-errors: an AC quoting `http://127.0.0.1:<port>/` was dropped as a placeholder,
@@ -3248,6 +3381,13 @@ Invoices return their total.
 
 ## Coupling map
 U1 alone.
+
+## Architecture (C4)
+```mermaid
+C4Container
+title Invoices
+Container(api, "api", "Node", "adds total to InvoiceDto")
+```
 
 ## Mode decision
 parallel: one unit
