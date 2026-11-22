@@ -2,8 +2,10 @@
 
 The ending of a `bmad-batch-build-split` run: one PR per unit instead of one
 PR for the run. The final synthesis reads this file in place of sections 4,
-5 and 5b of `synthesis.md`, after section 3b, once `<ibranch>` is merged,
-repaired, reviewed and fully verified. `<ibranch>` stays the single source of
+5 and 5b of `synthesis.md`, after sections 3b, 3c and 3d, once `<ibranch>` is
+merged, repaired, fully verified and given its scored review (3d, run with
+`--split "<split json>"`): every review fix is on `<ibranch>` before the cut,
+so no PR needs one pushed up its stack. `<ibranch>` stays the single source of
 truth: every PR branch is cut from it, and every code fix goes onto it first.
 
 Placeholders come from the synthesis prompt, plus:
@@ -112,8 +114,11 @@ description, under 4000 characters:
    line with the unit's task as `#id`.
 6. `## Not included`, in the first PR only, when units were left out.
 7. `## Open review findings`, in the PR of the unit whose files they are,
-   from section 3b.
-8. No AI attribution: no "Generated with" line, session link or Co-Authored-By trailer
+   from sections 3b and 3d.
+8. `## Review`: the PR's `SCORE U<id>` line from section 3d, and its
+   findings table (`python "<skill>/scripts/review-pack.py" table
+   "<runs>/<slug>-review.txt" --owners "<the 3d owners.json>" --unit <id>`).
+9. No AI attribution: no "Generated with" line, session link or Co-Authored-By trailer
    in the description or the commits.
 
 After a PR in a stack is opened, edit the PR below it to name it, when the
@@ -165,6 +170,7 @@ MERGED: <unit titles>
 REPAIRS: ...
 VERIFY: <the <ibranch> checks, then each PR branch's build and typecheck>
 REVIEW: ...
+SCORE: <SCORE all, then one SCORE U<id> per PR>
 RULES: ...
 CI: <per PR: green | red ... | pending ... | approval ... | none>
 NOTES: ...

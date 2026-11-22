@@ -100,7 +100,7 @@ Build the prompt from `<core>/references/synthesis.md` as usual. For the
 final synthesis (`<final>` = `yes`) only, add this line at the top of its
 prompt:
 
-`Split PRs: this run ends in one PR per unit. After section 3b, skip sections 4, 5 and 5b and follow <core>/references/split-prs.md instead (it runs section 4b too), with the split file <runs>/<slug>-split.json, which you may also write, and the intake <runs>/<slug>-intake.md, whose intake.py unit output gives each PR its acceptance criteria; reply in its format (S6).`
+`Split PRs: this run ends in one PR per unit. Run section 3d with --split <runs>/<slug>-split.json. After section 3d, skip sections 4, 5 and 5b and follow <core>/references/split-prs.md instead (it runs section 4b too), with the split file <runs>/<slug>-split.json, which you may also write, and the intake <runs>/<slug>-intake.md, whose intake.py unit output gives each PR its acceptance criteria; reply in its format (S6).`
 
 Wave syntheses (`<final>` = `no`) are unchanged.
 
@@ -110,8 +110,10 @@ section 7 of `<core>/SKILL.md` describes.
 
 ### Section 8: report
 
-In place of the one PR link, list every PR: unit, link, target, and the
-merge order of each stack. Then:
+In place of the one PR link, list every PR: unit, link, target, its `SCORE
+U<id>` and decision, and the merge order of each stack. The scored branch
+review covered every PR's code, so don't review each PR again (see "Reviews
+after the PR opens" in `<core>/SKILL.md`). Then:
 
 - **Stacked PRs** must be merged bottom-up. On GitHub, merging the lower PR
   and deleting its branch retargets the next one to the base by itself. On

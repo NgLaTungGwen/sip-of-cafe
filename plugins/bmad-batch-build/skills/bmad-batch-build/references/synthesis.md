@@ -51,7 +51,8 @@ Integration worktree: `<iwt>`. Work only inside it. Run every shell command as
 `cd <iwt> && ...`. Never touch `<root>` (the main checkout) or another
 worktree. The files outside it you may write are the state file `<state>`
 and, in a run with an intake, the scenario files `<runs>/scenarios/` and
-`<runs>/<slug>-scenarios.json` (section 3c).
+`<runs>/<slug>-scenarios.json` (section 3c), and, when Final is `yes`, the
+review findings `<runs>/<slug>-review.txt` (section 3d).
 
 New branch: `<new branch>`. Final: `<final>`. Skill scripts: `<skill>/scripts`.
 
@@ -359,6 +360,81 @@ intake (an empty `scenarios` list then):
 is the N assert-guard printed. `escapes` is the list kept in `<state>`, with
 the unit as `U<n>`.
 
+## 3d. Scored review of the whole branch
+
+Only when Final is `yes`, after 3c, and before any PR exists. This is the
+run's one code review on the review-pr scale. Run it here, on `<ibranch>`, so
+that a fix is made once, on one branch, before the cut. After the PRs open,
+nobody has to review each one again and push the fix up a stack.
+(review-workspace-pr-size reviewed its 23 PRs after they opened, in four
+rounds: $100 of its $318, and every fix had to be merged up the stack.)
+
+Review rounds: `<review rounds>`.
+
+1. **Rules.** `python "<skill>/scripts/review-pack.py" rules "<iwt>"`
+   prints `METHOD <path>` and `RULES <path>` (or `none`). With a method, the
+   reviewers follow that file. With rules, they also apply the project rules
+   in it and every file it points to. With neither, they use the checks of
+   section 3b plus `AGENTS.md` and `CLAUDE.md` in `<iwt>`.
+2. **Pack.** Pack the branch:
+
+   ```bash
+   python "<skill>/scripts/review-pack.py" pack "<iwt>" <the base sha> --out "$(git -C <iwt> rev-parse --absolute-git-dir)/bmad/review-1" [--split "<split json>"]
+   ```
+
+   Pass `--split` in a split run. It prints one `GROUP` line per group of at
+   most 1200 changed lines, with the units it holds.
+3. **Review.** Launch one reviewer per group, all in one message (`Agent`,
+   `subagent_type: general-purpose`, `model: opus`, `run_in_background:
+   true`), then wait for every one as your agent file says. Don't group the
+   groups under a lead reviewer: in review-workspace-pr-size, group reviewers
+   started one reviewer per PR, and both levels read every diff. The
+   prompt:
+
+   ```text
+   Review one part of a branch on the review-pr scale. Do not edit anything
+   and do not launch agents. Read <METHOD path> in full first (skip if none),
+   then the project rules <RULES path> and every file they point to (skip if
+   none). The run's goal and acceptance criteria are in
+   `python "<skill>/scripts/intake.py" unit "<intake>" <n>` for the units
+   named below. Your files: <group file>. It lists one diff file per changed
+   file. Read each one with the Read tool; never cat a whole patch.
+   Open a source file only where a diff needs its context. Every finding
+   needs a file and line you read and a concrete consequence.
+   Reply with one line per finding and nothing else:
+   <critical|major|minor|suggestion> <path>:<line> | <issue> | <one-line fix>
+   or `none`.
+   ```
+
+4. **Record.** Write every finding into `<runs>/<slug>-review.txt` with the
+   Write tool, one line each, as
+   `F<n> open <severity> <path>:<line> | <issue> | <fix>`. Drop duplicates.
+   A finding you disprove by reading the code becomes `rejected`, with the
+   reason added to its issue.
+5. **Fix.** Fix every critical, major and minor finding on `<ibranch>`, plus
+   each suggestion that takes one small change, as `fix(review): ...`
+   commits. Re-run what the fixes touch (section 3) and mark each fixed
+   finding `fixed`.
+6. **Re-review only the fixes.** For the next round, pack only what changed
+   since the head the reviewers saw: `pack "<iwt>" <that head> --out
+   .../review-<k>`. Send one reviewer per group, with the same prompt plus:
+   `These are the earlier findings: <the review.txt lines for these files>.
+   Check that each one marked fixed is really fixed, and that the fixes break
+   nothing. Report only problems in these diffs.` Don't review the whole
+   branch again. Skip the round when nothing was fixed.
+7. Stop after `<review rounds>` rounds. A finding still open goes into its
+   PR under `## Open review findings`.
+
+Then score the branch:
+
+```bash
+python "<skill>/scripts/review-pack.py" score "<runs>/<slug>-review.txt" --owners "<the first round's owners.json>" [--units <every unit id>]
+```
+
+Its `SCORE` lines go into `REVIEW:` and into the PR descriptions (section 4,
+or `split-prs.md` S3 in a split run). Keep the path of the first
+round's `owners.json` in `<state>`: it maps every file of the branch.
+
 **Final `no`:** when every check is green, skip sections 4 and 5. Update
 `<state>` with what is merged and verified, then reply with `RESULT:
 wave-green` in the reply format of section 6 (`PR: none`, `TICKETS: none`).
@@ -385,7 +461,12 @@ Once every check is green and Final is `yes`:
 4. Keep the description under 4000 characters.
 5. Add a `Work items:` line that lists the stories and the merged units'
    tasks as `#id`, so a reviewer can click through.
-6. No AI attribution: no "Generated with" line, session link or Co-Authored-By trailer
+6. A `## Review` section: the `SCORE all` line of section 3d, the
+   rounds run, and the findings table
+   (`review-pack.py table ... --unit <id>` for each unit, or the open and
+   fixed lines of `<runs>/<slug>-review.txt`), so the reviewer sees what was
+   already checked and fixed.
+7. No AI attribution: no "Generated with" line, session link or Co-Authored-By trailer
    in the PR description or in any commit you make.
 
 ## 4b. Propose checks for repeated mistakes
@@ -492,6 +573,7 @@ MERGED: <unit titles>
 REPAIRS: <one line per fix(merge) commit, or none>
 VERIFY: <each check and its pass or fail result>
 REVIEW: <rounds, findings fixed, findings left open; or none (no synthesis changes)>
+SCORE: <the SCORE lines of section 3d, joined with `; `; or none (Final no)>
 RULES: <each proposed check: the kind of mistake, how many times, the rule; or none>
 SCENARIOS: <pass>/<pass + fail> passed, <n> skipped (<the failing and skipped SC ids>); or none (no intake, or Final no)
 ASSERT EDITS: <N from assert-guard, each <file>:<line> justified in the PR; or 0>
