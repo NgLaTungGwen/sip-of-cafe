@@ -2914,9 +2914,11 @@ class PlanReview(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("(1 units, 1 ACs, 2 diagrams)", out)
         html_ = open(page, encoding="utf-8").read()
-        self.assertIn('<pre class="mermaid">C4Container\ntitle Invoices', html_)
-        self.assertIn("Container_Boundary(b0, &quot;api/&quot;)", html_)  # 2 of 3 files are in api/
+        self.assertIn("<figcaption>Invoices (C4Container)</figcaption>", html_)
+        self.assertIn("n_api[&quot;&lt;b&gt;api&lt;/b&gt;&lt;br/&gt;&lt;small&gt;[Container: Node]", html_)
+        self.assertIn('subgraph b0[&quot;api/&quot;]', html_)  # 2 of 3 files are in api/
         self.assertIn("3 files in api/, web/", html_)
+        self.assertIn('<summary>C4 source</summary><pre>C4Container', html_)
         self.assertNotIn("<img src=x", html_)  # intake text is escaped, in the table and in the diagram
         self.assertIn("Invoice total &amp; &quot;sum&quot; &lt;img src=x onerror=1", html_)
         for target in ("U1", "AC-1", "section:Goal", "section:Architecture (C4)", "general"):
@@ -2936,16 +2938,66 @@ class PlanReview(unittest.TestCase):
         self.assertIn('value="build-directly" checked', html_)  # the advice puts it first
         self.assertIn("What changed since your comments", html_)
         self.assertIn("<code>dto.ts</code>", html_)
-        self.assertIn("≈42 min, wave 1 (lane)", html_)
+        self.assertIn('<span class="pill">≈42 min, wave 1 (lane)</span>', html_)
 
     def test_component_view_quotes_and_dependencies(self):
         units = [{"id": "U1", "title": 'say "hi"', "size": "S", "risk": "low", "deps": [], "touches": ["a/x"]},
                  {"id": "U2", "title": "t", "size": "M", "risk": "", "deps": [{"id": "U1", "reason": "r"}],
                   "touches": ["b/y", "b/z", "a/w"]}]
         v = self.pr.component_view("s", units)
-        self.assertIn('Component(u1, "U1 say \'hi\'", "S · low", "1 file in a/")', v)
-        self.assertIn('Component(u2, "U2 t", "M", "3 files in b/, a/")', v)
-        self.assertIn('Rel(u2, u1, "depends on")', v)
+        self.assertIn('n_u1["<b>U1 say #quot;hi#quot;</b><br/><small>[Component: S · low]</small><br/>1 file in a/"]'
+                      ':::component', v)
+        self.assertIn('<b>U2 t</b><br/><small>[Component: M]</small><br/>3 files in b/, a/', v)
+        self.assertIn('n_u2 -->|"depends on"| n_u1', v)
+        self.assertIn("class b0 boundary", v)
+        self.assertTrue(v.startswith("flowchart TB"))
+        many = [{"id": f"U{i}", "title": "t", "size": "S", "risk": "low", "touches": ["a/x"],
+                 "deps": [{"id": "U1", "reason": ""}] if i > 1 else []} for i in range(1, 10)]
+        v = self.pr.component_view("s", many)
+        self.assertTrue(v.startswith("---\nconfig:\n  flowchart:\n    useMaxWidth: false\n---\nflowchart TB"))
+        self.assertIn("n_u9 --> n_u1", v)  # no label clutter on a big view
+
+    def test_c4_blocks_become_flowcharts_with_c4_shapes(self):
+        # dast-gate-fixes: mermaid's C4 renderer drew edge labels over the boxes.
+        src = """C4Container
+  title Shop, "v2"
+  %% a comment
+  Person(u, "Buyer", "Buys, sometimes")
+  System_Boundary(s, "Shop") {
+    Container(web, "web", "React", "Shows <cart> | totals")
+    ContainerDb(db, "Postgres", "SQL", "Orders", $tags="x")
+  }
+  System_Ext(pay, "Payments")
+  Rel(u, web, "Uses", "HTTPS")
+  Rel_Back(db, web, "Reads")
+  BiRel(web, pay, "Charges")
+  UpdateLayoutConfig($c4ShapeInRow="3")
+"""
+        flow, title = self.pr.c4_to_flowchart(src)
+        self.assertEqual(title, 'Shop, "v2"')
+        self.assertTrue(flow.startswith("flowchart TB\n"))
+        self.assertIn('n_u(["<b>Buyer</b><br/><small>[Person]</small><br/>Buys, sometimes"]):::person', flow)
+        self.assertIn('subgraph n_s["Shop"]', flow)
+        self.assertIn('Shows #lt;cart#gt; #124; totals"]:::container', flow)
+        self.assertIn('n_db[("<b>Postgres</b><br/><small>[Container: SQL]</small><br/>Orders")]:::container', flow)
+        self.assertIn('n_pay["<b>Payments</b><br/><small>[External]</small>"]:::ext', flow)
+        self.assertIn('n_u -->|"Uses #91;HTTPS#93;"| n_web', flow)
+        self.assertIn('n_web -->|"Reads"| n_db', flow)  # Rel_Back points the other way
+        self.assertIn('n_web <-->|"Charges"| n_pay', flow)
+        self.assertIn("class n_s boundary", flow)
+        self.assertEqual(flow.count("subgraph"), len(re.findall(r"^\s+end$", flow, re.M)))
+        self.assertIsNone(self.pr.c4_to_flowchart("C4Context\ntitle empty\n"))
+        self.assertIsNone(self.pr.c4_to_flowchart("flowchart LR\na-->b"))
+
+    def test_unit_fields_become_labeled_rows(self):
+        block = ("- U1 t | size S\n  kind bug\n  --apps\n  Now: it breaks\n    on two lines\n"
+                 "  Unchanged behaviour:\n  - a stays\n  - b stays\n  Source: \"quote\"\n  branch x/y\n  ticket new Task")
+        chips, fields = self.pr.unit_fields(block)
+        self.assertEqual(chips, [("kind", "bug"), ("flag", "--apps"), ("branch", "x/y"), ("ticket", "new Task")])
+        self.assertEqual(fields, [("Now", ["it breaks on two lines"]), ("Unchanged behaviour", ["a stays", "b stays"]),
+                                  ("Source", ['"quote"'])])
+        self.assertIn("<li>x</li><li>y</li><li>z</li>", self.pr.field_html("Unchanged behaviour", ["x; y; z"]))
+        self.assertTrue(self.pr.field_html("Source", ["q"]).startswith('<details class="f">'))
 
     def serve(self, page, run=None, timeout="1"):
         result = os.path.join(self.dir, "review.json")
@@ -2983,6 +3035,9 @@ class PlanReview(unittest.TestCase):
         got = urllib.request.urlopen(url, timeout=5).read().decode()
         self.assertIn(f'var TOKEN = "{token}"', got)
         self.assertNotIn(self.pr.TOKEN, got)
+        with open(page, "a", encoding="utf-8") as f:
+            f.write("<!-- rendered again -->")
+        self.assertIn("rendered again", urllib.request.urlopen(url, timeout=5).read().decode())  # no restart
         self.assertEqual(self.post(url, {"decision": "approve"}, None), 403)
         self.assertEqual(self.post(url, {"decision": "approve"}, "wrong"), 403)
         self.assertEqual(self.post(url, {"decision": "ship it"}, token), 400)
