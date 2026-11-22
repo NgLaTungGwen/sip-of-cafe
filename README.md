@@ -120,6 +120,23 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.18.0:** the code is reviewed once, on the integration branch, before
+  any PR opens. In review-workspace-pr-size, reviews and fix rounds on the 23
+  PRs after they opened cost $100 of the run's $318.
+  - The final synthesis gives the whole branch a scored review on the
+    review-pr scale (synthesis section 3d), using the review-pr method and
+    the project's rules when they are installed. It fixes the findings on
+    the branch and re-reviews only the fixes, for `Review rounds` rounds
+    (2 by default).
+  - `review-pack.py pack` writes one diff per file and groups the files per
+    unit (or folder) up to 1200 changed lines, leaving out lock, generated
+    and binary files. There is one reviewer per group, never nested, and it
+    reads diffs from disk.
+  - `review-pack.py score` scores the branch and each PR from the findings
+    file. The score goes into the PR descriptions, the reply (`SCORE:`) and
+    the run report, so no PR needs reviewing again. "Reviews after the PR
+    opens" in SKILL.md keeps a later review to one agent per PR, on the
+    delta only.
 - **0.17.0:** an Intake stage before planning (PRs #15–#17).
   - Every run starts by writing `<runs>/<slug>-intake.md` (`intake.py`): the
     prompt word for word, the goal, non-goals, testable ACs, pinned shared

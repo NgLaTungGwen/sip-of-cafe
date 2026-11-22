@@ -978,6 +978,10 @@ The units left out are kept across waves too.
   `<runs>/<slug>-scenarios.json`.
 - `<ci ignore>` and `<ci timeout>`: from the profile's `ci` (see
   `references/synthesis.md`).
+- `<review rounds>`: the rounds of the scored branch review (synthesis
+  section 3d), 2 by default. When the user names a number ("PR review set at
+  2"), write `Review rounds: <n>` into the run file at the intake and pass
+  that number.
 
 Then:
 
@@ -1030,6 +1034,11 @@ Then end with a short summary:
   Task stays open and isn't linked.
 - the repairs synthesis made, and its `REVIEW:` line: what the fresh review
   of those repairs found, fixed and left open
+- **Review:** the `SCORE:` line (the scored branch review, synthesis section
+  3d), the decision (100 is Approve, anything lower is Request Changes), and
+  the findings table from `<runs>/<slug>-review.txt`, with the reason for each
+  finding left open. This is the review report for the PR (one per PR in a
+  split run); don't run a second review of the same code.
 - the verification results, and the `CI:` line: how the PR's pipelines
   ended on the server, and any fix synthesis pushed for them
 - **Checks to add:** each `RULES:` proposal from synthesis, with the past
@@ -1044,6 +1053,31 @@ Then end with a short summary:
   every skill issue. Say plainly when nothing went wrong.
 
 Don't remove the worktrees. Offer to clean them up after the PR merges.
+
+### Reviews after the PR opens
+
+The code was reviewed on the integration branch before the PR opened
+(synthesis section 3d). Don't review it again unless the user asks for it, or
+a fix changes the code after that review. Then keep the review small. In
+review-workspace-pr-size, four rounds of per-PR reviews cost $100 of the
+run's $318:
+
+- **Review one PR per agent,** each launched by you, the main session. Never
+  have a lead reviewer start one reviewer per PR: both levels read the same
+  diffs.
+- **Give each reviewer a pack, not a patch:**
+  `review-pack.py pack "<iwt>" <the PR's target> --out <dir>` on the PR
+  branch. The reviewer reads the group file, never a whole diff.
+- **Only re-review what changed.** From round 2, pack only
+  `<the reviewed head>..<the new head>`, and give the reviewer that PR's
+  earlier findings to check. Skip a PR that scored 100, and one whose
+  remaining findings are all in its description.
+- **Fix description findings yourself.** Fix a wrong AC claim, a stack note or
+  a size line in the description with the PR tool, without another
+  review.
+- **Work from a file, not from replies.** Keep each PR's findings and score
+  in `<runs>/<slug>-review.txt` (`pr:<unit>` locations for descriptions). Ask
+  each reviewer for findings lines only, so its reply stays small.
 
 ### Safety guard
 

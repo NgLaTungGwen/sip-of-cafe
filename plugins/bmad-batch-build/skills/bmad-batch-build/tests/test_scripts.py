@@ -2646,6 +2646,133 @@ class Scheduling(unittest.TestCase):
         self.assertEqual(got, [{"id": 1, "size": "M", "min": 45, "est": 104}])
 
 
+class ReviewPack(unittest.TestCase):
+    """The scored branch review: diffs cut per file and grouped for reviewers,
+    and the score per PR (review-workspace-pr-size: reviewers ran `cat` on
+    30 KB patches, and 23 PRs were reviewed again in four rounds)."""
+
+    def setUp(self):
+        self.pack = load("review_pack", "review-pack.py")
+
+    def run_pack(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = self.pack.main(list(args))
+        return rc, out.getvalue()
+
+    def commit(self, root, git, files, msg):
+        for path, text in files.items():
+            full = os.path.join(root, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb" if isinstance(text, bytes) else "w", **({} if isinstance(text, bytes) else
+                                                                           {"encoding": "utf-8", "newline": "\n"})) as f:
+                f.write(text)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", msg], check=True)
+        return subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+    def test_pack_groups_per_folder_and_leaves_out_noise(self):
+        root, git = git_repo({"api/a.ts": "a\n", "web/b.tsx": "b\n"})
+        base = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        self.commit(root, git, {"api/a.ts": "a\n1\n2\n", "api/c.ts": "c\n", "web/b.tsx": "b2\n",
+                                "docs/é note.md": "x\n", "package-lock.json": "{}\n", "web/bun.lock": "l\n",
+                                "_bmad-output/spec.md": "s\n", "web/logo.png": b"\x89PNG\x00\x01"}, "work")
+        out = tempfile.mkdtemp()
+        rc, printed = self.run_pack("pack", root, base, "--out", out, "--max-lines", "3")
+        self.assertEqual(rc, 0, printed)
+        self.assertIn("PACK 4 files, 6 lines, 2 groups, 4 excluded", printed)
+        self.assertIn("GROUP 1 api: 2 files, 3 lines", printed)
+        self.assertIn("GROUP 2 docs web: 2 files, 3 lines", printed)  # small folders share a group
+        index = open(os.path.join(out, "index.md"), encoding="utf-8").read()
+        for p in ("package-lock.json", "web/bun.lock", "_bmad-output/spec.md", "web/logo.png"):
+            self.assertIn(f"- `{p}`", index)
+        group = open(os.path.join(out, "group-2.md"), encoding="utf-8").read()
+        self.assertIn("`docs/é note.md` (1 changed, docs)", group)  # not quoted as \303\251
+        diff = re.search(r"`docs/é note.md`.*: (\S+\.diff)", group).group(1)
+        self.assertIn("+x", open(diff, encoding="utf-8").read())
+        self.assertEqual(json.load(open(os.path.join(out, "owners.json"), encoding="utf-8"))["api/a.ts"], None)
+        self.assertEqual(self.run_pack("pack", root, base, "--out", out, "--max-lines", "0")[0], 2)
+        rc, printed = self.run_pack("pack", root, base, "--out", out, "--max-lines", "100")
+        self.assertIn("1 groups", printed)
+        self.assertFalse(os.path.exists(os.path.join(out, "group-2.md")))  # the earlier pack's group is gone
+        self.assertEqual(self.run_pack("pack", root, "no-such-rev", "--out", out)[0], 2)
+
+    def test_groups_keep_owners_whole_and_cut_a_big_one_by_file(self):
+        g = self.pack.groups_of([("a", 5, 1), ("b", 5, 1), ("c", 1, 2), ("d", 2, 3), ("e", 2, 4)], 6)
+        self.assertEqual([[f[0] for f in x] for x in g], [["a"], ["b"], ["c", "d", "e"]])
+        g = self.pack.groups_of([("a", 2, 1), ("b", 2, 2), ("c", 2, 3)], 4)
+        self.assertEqual([[f[0] for f in x] for x in g], [["a", "b"], ["c"]])
+
+    def test_with_a_split_each_file_goes_to_the_last_unit_that_touched_it(self):
+        root, git = git_repo({"x.txt": "x\n"})
+        r0 = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        r1 = self.commit(root, git, {"x.txt": "x1\n", "one.txt": "1\n"}, "unit 1")
+        r2 = self.commit(root, git, {"x.txt": "x2\n"}, "unit 2")
+        self.commit(root, git, {"repair.txt": "r\n"}, "fix(merge): repair")
+        split = os.path.join(root, ".git", "split.json")
+        with open(split, "w") as f:
+            json.dump({"units": [{"id": 2, "from": r1, "to": r2, "depends_on": [1]},
+                                 {"id": 1, "from": r0, "to": r1, "depends_on": []}]}, f)
+        out = tempfile.mkdtemp()
+        rc, printed = self.run_pack("pack", root, r0, "--out", out, "--split", split)
+        self.assertEqual(rc, 0, printed)
+        self.assertEqual(json.load(open(os.path.join(out, "owners.json"))),
+                         {"one.txt": 1, "x.txt": 2, "repair.txt": None})
+        self.assertIn("GROUP 1 U1 U2 synthesis: 3 files", printed)
+
+    def test_score_uses_the_review_pr_scale_per_unit(self):
+        d = tempfile.mkdtemp()
+        f = os.path.join(d, "r.txt")
+        lines = ["# r1", "F1 open critical api/a.ts:3 | lost error | rethrow", "F2 open major api/a.ts:9-12 | x | y",
+                 "F3 fixed major web/b.tsx:1 | x | y", "F4 rejected critical web/b.tsx:2 | no | -",
+                 "F5 open minor pr:2 | AC claim | mark part", "F6 open minor run | story | close it",
+                 "F7 open major other.ts:1 | unowned | fix"]
+        lines += [f"S{i} open suggestion web/b.tsx:{i} | s | s" for i in range(7)]
+        lines += ["F8 fixed minor docs/é note.md:2 | a path with a space | keep it whole"]
+        open(f, "w").write("\n".join(lines) + "\n")
+        owners = os.path.join(d, "o.json")
+        json.dump({"api/a.ts": 1, "web/b.tsx": 2, "other.ts": None, "docs/é note.md": 2}, open(owners, "w"))
+        rc, printed = self.run_pack("score", f, "--owners", owners, "--units", "1,U2,5")
+        self.assertEqual(rc, 0, printed)
+        self.assertIn("SCORE all 33 (open: 1 critical, 2 major, 2 minor, 7 suggestion; fixed 2)", printed)
+        self.assertIn("SCORE U1 58 (open: 1 critical, 1 major; fixed 0)", printed)
+        self.assertIn("SCORE U2 91 (open: 1 minor, 7 suggestion; fixed 2)", printed)  # suggestions capped at -5
+        self.assertIn("SCORE U5 100 (open: none; fixed 0)", printed)
+        rc, printed = self.run_pack("table", f, "--owners", owners, "--unit", "U5")
+        self.assertEqual(printed.strip(), "none")
+        rc, printed = self.run_pack("table", f, "--owners", owners, "--unit", "2")
+        self.assertIn("| F8 | minor | `docs/é note.md:2` | a path with a space | keep it whole | fixed |", printed)
+        self.assertNotIn("F4", printed)  # rejected
+        open(f, "a").write("F9 maybe major a.ts:1 | x | y\n")
+        self.assertEqual(self.run_pack("score", f, "--owners", owners)[0], 2)
+
+    def test_rules_finds_the_newest_method_and_the_project_rules(self):
+        cases = {"https://org@dev.azure.com/Contoso/My%20Proj/_git/web": "dev.azure.com__contoso__my%20proj__web",
+                 "git@ssh.dev.azure.com:v3/contoso/proj/web": "dev.azure.com__contoso__proj__web",
+                 "https://contoso.visualstudio.com/proj/_git/web": "dev.azure.com__contoso__proj__web",
+                 "git@github.com:Contoso/web-app.git": "github.com__contoso__web-app",
+                 "https://github.com/contoso/web-app": "github.com__contoso__web-app"}
+        for url, want in cases.items():
+            self.assertEqual(self.pack.repo_id(url), want, url)
+        home = tempfile.mkdtemp()
+        for v in ("0.9.1", "0.10.0"):
+            p = os.path.join(home, ".claude", "plugins", "cache", "xt", "xt-dev-tools", v, "skills", "review-pr",
+                             "references")
+            os.makedirs(p)
+            open(os.path.join(p, "review-method.md"), "w").write(v)
+        rules = os.path.join(home, ".xt-skills", "review-pr", "projects")
+        os.makedirs(rules)
+        open(os.path.join(rules, "github.com__contoso__web-app.md"), "w").write("r")
+        root, git = git_repo({"a": "a\n"})
+        with mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
+            _, printed = self.run_pack("rules", root)
+            self.assertIn("RULES none", printed)  # no origin remote
+            subprocess.run(git + ["remote", "add", "origin", "git@github.com:contoso/web-app.git"], check=True)
+            _, printed = self.run_pack("rules", root)
+        self.assertIn(os.path.join("0.10.0", "skills", "review-pr", "references", "review-method.md"), printed)
+        self.assertIn("RULES " + os.path.join(rules, "github.com__contoso__web-app.md"), printed)
+
+
 FILLED_INTAKE = {
     "Goal": "Show live counts on the dashboard.",
     "Non-goals": "- No new charts.",
