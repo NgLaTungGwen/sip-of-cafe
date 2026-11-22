@@ -95,6 +95,20 @@ Push every PR branch, in stack order: `git push -u origin <pr branch>` (from
 `PRS: none (branches pushed; open the PRs in the browser)`, with each
 description written to `<state>`.
 
+First write the parts of every description that the split decides:
+
+```bash
+python "<skill>/scripts/split-prs.py" describe "<split json>" --intake "<intake>" --out "<runs>/pr-descriptions" --review "<runs>/<slug>-review.txt" --owners "<the 3d owners.json>" --reviewed-at <the head 3d reviewed>
+```
+
+It writes `<runs>/pr-descriptions/pr<id>.md` per unit: the ACs, each marked
+`here` or `part here; rest in U<x>`; the stack and its merge order; the size,
+with the budget note when it is over; and the unit's review score and
+findings. Use these sections exactly as written. Don't write your own
+version: in review-workspace-pr-size, most first-round findings were AC claims,
+stack notes and sizes written by hand. Without an intake, write the ACs from
+the unit's spec.
+
 Open the PRs in stack order with the PR tool, each from its branch into its
 target (`az repos pr create --source-branch <pr branch> --target-branch
 <target> ...`, `gh pr create --head <pr branch> --base <target> ...`). Don't
@@ -103,22 +117,17 @@ description, under 4000 characters:
 
 1. The unit's title as the PR title, in the repository's commit convention.
 2. **What changed:** the unit's behaviour, in a few bullets.
-3. **Acceptance criteria:** the unit's ACs, one bullet each (`AC-<n>: ...`),
-   from the `## Acceptance criteria` part of `intake.py unit "<intake>" <id>`,
-   each marked met or not by the verify and the scenario results. Without an
-   intake, the criteria from the unit's spec.
-4. **Stack:** "1 of 1" for a PR into `<base>` with nothing above it;
-   otherwise "Part <k> of <m>: merge after <the PR it targets>", and the
-   whole stack in merge order with links once known.
+3. The file `describe` wrote, with each AC marked here as met or not by the
+   verify and the scenario results.
+4. Once every PR is open, run `describe` again with
+   `--pr-ids <unit>=<pr id>,...` and update each description so its stack
+   and AC references name the PR numbers.
 5. A `Story:` line naming the unit's story as `#id`, and a `Work items:`
    line with the unit's task as `#id`.
 6. `## Not included`, in the first PR only, when units were left out.
 7. `## Open review findings`, in the PR of the unit whose files they are,
-   from sections 3b and 3d.
-8. `## Review`: the PR's `SCORE U<id>` line from section 3d, and its
-   findings table (`python "<skill>/scripts/review-pack.py" table
-   "<runs>/<slug>-review.txt" --owners "<the 3d owners.json>" --unit <id>`).
-9. No AI attribution: no "Generated with" line, session link or Co-Authored-By trailer
+   from sections 3b and 3d (the `## Review` table holds the 3d ones).
+8. No AI attribution: no "Generated with" line, session link or Co-Authored-By trailer
    in the description or the commits.
 
 After a PR in a stack is opened, edit the PR below it to name it, when the

@@ -19,7 +19,7 @@ The intake is <runs>/<slug>-intake.md, next to the run file <runs>/<slug>.md
 order, are what the subcommands parse:
 
     Source prompt, Goal, Non-goals, Acceptance criteria, Shared interfaces,
-    Units, Coupling map, Mode decision, Verification scenarios,
+    Units, Coupling map, Architecture (C4), Mode decision, Verification scenarios,
     Assumptions and defaults applied, Open risks, Changes after approval
 
 A unit is one line, with optional indented lines under it:
@@ -29,6 +29,9 @@ A unit is one line, with optional indented lines under it:
 Sizes S/M/L/XL, risk low/med/high. `depends on:` is `-` or unit ids, each with
 an optional `(reason)`. A field that still holds a `<...>` placeholder counts
 as empty, so the template `new` writes is NOT READY until it is filled.
+Architecture (C4) needs at least one ```mermaid block that starts with a C4
+diagram type (C4Context, C4Container, C4Component, C4Dynamic, C4Deployment):
+plan-review.py draws it on the approval page.
 
 Exit codes: check 0 READY / 2 NOT READY (freeze and to-plan refuse a NOT READY
 intake with 2 as well); verify 0 FROZEN ok / 1 FROZEN changed / 3 NOT FROZEN;
@@ -60,12 +63,13 @@ import sys
 import time
 
 HEADINGS = ("Source prompt", "Goal", "Non-goals", "Acceptance criteria", "Shared interfaces", "Units",
-            "Coupling map", "Mode decision", "Verification scenarios", "Assumptions and defaults applied",
+            "Coupling map", "Architecture (C4)", "Mode decision", "Verification scenarios", "Assumptions and defaults applied",
             "Open risks", "Changes after approval")
 CHANGES = "## Changes after approval"
 SIZES = ("S", "M", "L", "XL")
 RISKS = ("low", "med", "high")
 PLACEHOLDER = re.compile(r"<[^<>\n]*>")
+C4_BLOCK = re.compile(r"```mermaid[ \t]*\n\s*(?:%%[^\n]*\n\s*)*(C4Context|C4Container|C4Component|C4Dynamic|C4Deployment)\b")
 LOCK_WAIT = 20.0   # seconds iface add waits for the lock
 LOCK_STALE = 30.0  # seconds after which a left-over lock file is broken
 
@@ -91,6 +95,9 @@ TEMPLATE = """# Intake: {slug}
 
 ## Coupling map
 <which units are independent, which must be sequential, and why>
+
+## Architecture (C4)
+<Mermaid C4 diagrams of what this run changes, each in its own mermaid code block: a C4Context (the system, its users and the external systems it talks to) and a C4Container (its apps, services and stores, saying in each description what this run changes there)>
 
 ## Mode decision
 <filled by intake.py set-mode from plan-waves' Mode line>
@@ -313,6 +320,9 @@ def missing(text):
                 gaps.append(f"{uid} depends on {d['id']}, which is not a unit")
             elif d["id"] == uid:
                 gaps.append(f"{uid} depends on itself")
+    if not C4_BLOCK.search(body(text, "Architecture (C4)")):
+        gaps.append("Architecture (C4) has no C4 diagram (a ```mermaid block that starts with C4Context or "
+                    "C4Container)")
     for entry in items_of(body(text, "Shared interfaces")):
         line = entry[0][2:].strip()
         if line.lower() in ("none", "-"):

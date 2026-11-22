@@ -120,6 +120,29 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.20.0:** the plan is approved on a web page with C4 diagrams and
+  comments, instead of a markdown table and a question.
+  - The intake has a required `## Architecture (C4)` section: Mermaid
+    `C4Context` and `C4Container` diagrams of what the run changes.
+  - `plan-review.py render` builds one page from the intake: the goal, ACs,
+    interfaces, units, mode and scenarios. It draws those diagrams plus a C4
+    component view of the units (a boundary per folder, an arrow per
+    dependency). Every section, AC and unit has a comment box, and drafts
+    are kept in the browser.
+  - `plan-review.py serve` serves the page on 127.0.0.1 behind a token. Send
+    writes `<slug>-plan-review.json` (decision, gate policy, comments) and
+    exits, which wakes the run. "Request changes" applies the comments and
+    shows the page again, with a note of what changed. `AskUserQuestion` is
+    the fallback when the page can't be opened.
+- **0.19.0:** `split-prs.py describe` writes the parts of each split PR's
+  description that the split decides. Hand-written versions were most of
+  review-workspace-pr-size's first-round findings.
+  - It marks every AC as `here` or `part here; rest in U<x> (!<pr>)`, and
+    gives the PR's place in its stack, the merge order, and its changed
+    lines with a note when they're over the budget.
+  - It adds the PR's score and findings from the branch review.
+  - `cut` saves each unit's files in the split file, so a finding in a file
+    only synthesis touched goes to the right PR.
 - **0.18.0:** the code is reviewed once, on the integration branch, before
   any PR opens. In review-workspace-pr-size, reviews and fix rounds on the 23
   PRs after they opened cost $100 of the run's $318.

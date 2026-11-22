@@ -111,9 +111,10 @@ section 7 of `<core>/SKILL.md` describes.
 ### Section 8: report
 
 In place of the one PR link, list every PR: unit, link, target, its `SCORE
-U<id>` and decision, and the merge order of each stack. The scored branch
-review covered every PR's code, so don't review each PR again (see "Reviews
-after the PR opens" in `<core>/SKILL.md`). Then:
+U<id>` and decision, and the merge order of each stack. The review report
+per PR is its `## Review` section: the scored branch review covered every PR's
+code, so don't review each PR again (see "Reviews after the PR opens" in
+`<core>/SKILL.md`). Then:
 
 - **Stacked PRs** must be merged bottom-up. On GitHub, merging the lower PR
   and deleting its branch retargets the next one to the base by itself. On
