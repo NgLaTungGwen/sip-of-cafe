@@ -432,7 +432,7 @@ python "<skill>/scripts/review-pack.py" score "<runs>/<slug>-review.txt" --owner
 ```
 
 Its `SCORE` lines go into `REVIEW:` and into the PR descriptions (section 4,
-or `split-prs.md` S3 in a split run). Keep the path of the first
+or `split-prs.py describe` in a split run). Keep the path of the first
 round's `owners.json` in `<state>`: it maps every file of the branch.
 
 **Final `no`:** when every check is green, skip sections 4 and 5. Update

@@ -2377,6 +2377,70 @@ class SplitPrs(unittest.TestCase):
         rc, _ = self.cut(path, "--assign", "gen.txt=2")
         self.assertEqual(rc, 2)
 
+    def describe(self, path, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = self.split.main(["describe", path, *args])
+        return rc, out.getvalue()
+
+    def test_describe_writes_the_ac_split_stack_size_and_review(self):
+        # review-workspace-pr-size: most first-round findings on its 23 PRs were
+        # an AC claimed as met where only part of it was, the stack and the size.
+        root, git, path = self.run_lane()
+        self.assertEqual(self.cut(path, "--assign", "gen.txt=2")[0], 0)
+        self.assertEqual({u["id"]: u["files"] for u in json.load(open(path))["units"]},
+                         {1: ["a.txt", "u1.txt"], 2: ["gen.txt", "u2.txt"], 3: ["u1.txt", "u3.txt"]})
+        d = tempfile.mkdtemp()
+        intake = os.path.join(d, "x-intake.md")
+        with open(intake, "w", encoding="utf-8") as f:
+            f.write("# Intake: x\n\n## Goal\ng\n\n## Acceptance criteria\n- AC-1: Given a When b Then c\n"
+                    "- AC-2: Given two\n- AC-3: Given three\n\n## Units\n"
+                    "- U1 one | size S | risk low | depends on: - | touches: u1.txt | ACs: AC-1\n"
+                    "- U2 two | size S | risk low | depends on: - | touches: u2.txt | ACs: AC-2\n"
+                    "- U3 three | size S | risk low | depends on: U1 | touches: u3.txt | ACs: AC-1, AC-3\n")
+        review = os.path.join(d, "x-review.txt")
+        with open(review, "w", encoding="utf-8") as f:
+            f.write("# round 1\nF1 open major gen.txt:1 | gen is wrong | regenerate\n"
+                    "F2 fixed minor u3.txt:1 | off by one | +1\nF3 open suggestion pr:1 | vague title | name it\n"
+                    "F4 rejected major u2.txt:1 | not a bug | -\n")
+        owners = os.path.join(d, "owners.json")
+        with open(owners, "w") as f:
+            json.dump({"u2.txt": 2}, f)  # gen.txt has no owner before the cut; the cut's files give it unit 2
+        out = os.path.join(d, "desc")
+        rc, printed = self.describe(path, "--intake", intake, "--out", out, "--budget", "2", "--review", review,
+                                    "--owners", owners, "--reviewed-at", "abcdef1234")
+        self.assertEqual(rc, 0, printed)
+        self.assertIn(f"DESCRIBE U3 {os.path.join(out, 'pr3.md')}", printed)
+        pr1, pr2, pr3 = (open(os.path.join(out, f"pr{i}.md"), encoding="utf-8").read() for i in (1, 2, 3))
+        self.assertIn("- AC-1 (part here; rest in U3 (`feat/x-pr3`)): Given a When b Then c", pr1)
+        self.assertIn("- AC-3 (here): Given three", pr3)
+        self.assertIn("Part 2 of 2: merge after U1 (`feat/x-pr1`). Merge order: U1 (`feat/x-pr1`) -> "
+                      "U3 (`feat/x-pr3`).", pr3)
+        self.assertIn("1 of 1: into `main`, nothing stacked on it.", pr2)
+        self.assertIn("3 changed lines in 2 files", pr3)  # against the PR below it, not the base
+        self.assertIn("Over the 2-line budget", pr3)
+        self.assertNotIn("Over the", pr2)  # 2 lines is not over 2
+        self.assertIn("score 88/100 (open: 1 major; fixed 0)", pr2)
+        self.assertIn("| F1 | major | `gen.txt:1` | gen is wrong | regenerate | open |", pr2)
+        self.assertNotIn("F4", pr2)  # a rejected finding is not shown
+        self.assertIn("score 100/100 (open: none; fixed 1)", pr3)
+        self.assertIn("score 99/100", pr1)
+        self.assertIn("at `abcdef12`", pr1)
+        rc, _ = self.describe(path, "--intake", intake, "--out", out, "--pr-ids", "1=930,U3=!934")
+        self.assertEqual(rc, 0)
+        pr3 = open(os.path.join(out, "pr3.md"), encoding="utf-8").read()
+        self.assertIn("Merge order: U1 (!930) -> U3 (!934).", pr3)
+        self.assertNotIn("## Review", pr3)
+        self.assertEqual(self.describe(path, "--intake", intake, "--out", out, "--pr-ids", "x=1")[0], 2)
+        self.assertEqual(self.describe(path, "--intake", intake, "--out", out, "--review", review)[0], 2)
+
+    def test_describe_refuses_a_split_that_was_not_cut(self):
+        root, git, path = self.run_lane()
+        intake = os.path.join(tempfile.mkdtemp(), "i.md")
+        with open(intake, "w") as f:
+            f.write("## Units\n")
+        self.assertEqual(self.describe(path, "--intake", intake, "--out", tempfile.mkdtemp())[0], 2)
+
     def test_stacks_from_the_plan(self):
         plan = os.path.join(tempfile.mkdtemp(), "plan.json")
         with open(plan, "w") as f:

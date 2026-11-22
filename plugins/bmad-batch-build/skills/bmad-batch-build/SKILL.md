@@ -1073,8 +1073,8 @@ run's $318:
   earlier findings to check. Skip a PR that scored 100, and one whose
   remaining findings are all in its description.
 - **Fix description findings yourself.** Fix a wrong AC claim, a stack note or
-  a size line in the description with the PR tool, without another
-  review.
+  a size line in the description with the PR tool (or
+  `split-prs.py describe` again), without another review.
 - **Work from a file, not from replies.** Keep each PR's findings and score
   in `<runs>/<slug>-review.txt` (`pr:<unit>` locations for descriptions). Ask
   each reviewer for findings lines only, so its reply stays small.

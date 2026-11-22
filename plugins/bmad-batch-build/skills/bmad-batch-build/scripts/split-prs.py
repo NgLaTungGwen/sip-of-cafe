@@ -48,7 +48,8 @@ works; `--footer` adds a trailer line). Then it checks that nothing was lost:
 every stack's tip matches the integration branch on its stack's files and the
 base on every other file. The worktree goes back to the integration branch.
 
-The result is written into the split file (`pr_branch`, `target`, `stack`) and
+The result is written into the split file (`pr_branch`, `target`, `stack`,
+`files`) and
 printed:
 
     PR 1 feat/x-pr1 -> main (3 files)
@@ -56,14 +57,35 @@ printed:
     STACKS: 1 -> 3 | 4
     CHECK ok
 
+`describe` writes the parts of each PR's description that the split decides,
+after `cut`, so no reviewer finds them wrong (review-workspace-pr-size: most
+first-round findings on its 23 PRs were an AC claimed as met by a PR that held
+only part of it, a missing stack note, or an unexplained size):
+
+    python split-prs.py describe <split.json> --intake <intake> --out <dir>
+                       [--pr-ids 1=930,3=934] [--budget 400]
+                       [--review <findings> --owners <owners.json> --reviewed-at <sha>]
+
+For each PR it writes <dir>/pr<id>.md with `## Acceptance criteria` (every AC
+of the unit, marked `here` when no other unit lists it, else `part here; rest
+in U<x> (!<pr id>)`), `## Stack` (its place and the stack's merge order),
+`## Size` (changed lines without lock and generated files, and a note when
+over --budget) and, with --review, `## Review` (the unit's score from
+review-pack.py and its findings table; a file goes to the last unit of its
+stack whose `files` hold it, else to its owner in owners.json). Run it again with --pr-ids once the
+PRs are open, to fill in their numbers. Prints `DESCRIBE U<id> <file>`.
+
 Exit codes: 0 done, 2 UNOWNED files or a bad split file, 3 a PR branch already
 exists (--replace deletes a local one that was never pushed; a pushed one is
 never replaced, since that needs a force push), 5 REJECTED (a commit hook
 refused the message; git's output follows; run again with --replace and a
 --message the hook accepts), 6 CHECK failed.
 """
+import argparse
+import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -254,6 +276,7 @@ def cut(path, assign, message, footer, replace, dry):
                 return 5
             units[u]["target"] = target
             units[u]["stack"] = k
+            units[u]["files"] = sorted(files_of[u])
     finally:
         git(wt, "switch", "-q", ibranch, check=False)
 
@@ -283,10 +306,116 @@ def cut(path, assign, message, footer, replace, dry):
     return 0
 
 
+def sibling(name, file):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(os.path.dirname(os.path.abspath(__file__)), file))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def describe(argv):
+    p = argparse.ArgumentParser(prog="split-prs.py describe")
+    p.add_argument("split")
+    p.add_argument("--intake", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--pr-ids", default="")
+    p.add_argument("--budget", type=int, default=400)
+    p.add_argument("--review")
+    p.add_argument("--owners")
+    p.add_argument("--reviewed-at", default="")
+    a = p.parse_args(argv)
+    if a.review and not a.owners:
+        print("--review needs --owners (review-pack.py pack wrote it)", file=sys.stderr)
+        return 2
+    intake, pack = sibling("intake_mod", "intake.py"), sibling("review_pack", "review-pack.py")
+    with open(a.split, encoding="utf-8") as f:
+        split = json.load(f)
+    if not split.get("stacks"):
+        print("the split file has no stacks: run cut first", file=sys.stderr)
+        return 2
+    wt, base = split["worktree"], split["base"]
+    units = {int(u["id"]): u for u in split["units"]}
+    with open(a.intake, encoding="utf-8") as f:
+        text = f.read()
+    ac_text = intake.acs(text)
+    acs_of = {int(u["id"][1:]): u["acs"] for u in intake.units(text) if u["id"][1:].isdigit()}
+    pr_ids = {}
+    for pair in filter(None, (x.strip() for x in a.pr_ids.split(","))):
+        k, _, v = pair.partition("=")
+        k, v = k.strip().lstrip("Uu"), v.strip().lstrip("!#")
+        if not k.isdigit() or not v:
+            print(f"bad --pr-ids entry {pair!r}: use <unit>=<pr id>", file=sys.stderr)
+            return 2
+        pr_ids[int(k)] = v
+    in_prs = {u for s in split["stacks"] for u in s}
+
+    def ref(u):
+        return f"U{u} (!{pr_ids[u]})" if u in pr_ids else f"U{u} (`{units[u].get('pr_branch', '')}`)"
+
+    findings = pack.read_findings(a.review) if a.review else None
+    owners = pack.load_owners(a.owners) if a.review else {}
+    # The cut placed every file, the ones only synthesis touched included: the
+    # last unit of a stack that holds a file has its final content.
+    for st in split["stacks"]:
+        for u in st:
+            for path in units[u].get("files") or []:
+                owners[path] = u
+    os.makedirs(a.out, exist_ok=True)
+    for s in split["stacks"]:
+        for k, u in enumerate(s):
+            mine = acs_of.get(u, [])
+            out = ["## Acceptance criteria"]
+            for ac in mine:
+                first = ac_text.get(ac, f"- {ac}: (not in the intake)").split("\n", 1)[0]
+                text_of = re.sub(rf"^- {re.escape(ac)}\s*:\s*", "", first)
+                others = [v for v in sorted(in_prs) if v != u and ac in acs_of.get(v, [])]
+                where = "here" if not others else "part here; rest in " + ", ".join(ref(v) for v in others)
+                out.append(f"- {ac} ({where}): {text_of}")
+            if not mine:
+                out.append("- none in the intake for this unit")
+            target = units[u].get("target") or split.get("base_branch") or "base"
+            out += ["", "## Stack"]
+            if len(s) == 1:
+                out.append(f"1 of 1: into `{target}`, nothing stacked on it.")
+            else:
+                after = f"merge after {ref(s[k - 1])}" if k else f"the first, into `{target}`"
+                out.append(f"Part {k + 1} of {len(s)}: {after}. Merge order: "
+                           + " -> ".join(ref(v) for v in s) + ".")
+            parent = base if k == 0 else units[s[k - 1]]["pr_branch"]
+            rows = [r for r in pack.numstat(wt, parent, units[u]["pr_branch"])
+                    if r[1] is not None and not pack.noise(r[0], ())]
+            n = sum(r[1] + r[2] for r in rows)
+            out += ["", "## Size", f"{n} changed lines in {len(rows)} files (lock, generated and binary files left out)."]
+            if n > a.budget:
+                out.append(f"Over the {a.budget}-line budget: this is one unit of the split, the smallest part that "
+                           f"delivers {', '.join(mine) or 'its change'} and passes its checks on its own.")
+            if findings is not None:
+                ours = [f for f in findings if pack.unit_of(f, owners) == u]
+                sc, count = pack.score(ours)
+                at = f" at `{a.reviewed_at[:8]}`" if a.reviewed_at else ""
+                fixed = sum(f["status"] == "fixed" for f in ours)
+                out += ["", "## Review", f"Scored review of the integration branch{at} (review-pr scale): "
+                        f"this PR's files score {sc}/100 ({pack.summary(count, fixed)})."]
+                table = pack.table_lines(findings, owners, u)
+                if table:
+                    out += [""] + table
+            path = os.path.join(a.out, f"pr{u}.md")
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write("\n".join(out) + "\n")
+            print(f"DESCRIBE U{u} {path}")
+    return 0
+
+
 def main(argv):
     if len(argv) >= 2 and argv[0] == "stacks":
         stacks_cmd(argv[1])
         return 0
+    if argv and argv[0] == "describe":
+        try:
+            return describe(argv[1:])
+        except (RuntimeError, ValueError, KeyError, OSError) as e:
+            print(f"split-prs: {e}", file=sys.stderr)
+            return 2
     if len(argv) < 2 or argv[0] != "cut":
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
