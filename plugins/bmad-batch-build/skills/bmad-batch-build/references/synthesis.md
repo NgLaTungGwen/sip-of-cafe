@@ -5,7 +5,7 @@ branch green and, at the end of the run, opens the PR. In waves mode it also
 runs between waves, merging and verifying without a PR. Launch it with `Agent`
 (`subagent_type: <agents>bmad-batch-synthesis`, `run_in_background: false`, no
 `model`).
-That agent runs on Opus with a 1-hour prompt cache, so its context survives the
+That agent runs on Sonnet with a 1-hour prompt cache, so its context survives the
 long verify runs. Its prompt is everything below the line, with the
 placeholders filled in.
 
@@ -271,7 +271,7 @@ It writes the diff into the worktree's git dir and prints its path.
 `SYNTH-DIFF none`
 means you changed nothing beyond clean merges: note `REVIEW: none (no
 synthesis changes)` and go on. Otherwise launch one reviewer with `Agent`
-(`subagent_type: general-purpose`, `model: opus`, foreground), with this
+(`subagent_type: general-purpose`, `model: sonnet`, foreground), with this
 prompt. If the call answers "Async agent launched", don't end your turn: wait
 on its `bg.sh` done file as your agent file says, then read its completion
 notification; never write the section 6 reply while it runs
@@ -385,7 +385,7 @@ Review rounds: `<review rounds>`.
    Pass `--split` in a split run. It prints one `GROUP` line per group of at
    most 1200 changed lines, with the units it holds.
 3. **Review.** Launch one reviewer per group, all in one message (`Agent`,
-   `subagent_type: general-purpose`, `model: opus`, `run_in_background:
+   `subagent_type: general-purpose`, `model: sonnet`, `run_in_background:
    true`), then wait for every one as your agent file says. Don't group the
    groups under a lead reviewer: in review-workspace-pr-size, group reviewers
    started one reviewer per PR, and both levels read every diff. The

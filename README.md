@@ -120,6 +120,9 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.20.2:** the synthesis agent and the reviewers it starts run on Sonnet
+  instead of Opus. Merging, verifying, ticket checks and PR write-ups don't need
+  Opus; workers and the enhancer stay on Opus.
 - **0.20.0:** the plan is approved on a web page with C4 diagrams and
   comments, instead of a markdown table and a question.
   - The intake has a required `## Architecture (C4)` section: Mermaid
