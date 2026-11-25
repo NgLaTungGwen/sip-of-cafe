@@ -1033,9 +1033,10 @@ The units left out are kept across waves too.
 - `<ci ignore>` and `<ci timeout>`: from the profile's `ci` (see
   `references/synthesis.md`).
 - `<review rounds>`: the rounds of the scored branch review (synthesis
-  section 3d), 2 by default. When the user names a number ("PR review set at
-  2"), write `Review rounds: <n>` into the run file at the intake and pass
-  that number.
+  section 3d), 2 by default and at most 2. When the user names a number ("PR
+  review set at 1"), write `Review rounds: <n>` into the run file at the
+  intake and pass that number; a number above 2 is passed as 2 (say so in one
+  line), and `review-pack.py pack` refuses a third round.
 
 Then:
 

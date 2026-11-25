@@ -2763,6 +2763,17 @@ class ReviewPack(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(out, "group-2.md")))  # the earlier pack's group is gone
         self.assertEqual(self.run_pack("pack", root, "no-such-rev", "--out", out)[0], 2)
 
+    def test_pack_refuses_a_third_review_round(self):
+        root, git = git_repo({"a.ts": "a\n"})
+        base = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        self.commit(root, git, {"a.ts": "b\n"}, "work")
+        parent = tempfile.mkdtemp()
+        self.assertEqual(self.run_pack("pack", root, base, "--out", os.path.join(parent, "review-2"))[0], 0)
+        for name in ("review-3", "review-3/", "review-12"):
+            out = os.path.join(parent, name)
+            self.assertEqual(self.run_pack("pack", root, base, "--out", out)[0], 2, name)
+            self.assertFalse(os.path.exists(out), name)  # refused before anything is written
+
     def test_groups_keep_owners_whole_and_cut_a_big_one_by_file(self):
         g = self.pack.groups_of([("a", 5, 1), ("b", 5, 1), ("c", 1, 2), ("d", 2, 3), ("e", 2, 4)], 6)
         self.assertEqual([[f[0] for f in x] for x in g], [["a"], ["b"], ["c", "d", "e"]])

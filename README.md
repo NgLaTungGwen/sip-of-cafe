@@ -120,6 +120,8 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.20.4:** the scored PR review runs at most 2 rounds. A higher number for
+  a run is passed as 2, and `review-pack.py pack` refuses a `review-3` folder.
 - **0.20.3:** only the plan uses Opus. The enhancer and every review layer
   (edge case and verification gap too) run on Sonnet; the worker stays on Opus
   because it writes the plan.

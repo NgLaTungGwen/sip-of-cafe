@@ -422,7 +422,8 @@ Review rounds: `<review rounds>`.
    Check that each one marked fixed is really fixed, and that the fixes break
    nothing. Report only problems in these diffs.` Don't review the whole
    branch again. Skip the round when nothing was fixed.
-7. Stop after `<review rounds>` rounds. A finding still open goes into its
+7. Stop after `<review rounds>` rounds, never more than 2: `pack` refuses a
+   `review-3` folder. A finding still open goes into its
    PR under `## Open review findings`.
 
 Then score the branch:
