@@ -813,7 +813,8 @@ class PrepareWorktree(unittest.TestCase):
         self.assertIn("{verbatim_intent}", ia["instruction"])
         facts = " ".join(doc["persistent_facts"])
         self.assertIn("This replaces step-04's rule that all review subagents run at the same model", facts)
-        self.assertIn("Verification Gap Reviewer at the session model", facts)
+        self.assertIn("Verification Gap Reviewer, Intent Alignment Auditor) with `model: sonnet`", facts)
+        self.assertNotIn("at the session model (no", facts)
         # The size the gates read reaches the worker.
         worker = open(os.path.join(SKILL_DIR, "references", "worker.md"), encoding="utf-8").read()
         self.assertIn("Size: <size>", worker)

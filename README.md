@@ -120,6 +120,9 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.20.3:** only the plan uses Opus. The enhancer and every review layer
+  (edge case and verification gap too) run on Sonnet; the worker stays on Opus
+  because it writes the plan.
 - **0.20.2:** the synthesis agent and the reviewers it starts run on Sonnet
   instead of Opus. Merging, verifying, ticket checks and PR write-ups don't need
   Opus; workers and the enhancer stay on Opus.

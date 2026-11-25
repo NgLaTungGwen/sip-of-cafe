@@ -1,7 +1,7 @@
 ---
 name: bmad-batch-enhancer
 description: After a bmad-batch-build run, reads the run journal and drafts one tested fix to the skill itself on a branch, for the user to ship. Dispatched only by the bmad-batch-build orchestrator.
-model: opus
+model: sonnet
 maxTurns: 150
 experimental:
   cacheTtl: 1h

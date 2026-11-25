@@ -51,10 +51,10 @@ interface changed from the agreed shape, adds the intent auditor. A dispatch
 with no `Risk:` line (no intake) keeps the 0.16.0 rules, which read `Size:`:
 an S unit under 400 changed lines that touches no contract, migration or auth
 code gets only the edge-case and verification-gap layers; the intent auditor
-runs only for L units or when an interface changed. Those two layers run at the worker's
-model; the blind hunter and the intent auditor run on Sonnet (a pinned fact
-replaces step-04's same-model rule for them). All keep the default 5-minute
-cache. Opus, not Sonnet: Sonnet workers skipped the review in 31 of 47 units
+runs only for L units or when an interface changed. Every review layer runs
+on Sonnet (a pinned fact replaces step-04's same-model rule); only the plan
+needs Opus. All keep the default 5-minute cache. The worker itself stays on
+Opus because it writes the plan, and Sonnet workers skipped the review in 31 of 47 units
 (2026-10-21/22), while Opus workers completed the workflow in 62 of 67. The
 code itself is written by the `<agents>haiku-implementer` agent that the worktree's
 `implementation_handoff` names. Fill in the placeholders:
