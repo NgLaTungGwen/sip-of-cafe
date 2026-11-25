@@ -41,7 +41,7 @@ Two rules shape the flow, because most of a run is waiting:
   (small context, cheap tokens) does the waiting for the install, and you keep
   your own context thin: you never read product code, `Explore` maps it.
 - **Scripts do the mechanical work.** Installs, merges, migration and
-  contracts checks, the gate and the ticket links are scripts, so the Opus
+  contracts checks, the gate and the ticket links are scripts, so the
   agents spend their turns on judgment: planning, review triage, conflicts and
   failures.
 
@@ -107,7 +107,7 @@ this run:
   `<root>/.claude/agents/`, or a session opened outside `<root>`): don't stop.
   Run in **fallback mode**: launch each of the run's agents as
   `subagent_type: general-purpose` with the `model` its file names (`opus`
-  for bmad-batch-worker, bmad-batch-synthesis and bmad-batch-enhancer), and
+  for bmad-batch-worker and bmad-batch-enhancer, `sonnet` for bmad-batch-synthesis), and
   begin its prompt with `First read <skill>/agents/<agent>.md and follow it as
   your standing instructions.` Add to every worker and synthesis prompt:
   `Fallback mode: pass --agents general-purpose to prepare-worktree.sh.` In

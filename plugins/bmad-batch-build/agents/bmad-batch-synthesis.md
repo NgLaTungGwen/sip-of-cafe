@@ -1,7 +1,7 @@
 ---
 name: bmad-batch-synthesis
 description: Merges the ready units of a bmad-batch-build run into one integration branch, gets it green and opens the PR. Dispatched only by the bmad-batch-build orchestrator.
-model: opus
+model: sonnet
 maxTurns: 400
 experimental:
   cacheTtl: 1h
