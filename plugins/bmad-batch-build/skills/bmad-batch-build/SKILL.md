@@ -107,7 +107,8 @@ this run:
   `<root>/.claude/agents/`, or a session opened outside `<root>`): don't stop.
   Run in **fallback mode**: launch each of the run's agents as
   `subagent_type: general-purpose` with the `model` its file names (`opus`
-  for bmad-batch-worker and bmad-batch-enhancer, `sonnet` for bmad-batch-synthesis), and
+  for bmad-batch-worker, which writes the plan, and `sonnet` for
+  bmad-batch-synthesis and bmad-batch-enhancer), and
   begin its prompt with `First read <skill>/agents/<agent>.md and follow it as
   your standing instructions.` Add to every worker and synthesis prompt:
   `Fallback mode: pass --agents general-purpose to prepare-worktree.sh.` In
