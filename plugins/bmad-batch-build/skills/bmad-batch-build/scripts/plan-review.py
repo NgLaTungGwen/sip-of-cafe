@@ -9,18 +9,25 @@ usage: python plan-review.py render <intake> --out <page.html> [--plan <plan.jso
 `render` writes one self-contained page from the intake (intake.py's format):
 the goal, non-goals, acceptance criteria, shared interfaces, the units, the
 coupling, the mode, the holdout scenarios, assumptions and risks. It draws
-the intake's `## Architecture (C4)` mermaid blocks, plus one C4 component
-view it builds from the units: one boundary per top-level folder they touch,
-one component per unit in the folder it touches most, and one arrow per
-dependency. Every section, AC and unit has a comment box. The decision panel
-offers Approve, Request changes and Cancel, and Build directly first with
---advice (or when the plan has an advice); --gate adds the gate-policy
-choice. --plan adds each unit's estimate and wave from plan-waves.py's file. --note puts a "What changed since your comments" box at
+the intake's `## Architecture (C4)` mermaid blocks as C4-styled flowcharts
+(C4 colours and shapes, boundaries as dashed groups, the C4 source one click
+away): mermaid's own C4 renderer lays boxes out in rows and draws edge labels
+over them. It adds a component view built from the units: a boundary per
+top-level folder they touch, a component per unit in the folder it touches
+most, an arrow per dependency. Each unit is a card: chips for size, risk,
+kind, branch, ticket, dependencies, ACs and estimate, one row per field of
+its indented lines (`Now:`, `Should:`, `Tests:`, `Unchanged behaviour:` ...),
+and its files grouped by folder. Every section, AC and unit has a comment
+box. The decision panel offers Approve, Request changes and Cancel, and Build
+directly first with --advice (or when the plan has an advice); --gate adds
+the gate-policy choice. --plan adds each unit's estimate and wave from
+plan-waves.py's file. --note puts a "What changed since your comments" box at
 the top (plain text, one point per line). The diagrams need
 cdn.jsdelivr.net; without it the page shows their source.
 
 `serve` serves the page on 127.0.0.1 at a random port, behind a random token,
-and prints `URL <url>`, also writing the URL to <page.html>.url. With --open it
+and prints `URL <url>`, also writing the URL to <page.html>.url. It reads the
+page on every load, so a page rendered again shows on a refresh. With --open it
 opens the browser. When the user presses Send, it writes <review.json>, shows
 "Sent", prints what `show` prints, appends `PLAN-REVIEW <ISO> <decision>
 <n> comments` to --run, and exits 0. Nothing arrives within --timeout-min:
@@ -122,11 +129,138 @@ def folder_of(path):
     return path.split("/", 1)[0] + "/" if "/" in path else "(root)"
 
 
+# C4 elements -> (style class, shape). Mermaid's own C4 renderer places boxes
+# in rows and draws edge labels over them (dast-gate-fixes); a flowchart gets a
+# real layout, so the intake's C4 blocks are drawn as C4-styled flowcharts.
+C4_KINDS = {
+    "Person": ("person", "round"), "Person_Ext": ("ext", "round"),
+    "System": ("system", "box"), "System_Ext": ("ext", "box"),
+    "SystemDb": ("system", "db"), "SystemDb_Ext": ("ext", "db"),
+    "SystemQueue": ("system", "queue"), "SystemQueue_Ext": ("ext", "queue"),
+    "Container": ("container", "box"), "Container_Ext": ("ext", "box"),
+    "ContainerDb": ("container", "db"), "ContainerDb_Ext": ("ext", "db"),
+    "ContainerQueue": ("container", "queue"), "ContainerQueue_Ext": ("ext", "queue"),
+    "Component": ("component", "box"), "Component_Ext": ("ext", "box"),
+    "ComponentDb": ("component", "db"), "ComponentDb_Ext": ("ext", "db"),
+    "ComponentQueue": ("component", "queue"), "ComponentQueue_Ext": ("ext", "queue"),
+    "Node": ("container", "box"), "Deployment_Node": ("container", "box"),
+}
+C4_LABEL = {"person": "Person", "system": "Software System", "container": "Container",
+            "component": "Component", "ext": "External"}
+BOUNDARIES = ("Boundary", "Enterprise_Boundary", "System_Boundary", "Container_Boundary")
+RELS = ("Rel", "BiRel", "Rel_U", "Rel_Up", "Rel_D", "Rel_Down", "Rel_L", "Rel_Left", "Rel_R", "Rel_Right",
+        "Rel_Back", "Rel_Neighbor")
+STYLES = ("classDef person fill:#08427b,stroke:#052e56,color:#fff",
+          "classDef system fill:#1168bd,stroke:#0b4884,color:#fff",
+          "classDef container fill:#438dd5,stroke:#2e6295,color:#fff",
+          "classDef component fill:#85bbf0,stroke:#5d82a8,color:#000",
+          "classDef ext fill:#8a8a8a,stroke:#6b6b6b,color:#fff",
+          "classDef boundary fill:none,stroke:#8a8a8a,stroke-dasharray:6 4,color:#6b6b6b")
+BIG_VIEW = 8  # units above which the component view scrolls instead of shrinking
+CALL = re.compile(r"^\s*([A-Za-z_]+)\s*\((.*)\)\s*(\{)?\s*$")
+
+
+def args_of(text):
+    """The arguments of a C4 call: commas outside quotes split, quotes dropped,
+    `$name=value` keyword arguments left out."""
+    out, cur, quoted = [], "", False
+    for ch in text:
+        if ch == '"':
+            quoted = not quoted
+        elif ch == "," and not quoted:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    out.append(cur.strip())
+    return [a for a in out if not a.startswith("$")]
+
+
+def fc_text(text):
+    """Text for a flowchart label: mermaid's entity codes for the characters
+    its parser would read as syntax."""
+    t = re.sub(r"\s+", " ", text or "").strip()
+    for ch, code in (("#", "#35;"), ('"', "#quot;"), ("<", "#lt;"), (">", "#gt;"), ("|", "#124;"),
+                     ("[", "#91;"), ("]", "#93;"), ("{", "#123;"), ("}", "#125;")):
+        t = t.replace(ch, code)
+    return t
+
+
+def node_id(alias):
+    return "n_" + re.sub(r"\W", "_", alias)
+
+
+def node(alias, cls, shape, name, tech="", desc=""):
+    kind = C4_LABEL[cls] + (f": {tech}" if tech else "")
+    label = f"<b>{fc_text(name)}</b><br/><small>[{fc_text(kind)}]</small>"
+    if desc:
+        label += f"<br/>{fc_text(desc)}"
+    o, c = {"round": ("([", "])"), "db": ("[(", ")]"), "queue": ("[[", "]]")}.get(shape, ("[", "]"))
+    return f'{node_id(alias)}{o}"{label}"{c}:::{cls}'
+
+
+def c4_to_flowchart(source):
+    """(flowchart source, title) for a mermaid C4 diagram, or None when it holds
+    no element this reads."""
+    lines = source.strip().split("\n")
+    if not lines or not lines[0].strip().startswith("C4"):
+        return None
+    title, out, depth, seen, groups = lines[0].strip(), [], 0, False, []
+    for raw in lines[1:]:
+        line = raw.strip()
+        if not line or line.startswith("%%"):
+            continue
+        if line.startswith("title "):
+            title = line[6:].strip()
+            continue
+        if line == "}":
+            if depth:
+                out.append("  " * depth + "end")
+                depth -= 1
+            continue
+        m = CALL.match(line)
+        if not m:
+            continue
+        fn, args, opens = m.group(1), args_of(m.group(2)), m.group(3)
+        pad = "  " * (depth + 1)
+        if fn in BOUNDARIES or fn.endswith("_Boundary") or (opens and fn not in C4_KINDS):
+            depth += 1
+            out.append(pad + f'subgraph {node_id(args[0])}["{fc_text(args[1] if len(args) > 1 else args[0])}"]')
+            groups.append(node_id(args[0]))
+            continue
+        if fn in C4_KINDS and args:
+            cls, shape = C4_KINDS[fn]
+            name = args[1] if len(args) > 1 else args[0]
+            if fn.startswith("Person") or fn.startswith("System"):
+                tech, desc = "", args[2] if len(args) > 2 else ""
+            else:
+                tech, desc = (args[2] if len(args) > 2 else ""), (args[3] if len(args) > 3 else "")
+            out.append(pad + node(args[0], cls, shape, name, tech, desc))
+            seen = True
+            if opens:  # Deployment_Node(...) { ... }
+                depth += 1
+                out.append(pad + f'subgraph {node_id(args[0])}_b[" "]')
+                groups.append(node_id(args[0]) + "_b")
+            continue
+        if fn in RELS and len(args) >= 2:
+            a, b = (args[1], args[0]) if fn == "Rel_Back" else (args[0], args[1])
+            label = " ".join(x for x in (args[2] if len(args) > 2 else "",
+                                         f"[{args[3]}]" if len(args) > 3 and args[3] else "") if x)
+            arrow = "<-->" if fn == "BiRel" else "-->"
+            out.append(pad + f"{node_id(a)} {arrow}" + (f'|"{fc_text(label)}"|' if label else "") + f" {node_id(b)}")
+    while depth:
+        out.append("  " * depth + "end")
+        depth -= 1
+    if not seen:
+        return None
+    out += [f"  class {g} boundary" for g in groups]
+    return "\n".join(["flowchart TB"] + out + ["  " + st for st in STYLES]), title
+
+
 def component_view(slug, units):
-    """A C4Component diagram of the units: a boundary per top-level folder,
-    a component per unit in the folder it touches most, an arrow per dependency."""
-    lines = ["C4Component", f"title Units of {c4_label(slug)}"]
-    # Short boxes: the file lists are in the units table. Long ones shrank a
+    """A flowchart in C4 component style: a boundary per top-level folder, a
+    component per unit in the folder it touches most, an arrow per dependency."""
+    # Short boxes: the file lists are on the unit cards. Long ones shrank a
     # 21-unit view to unreadable text.
     home = {}
     for u in units:
@@ -134,8 +268,12 @@ def component_view(slug, units):
         for t in u["touches"]:
             counts[folder_of(t)] = counts.get(folder_of(t), 0) + 1
         home[u["id"]] = max(sorted(counts), key=counts.get) if counts else "(root)"
+    # A big run keeps its natural size and scrolls sideways: fitted to the page,
+    # 21 units shrank to unreadable text. Its arrows go unlabelled.
+    big = len(units) > BIG_VIEW
+    lines = (["---", "config:", "  flowchart:", "    useMaxWidth: false", "---"] if big else []) + ["flowchart TB"]
     for i, folder in enumerate(sorted(set(home.values()))):
-        lines.append(f'Container_Boundary(b{i}, "{c4_label(folder)}") {{')
+        lines.append(f'  subgraph b{i}["{fc_text(folder)}"]')
         for u in units:
             if home[u["id"]] != folder:
                 continue
@@ -144,15 +282,15 @@ def component_view(slug, units):
             desc = f"{n} file{'s' if n != 1 else ''} in " + ", ".join(folders) if n else ""
             title = u["title"] if len(u["title"]) <= 48 else u["title"][:47].rstrip() + "…"
             tech = " · ".join(x for x in (u["size"], u["risk"]) if x)
-            lines.append(f'  Component({u["id"].lower()}, "{c4_label(u["id"] + " " + title)}", '
-                         f'"{c4_label(tech)}", "{c4_label(desc)}")')
-        lines.append("}")
+            lines.append("    " + node(u["id"].lower(), "component", "box", f'{u["id"]} {title}', tech, desc))
+        lines.append("  end")
+        lines.append(f"  class b{i} boundary")
     for u in units:
         for d in u["deps"]:
             if d["id"] in home:
-                lines.append(f'Rel({u["id"].lower()}, {d["id"].lower()}, "depends on")')
-    lines.append('UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")')
-    return "\n".join(lines)
+                label = "" if big else '|"depends on"|'
+                lines.append(f'  {node_id(u["id"].lower())} -->{label} {node_id(d["id"].lower())}')
+    return "\n".join(lines + ["  " + st for st in STYLES])
 
 
 def js_string(value):
@@ -172,9 +310,87 @@ def section(title, inner, target=None):
             f"{comment_box(target)}</section>")
 
 
-def diagram(source, caption):
-    return (f'<figure><pre class="mermaid">{html.escape(source)}</pre>'
-            f"<figcaption>{html.escape(caption)}</figcaption></figure>")
+def diagram(source, caption, c4_source=None):
+    src = (f'<details class="src"><summary>C4 source</summary><pre>{html.escape(c4_source)}</pre></details>'
+           if c4_source else "")
+    return (f'<figure><figcaption>{html.escape(caption)}</figcaption>'
+            f'<pre class="mermaid">{html.escape(source)}</pre>{src}</figure>')
+
+
+def c4_figure(source):
+    converted = c4_to_flowchart(source)
+    kind = source.strip().split("\n", 1)[0].strip()
+    if not converted:
+        return diagram(source, kind)
+    flow, title = converted
+    return diagram(flow, f"{title} ({kind})", source)
+
+
+FIELD = re.compile(r"^([A-Z][\w /()-]{0,40}?):\s*(.*)$")
+META = re.compile(r"^(kind|branch|ticket)\s+(.+)$")
+
+
+def unit_fields(block):
+    """(meta chips, [(field, [paragraph or list items])]) from a unit's indented lines."""
+    chips, fields = [], []
+    for line in block.split("\n")[1:]:
+        t = line.strip()
+        if not t:
+            continue
+        m = META.match(t)
+        if m:
+            chips.append((m.group(1), m.group(2)))
+        elif t.startswith("--"):
+            chips.append(("flag", t))
+        elif t.startswith("- ") and fields:
+            fields[-1][1].append(t[2:].strip())
+        elif FIELD.match(t):
+            k, v = FIELD.match(t).groups()
+            fields.append((k, [v] if v else []))
+        elif fields:
+            fields[-1][1][-1:] = [(fields[-1][1][-1] + " " + t) if fields[-1][1] else t]
+        else:
+            fields.append(("Notes", [t]))
+    return chips, fields
+
+
+def field_html(name, values):
+    if len(values) > 1:
+        body = "<ul>" + "".join(f"<li>{inline(v)}</li>" for v in values) + "</ul>"
+    elif values and name.lower().startswith("unchanged") and values[0].count(";") >= 2:
+        body = "<ul>" + "".join(f"<li>{inline(v.strip())}</li>" for v in values[0].split(";") if v.strip()) + "</ul>"
+    else:
+        body = f"<p>{inline(values[0])}</p>" if values else ""
+    if name.lower() == "source":
+        return f'<details class="f"><summary>{html.escape(name)}</summary>{body}</details>'
+    return f'<div class="f"><div class="k">{html.escape(name)}</div><div class="v">{body}</div></div>'
+
+
+def unit_card(u, plan_row):
+    chips, fields = unit_fields(u["block"])
+    pills = [f'<span class="pill size">{html.escape(u["size"])}</span>' if u["size"] else "",
+             f'<span class="pill risk-{html.escape(u["risk"])}">risk {html.escape(u["risk"])}</span>' if u["risk"] else ""]
+    pills += [f'<span class="pill">{html.escape(v if k in ("kind", "flag") else f"{k} {v}")}</span>' for k, v in chips]
+    deps = ", ".join(d["id"] + (f" ({d['reason']})" if d["reason"] else "") for d in u["deps"])
+    if deps:
+        pills.append(f'<span class="pill">after {inline(deps)}</span>')
+    if u["acs"]:
+        pills.append(f'<span class="pill">{html.escape(", ".join(u["acs"]))}</span>')
+    est = ", ".join(x for x in (plan_row.get("est"), plan_row.get("wave")) if x)
+    if est:
+        pills.append(f'<span class="pill">{html.escape(est)}</span>')
+    by_folder = {}
+    for t in u["touches"]:
+        by_folder.setdefault(folder_of(t), []).append(t)
+    files = "".join(f'<div class="k">{html.escape(f)}</div><ul class="files">'
+                    + "".join(f"<li><code>{html.escape(p)}</code></li>" for p in ps) + "</ul>"
+                    for f, ps in by_folder.items())
+    n = len(u["touches"])
+    return (f'<article class="unit" id="{u["id"]}"><h3><span class="uid">{u["id"]}</span> {inline(u["title"])}</h3>'
+            f'<div class="pills">{"".join(pills)}</div>'
+            + "".join(field_html(k, v) for k, v in fields)
+            + (f'<details class="f"><summary>{n} file{"s" if n != 1 else ""}</summary>{files}</details>' if n else "")
+            + f"{comment_box(u['id'])}</article>")
 
 
 def render(a):
@@ -204,24 +420,11 @@ def render(a):
     ac_items = "".join(
         f'<li id="{k}"><b>{k}</b> {inline(re.sub(rf"^- {re.escape(k)}\s*:\s*", "", v).replace(chr(10), " "))}'
         f"{comment_box(k)}</li>" for k, v in acs.items())
-    rows = []
-    for u in units:
-        deps = ", ".join(d["id"] + (f" ({d['reason']})" if d["reason"] else "") for d in u["deps"]) or "-"
-        p = plan.get(u["id"], {})
-        est = ", ".join(x for x in (p.get("est"), p.get("wave")) if x)
-        extra = "\n".join(line.strip() for line in u["block"].split("\n")[1:])
-        rows.append(
-            f'<tr id="{u["id"]}"><td><b>{u["id"]}</b></td><td>{inline(u["title"])}'
-            + (f'<div class="muted small">{inline(extra)}</div>' if extra else "")
-            + f'{comment_box(u["id"])}</td><td>{u["size"]}</td><td>{u["risk"]}</td><td>{inline(deps)}</td>'
-            f'<td class="small">{"<br>".join(inline("`" + t + "`") for t in u["touches"])}</td>'
-            f'<td>{", ".join(u["acs"])}</td><td class="small">{html.escape(est)}</td></tr>')
-    units_table = ('<table><thead><tr><th>Unit</th><th>What</th><th>Size</th><th>Risk</th><th>Depends on</th>'
-                   '<th>Touches</th><th>ACs</th><th>Plan</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table>")
+    units_html = "".join(unit_card(u, plan.get(u["id"], {})) for u in units)
 
     arch = intake.body(text, "Architecture (C4)")
-    figures = [diagram(m.group(1).strip(), (m.group(1).strip().split("\n", 1)[0])) for m in MERMAID_BLOCK.finditer(arch)]
-    figures.append(diagram(component_view(slug, units), "C4Component: the units, built from the intake"))
+    figures = [c4_figure(m.group(1)) for m in MERMAID_BLOCK.finditer(arch)]
+    figures.append(diagram(component_view(slug, units), "The units (component view, built from the intake)"))
     arch_rest = markdown(arch) if MERMAID_BLOCK.sub("", arch).strip() else ""
 
     decisions = [("adjust", "Request changes", "Claude applies your comments and shows the plan again.")]
@@ -246,7 +449,7 @@ def render(a):
         section("Goal", markdown(intake.body(text, "Goal"))),
         section("Non-goals", markdown(intake.body(text, "Non-goals"))),
         section("Architecture", "".join(figures) + arch_rest, "section:Architecture (C4)"),
-        section("Units", units_table),
+        section("Units", units_html),
         section("Acceptance criteria", f"<ol class=acs>{ac_items}</ol>"),
         section("Shared interfaces", markdown(intake.body(text, "Shared interfaces"))),
         section("Coupling map", markdown(intake.body(text, "Coupling map"))),
@@ -290,10 +493,14 @@ def valid(review):
 
 
 def serve(a):
-    with open(a.page, encoding="utf-8") as f:
-        page = f.read()
+    with open(a.page, encoding="utf-8"):
+        pass  # fail now, not at the first request, when the page is missing
     token = secrets.token_urlsafe(18)
-    body = page.replace(TOKEN, token).encode("utf-8")
+
+    def body():
+        # Read on every load: a page rendered again shows on a refresh, with no new URL.
+        with open(a.page, encoding="utf-8") as f:
+            return f.read().replace(TOKEN, token).encode("utf-8")
     done = threading.Event()
     result = {}
 
@@ -311,7 +518,7 @@ def serve(a):
 
         def do_GET(self):
             if self.path.split("?", 1)[0] == "/" and f"t={token}" in self.path:
-                self.reply(200, body, "text/html; charset=utf-8")
+                self.reply(200, body(), "text/html; charset=utf-8")
             else:
                 self.reply(404, b"not found")
 
@@ -426,6 +633,21 @@ th,td {{ text-align:left; vertical-align:top; padding:8px 6px; border-top:1px so
 figure {{ margin:8px 0 16px; overflow-x:auto; }} figcaption {{ color:var(--muted); font-size:12.5px; }}
 pre.mermaid {{ background:var(--card); white-space:pre-wrap; font-size:12px; }}
 ol.acs li {{ margin:6px 0; }}
+article.unit {{ border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin:10px 0; }}
+article.unit h3 {{ margin:0 0 6px; font-size:15px; }}
+.uid {{ display:inline-block; background:var(--accent); color:#fff; border-radius:5px; padding:0 6px; margin-right:4px; }}
+.pills {{ display:flex; flex-wrap:wrap; gap:6px; margin:4px 0 10px; }}
+.pill {{ font-size:12px; border:1px solid var(--line); border-radius:999px; padding:1px 9px; background:var(--bg); }}
+.pill.risk-high {{ border-color:var(--bad); color:var(--bad); }} .pill.risk-med {{ border-color:#c98a00; color:#c98a00; }}
+.f {{ display:grid; grid-template-columns:150px 1fr; gap:10px; padding:6px 0; border-top:1px dashed var(--line); }}
+.f .k, .unit .k {{ color:var(--muted); font-size:12.5px; font-weight:600; }}
+.f .v p {{ margin:0; }} .f .v ul {{ margin:0; padding-left:18px; }}
+details.f {{ display:block; }} details.f summary {{ cursor:pointer; color:var(--muted); font-size:12.5px; font-weight:600; }}
+ul.files {{ margin:2px 0 8px; padding-left:18px; columns:2 320px; font-size:12.5px; }}
+@media (max-width: 640px) {{ .f {{ grid-template-columns:1fr; gap:2px; }} }}
+details.src summary {{ cursor:pointer; color:var(--muted); font-size:12px; }}
+details.src pre {{ font-size:12px; white-space:pre-wrap; background:var(--bg); padding:8px; border-radius:6px; }}
+figure figcaption {{ font-weight:600; color:var(--ink); font-size:13.5px; margin-bottom:4px; }}
 details.c summary {{ cursor:pointer; color:var(--accent); font-size:12.5px; margin-top:6px; }}
 details.c[open] summary {{ font-weight:600; }}
 details.c.has summary::after {{ content:" ●"; }}
@@ -492,7 +714,7 @@ button:disabled {{ opacity:.5; cursor:default; }}
   if (window.mermaid) {{
     var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
     mermaid.initialize({{ startOnLoad: false, theme: dark ? "dark" : "default", securityLevel: "strict",
-      c4: {{ useMaxWidth: false }} }});
+      flowchart: {{ htmlLabels: true, useMaxWidth: true, nodeSpacing: 40, rankSpacing: 60, wrappingWidth: 220 }} }});
     mermaid.run({{ querySelector: "pre.mermaid" }}).catch(function () {{}});
   }}
   document.querySelectorAll("table").forEach(function (t) {{ var w = document.createElement("div"); w.className = "tablewrap";

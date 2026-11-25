@@ -120,6 +120,18 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.21.1:** the plan page fits a real plan (dast-gate-fixes).
+  - Its C4 diagrams are drawn as C4-styled flowcharts: the same intake
+    blocks, colours and shapes, with boundaries as dashed groups and the C4
+    source one click away. Mermaid's C4 renderer drew edge labels over the
+    boxes.
+  - A component view of more than 8 units keeps its natural size and
+    scrolls sideways.
+  - Each unit is a card: chips for size, risk, kind, branch, ticket,
+    dependencies, ACs and estimate; one row per field (`Now:`, `Should:`,
+    `Tests:`, `Unchanged behaviour:` ...); its files grouped by folder.
+  - `serve` reads the page on every load, so a page rendered again shows on
+    a refresh.
 - **0.21.0:** the plan has its own agent. A new `bmad-batch-planner` (Opus)
   writes each unit's spec and halts at `ready-for-dev`; the worker, now on
   Sonnet, resumes from that spec, implements, verifies and triages the review.
