@@ -131,6 +131,8 @@ def role(meta, first):
         return "haiku"
     if agent == "Explore":
         return "explore"
+    if agent == "bmad-batch-planner" or "bmad-batch-planner.md and follow it" in first:
+        return "planner"
     if "synthesis" in agent or "ynthesis" in meta.get("description", ""):
         return "synthesis"
     if "worker" in agent or "Build Auto worker" in first:

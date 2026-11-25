@@ -41,9 +41,12 @@ The same file takes two waits off the worker's critical path:
 Send every worker in **one message**, with one `Agent` call per unit
 (`subagent_type: <agents>bmad-batch-worker`, `run_in_background: false`, no
 `model`; `<agents>` is the prefix SKILL.md set).
-That agent (`agents/bmad-batch-worker.md`) runs on Opus with a 1-hour
+That agent (`agents/bmad-batch-worker.md`) runs on Sonnet with a 1-hour
 prompt cache, so its context survives the waits on its coder, its reviewers
-and the test suite. The worker plans, verifies and triages the review. The
+and the test suite. Only the plan runs on Opus: the worker hands steps 1 and 2
+of the workflow to a `<agents>bmad-batch-planner` subagent
+(`agents/bmad-batch-planner.md`), which halts at `ready-for-dev`. The worker
+then resumes the workflow from that spec, verifies and triages the review. The
 review is sized by risk through the pinned toml's per-layer `when` gates,
 which read the `Risk:` line below: `low` gets the edge-case and
 verification-gap layers, `med` adds the blind hunter, and `high`, or an
@@ -53,9 +56,11 @@ an S unit under 400 changed lines that touches no contract, migration or auth
 code gets only the edge-case and verification-gap layers; the intent auditor
 runs only for L units or when an interface changed. Every review layer runs
 on Sonnet (a pinned fact replaces step-04's same-model rule); only the plan
-needs Opus. All keep the default 5-minute cache. The worker itself stays on
-Opus because it writes the plan, and Sonnet workers skipped the review in 31 of 47 units
-(2026-10-21/22), while Opus workers completed the workflow in 62 of 67. The
+needs Opus. All keep the default 5-minute cache. Sonnet workers that planned
+too skipped the review in 31 of 47 units (2026-10-21/22), while Opus workers
+completed the workflow in 62 of 67. So the plan is the planner's, and the
+worker runs the gate on its own unit before it replies (step 3): a missing
+review pass sends it back to the review step, not to a redispatch. The
 code itself is written by the `<agents>haiku-implementer` agent that the worktree's
 `implementation_handoff` names. Fill in the placeholders:
 
@@ -102,6 +107,8 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
       BLOCKED: worktree preparation failed: <the last lines of its output>
       HEAD: none
       INTERFACES: none
+      Then run `git -C "<wt>" rev-parse HEAD` and keep it as `<start>`: the
+      self-check in step 3 counts this unit's commits from it.
    b. Start the install as one Bash call with `run_in_background: true`, and
       don't wait for it:
       bash "<skill>/scripts/bg.sh" run "<wt>" install "bash '<skill>/scripts/install-deps.sh' '<wt>' [--apps]"
@@ -135,15 +142,38 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
       tests start (the pinned facts repeat this at that point).
 1. Run this exactly once, from any directory:
    uv run --no-cache "<wt>/_bmad/scripts/render_skill.py" --project-root "<wt>" --skill "<wt>/.claude/skills/bmad-build-auto"
-2. Read the one absolute workflow.md path it prints, and follow it to its end
-   with the intent below. Run every step, in order: plan, implement through
-   the implementation handoff, review. Subagents you launch must run in the
+   Then plan. You don't plan yourself: launch one planner, as in step 2 (name
+   `plan`, with `bg.sh expect`, the `done` line and `bg.sh wait`), with
+   `subagent_type: <agents>bmad-batch-planner`. When `<agents>` is
+   `general-purpose` (fallback mode), use `subagent_type: general-purpose`,
+   `model: opus`, and begin the prompt with `First read
+   <skill>/agents/bmad-batch-planner.md and follow it as your standing
+   instructions.` Its prompt:
+       Unit: <n>
+       Intake: <intake>   (leave out the lines your own prompt doesn't have)
+       Interface changes: <iface>
+       Project root: <wt>   (work only inside it)
+       Skill: <skill>
+       Workflow: <the workflow.md path render_skill.py printed>
+       <your `Approved interface change:` line, if your prompt has one>
+       Follow the workflow with the intent below. Halt after planning.
+       Intent:
+       <the Intent section of this prompt, word for word>
+   Its reply is `SPEC:`, `STATUS:` and `BLOCKED:` lines. When the STATUS is
+   blocked or blocked-interface, start no implementation: reply as in step 3
+   with that SPEC, STATUS and BLOCKED, `HEAD:` as there, `INTERFACES: none`
+   and `REMAINING: none`. When it is `ready-for-dev`, go on with that spec.
+2. Read the one absolute workflow.md path render_skill.py printed, and follow
+   it to its end with the invocation `Spec file: <the planner's SPEC>`. The
+   workflow's step-01 routes a `ready-for-dev` spec straight to its step-03:
+   implement through the implementation handoff, verify, review. The intent below is what the spec
+   was planned from; the spec is the source of truth. Subagents you launch must run in the
    foreground, as that workflow requires: launch them without
    `run_in_background`. Claude Code may still start one in the background
    (the Agent tool answers "Async agent launched"). **Never end your turn
    while an agent you launched is still running**: for you, ending the turn
    hands you back to the orchestrator half done. So, for every subagent
-   (the implementation subagent of each round and every reviewer):
+   (the planner, the implementation subagent of each round and every reviewer):
    a. Give it a name, such as `impl-1` or `review-1-edge`, and run
       `bash "<skill>/scripts/bg.sh" expect "<wt>" <agent name>` first.
    b. End its prompt with this line: `Your last step, after your report is
@@ -172,7 +202,15 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
    holds up everything behind it (sonar-zero-5: 315 min, about 12 coder
    rounds).
 3. When the workflow halts, and only once every implementation subagent you
-   launched has returned, reply with exactly these lines and nothing else:
+   launched has returned, check your own unit with the orchestrator's gate,
+   in one Bash call:
+   bash "<skill>/scripts/check-unit.sh" [--bug] "<wt>" "<branch>" "<the spec>" <start>
+   (`--bug` when the intent starts with `Kind: bug`). If it prints `NOT
+   READY` because the review pass is missing, run the review now: read and
+   follow `step-04-review.md`, which sits beside workflow.md, then check
+   again. For any other reason you can fix (an uncommitted change, a missing
+   reproduction line), fix it and check again, once. Then reply with exactly
+   these lines and nothing else:
    SPEC: <absolute path of the spec or result file the workflow wrote>
    STATUS: <the status in its frontmatter, or blocked-interface (step 0c)>
    BLOCKED: <blocking condition, or none>

@@ -1715,6 +1715,41 @@ class Roles(unittest.TestCase):
             self.assertEqual(mod.role({"spawnDepth": 2}, reviewer), "reviewer")
             self.assertEqual(mod.role({"spawnDepth": 2, "agentType": "haiku-implementer"}, coder), "haiku")
 
+    def test_the_planner_has_its_own_role(self):
+        # 0.21.0: the plan moved out of the worker into an Opus planner; its
+        # cost must not land on "reviewer" (an unknown depth-2 agent).
+        fallback = json.dumps({"message": {"content": "First read /s/agents/bmad-batch-planner.md and follow it as your standing instructions."}})
+        for mod in (load("cost_report", "cost-report.py"), journal):
+            self.assertEqual(mod.role({"spawnDepth": 2, "agentType": "bmad-batch-planner"}, "{}"), "planner")
+            self.assertEqual(mod.role({"spawnDepth": 2, "agentType": "general-purpose"}, fallback), "planner")
+
+
+class AgentFiles(unittest.TestCase):
+    """Every run agent ships in both copies, is installed by ensure-bmad.sh and
+    is watched by the guard; only the planner runs on Opus."""
+
+    def names(self, d):
+        return sorted(f[:-3] for f in os.listdir(d) if f.endswith(".md"))
+
+    def test_agents_are_wired_and_only_the_plan_uses_opus(self):
+        skill_agents = os.path.join(SKILL_DIR, "agents")
+        plugin_agents = os.path.join(os.path.dirname(os.path.dirname(SKILL_DIR)), "agents")
+        names = self.names(skill_agents)
+        self.assertIn("bmad-batch-planner", names)
+        if os.path.isdir(plugin_agents):
+            self.assertEqual(self.names(plugin_agents), names)
+            for n in names:
+                self.assertEqual(open(os.path.join(plugin_agents, n + ".md"), encoding="utf-8").read(),
+                                 open(os.path.join(skill_agents, n + ".md"), encoding="utf-8").read(), n)
+        ensure = open(os.path.join(SCRIPTS, "ensure-bmad.sh"), encoding="utf-8").read()
+        self.assertEqual(sorted(re.search(r"agents=\((bmad[^)]*)\)", ensure).group(1).split()), names)
+        guard = load("guard", "guard.py")
+        self.assertEqual(sorted(guard.AGENTS), names)
+        models = {n: re.search(r"^model: (\S+)$", open(os.path.join(skill_agents, n + ".md"), encoding="utf-8").read(),
+                                re.M).group(1) for n in names}
+        self.assertEqual([n for n, m in models.items() if m == "opus"], ["bmad-batch-planner"])
+        self.assertEqual(models["bmad-batch-worker"], "sonnet")
+
 
 def bash_path():
     return os.environ.get("SELF_TEST_BASH") or shutil.which("bash")
@@ -2155,6 +2190,11 @@ class Guard(unittest.TestCase):
         cmd = "bash -c 'cd " + self.wt + " && git push --force origin HEAD'"
         self.assertIsNotNone(self.hook("PowerShell", {"command": cmd}))
         self.assertIsNone(self.hook("PowerShell", {"command": "bash -c 'cd " + self.wt + " && git status'"}))
+
+    def test_the_planner_is_guarded_like_a_worker(self):
+        planner = "bmad-batch-build:bmad-batch-planner"
+        self.assertIsNotNone(self.bash(f"cd {self.wt} && git push --force origin HEAD", agent=planner))
+        self.assertIsNotNone(self.bash(f"git -C {self.root} checkout -b x", agent=planner))
 
     def test_the_enhancer_never_pushes(self):
         self.assertIsNotNone(self.bash("git push origin enhance/x", agent="bmad-batch-build:bmad-batch-enhancer"))

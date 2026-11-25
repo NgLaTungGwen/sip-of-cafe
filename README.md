@@ -120,6 +120,11 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.21.0:** the plan has its own agent. A new `bmad-batch-planner` (Opus)
+  writes each unit's spec and halts at `ready-for-dev`; the worker, now on
+  Sonnet, resumes from that spec, implements, verifies and triages the review.
+  Before it replies, the worker runs `check-unit.sh` on its own unit and goes
+  back to the review step when the review pass is missing.
 - **0.20.4:** the scored PR review runs at most 2 rounds. A higher number for
   a run is passed as 2, and `review-pack.py pack` refuses a `review-3` folder.
 - **0.20.3:** only the plan uses Opus. The enhancer and every review layer
@@ -415,6 +420,7 @@ delete the agents its first run copied into your repository, once:
 
 ```
 .claude/agents/bmad-batch-worker.md
+.claude/agents/bmad-batch-planner.md
 .claude/agents/bmad-batch-synthesis.md
 .claude/agents/haiku-implementer.md
 .claude/agents/bmad-batch-enhancer.md

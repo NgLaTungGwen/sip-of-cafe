@@ -3,8 +3,8 @@
 The plugin registers it in hooks/hooks.json, so it sees every Bash,
 PowerShell, Write, Edit and NotebookEdit call in every session. It acts only on:
 
-- the run's own agents (agent_type bmad-batch-worker, bmad-batch-synthesis,
-  haiku-implementer, bmad-batch-enhancer, with or without the plugin prefix);
+- the run's own agents (agent_type bmad-batch-worker, bmad-batch-planner,
+  bmad-batch-synthesis, haiku-implementer, bmad-batch-enhancer, with or without the plugin prefix);
 - any other subagent working inside a prepared batch worktree (one with
   _bmad/custom/bmad-build-auto.toml), such as a worker's reviewers or the
   general-purpose agents of fallback mode.
@@ -49,7 +49,7 @@ import re
 import subprocess
 import sys
 
-AGENTS = {"bmad-batch-worker", "bmad-batch-synthesis", "haiku-implementer", "bmad-batch-enhancer"}
+AGENTS = {"bmad-batch-worker", "bmad-batch-planner", "bmad-batch-synthesis", "haiku-implementer", "bmad-batch-enhancer"}
 PROTECTED = {"main", "master", "develop", "trunk"}
 GIT_CHANGES = {"checkout", "switch", "reset", "merge", "rebase", "commit", "pull", "stash", "clean", "restore",
                "cherry-pick", "revert", "rm", "mv", "add", "am", "apply"}
