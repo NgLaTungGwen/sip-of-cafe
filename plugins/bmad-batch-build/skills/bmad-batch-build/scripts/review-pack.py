@@ -12,7 +12,8 @@ split file is given (each file goes to the last unit, in dependency order,
 that touched it: its PR holds the final content), otherwise per top-level
 folder. Small units share a group and a big one is cut by file, so a group stays
 under --max-lines changed lines. A reviewer gets one group file and reads each
-diff from disk. It never gets one big patch: in review-workspace-pr-size,
+diff from disk. An --out folder named review-<k> is round k: pack refuses
+k above 2, so the review never runs a third round. It never gets one big patch: in review-workspace-pr-size,
 reviewers ran `cat` and `head -c 60000` on 30 KB patches, some of them twice.
 Lock files, `_bmad-output/`, snapshots, minified files, source maps, binaries
 and every --exclude glob are left out and listed in <dir>/index.md. Prints:
@@ -62,6 +63,8 @@ NOISE = ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yam
 NOISE_GLOBS = ("_bmad-output/*", "*/_bmad-output/*", "*.snap", "*.min.js", "*.min.css", "*.map")
 WEIGHT = {"critical": 30, "major": 12, "minor": 4, "suggestion": 1}
 SUGGESTION_CAP = 5
+MAX_ROUNDS = 2  # the scored review runs at most two rounds; a third is refused
+ROUND_DIR = re.compile(r"^review-(\d+)$")
 LARGE_DIFF = 600  # diff lines above which a reviewer reads the file in parts
 # The location runs up to the first " | ", so a path may hold spaces.
 FINDING = re.compile(r"^(\S+)\s+(open|fixed|rejected)\s+(critical|major|minor|suggestion)\s+(.+?)\s+\|\s*(.*)$")
@@ -145,6 +148,10 @@ def label(key):
 
 
 def cmd_pack(a):
+    m = ROUND_DIR.match(os.path.basename(os.path.normpath(a.out)))
+    if m and int(m.group(1)) > MAX_ROUNDS:
+        raise ValueError(f"round {m.group(1)} refused: the scored review stops after {MAX_ROUNDS} rounds; "
+                         "put the findings still open under ## Open review findings")
     since = git(a.worktree, "rev-parse", a.since).strip()
     head = git(a.worktree, "rev-parse", "HEAD").strip()
     owners = split_owners(a.worktree, a.split) if a.split else {}
