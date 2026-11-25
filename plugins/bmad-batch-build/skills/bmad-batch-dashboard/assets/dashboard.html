@@ -216,9 +216,9 @@ th.num { text-align: right; }
 
   // Colors follow the entity, never its rank: each role and problem group owns a slot.
   // implementer came last (0.12.13) so every older role keeps its color.
-  var ROLES = ["main", "worker", "haiku", "reviewer", "synthesis", "explore", "enhancer", "other", "implementer"];
+  var ROLES = ["main", "worker", "haiku", "reviewer", "synthesis", "explore", "enhancer", "other", "implementer", "planner"];
   var ROLE_LABEL = {main: "Orchestrator", worker: "Workers", haiku: "Haiku coders", reviewer: "Reviewers", implementer: "Coders (general-purpose)",
-    synthesis: "Synthesis", explore: "Explore", enhancer: "Enhancer", other: "Other agents"};
+    planner: "Planner", synthesis: "Synthesis", explore: "Explore", enhancer: "Enhancer", other: "Other agents"};
   var PROBLEMS = [
     {key: "tool", label: "Failed tool calls", kinds: ["tool_error"]},
     {key: "cmd", label: "Failed commands", kinds: ["command_failed", "wrapper_failed"]},

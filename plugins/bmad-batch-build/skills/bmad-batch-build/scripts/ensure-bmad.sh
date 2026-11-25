@@ -16,7 +16,7 @@ version="${BMAD_VERSION:-6.12.0}"
 skill="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # The run dispatches bmad-batch-worker and bmad-batch-synthesis, and the workers
-# hand coding to haiku-implementer; bmad-batch-enhancer drafts skill fixes after
+# hand the plan to bmad-batch-planner and coding to haiku-implementer; bmad-batch-enhancer drafts skill fixes after
 # the run. A plugin install ships them itself (the plugin's agents/ folder,
 # named bmad-batch-build:<agent>), so nothing is copied. A copied install needs
 # them as project agents; a copy the project already has is left alone, and one
@@ -29,7 +29,7 @@ if [[ -f "$skill/../../agents/bmad-batch-worker.md" && -f "$skill/../../.claude-
 else
   [[ -d "$root/.claude/agents" ]] || echo "agents: created $root/.claude/agents; a session already running must restart to see it"
   mkdir -p "$root/.claude/agents"
-  agents=(bmad-batch-worker bmad-batch-synthesis haiku-implementer bmad-batch-enhancer)
+  agents=(bmad-batch-worker bmad-batch-planner bmad-batch-synthesis haiku-implementer bmad-batch-enhancer)
 fi
 for agent in "${agents[@]}"; do
   if [[ ! -f "$root/.claude/agents/$agent.md" ]]; then

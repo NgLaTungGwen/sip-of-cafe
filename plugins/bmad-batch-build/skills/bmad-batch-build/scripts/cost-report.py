@@ -227,6 +227,8 @@ def role(meta, first_line):
         return "explore"
     if agent == "bmad-batch-enhancer":
         return "enhancer"
+    if agent == "bmad-batch-planner" or "bmad-batch-planner.md and follow it" in first_line:
+        return "planner"
     if agent in ("bmad-batch-synthesis", "bmad-pb-synthesis") or "ynthesis" in meta.get("description", ""):
         return "synthesis"
     if agent in ("bmad-batch-worker", "bmad-pb-worker") or "Build Auto worker" in first_line:
