@@ -120,6 +120,13 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.21.4:** two retries, then stop, everywhere in a run. A failing test,
+  check or gate reason gets 2 fix rounds (the Haiku coder and the worker), a
+  unit that fails its gate 2 re-dispatches (the default gate policy is now
+  "Re-dispatch twice, then leave it out"), a handed-back worker or synthesis 2
+  resumes, and the ticket script 2 re-runs; synthesis, CI and the enhancer
+  already stopped at 2. After the second retry it is reported as a failure,
+  never tried a third time.
 - **0.21.3:** a Sonnet planner for small, low-risk units, as a trial that is
   off by default. With `"sonnet_planner": true` in the project profile
   (`profile.py set <root> sonnet_planner true`), `plan-waves.py` gives every

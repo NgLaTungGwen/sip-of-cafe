@@ -837,6 +837,25 @@ class PrepareWorktree(unittest.TestCase):
         self.assertIn("Size: <size>", worker)
         self.assertIn("--db-template <template>", worker)
 
+    def test_every_retry_stops_after_two(self):
+        # One rule for every loop in a run: at most 2 retries, then it is a failure.
+        wt, toml = self.pinned(with_api=False)
+        self.assertIn("gets at most 2 fix rounds: if it still fails after the second, start no third", toml)
+        read = lambda *p: open(os.path.join(*p), encoding="utf-8").read()
+        skill = read(SKILL_DIR, "SKILL.md")
+        for text in ("**Two retries, then stop.**", "**Re-dispatch twice, then leave it out (Recommended)**",
+                     "re-dispatch the unit as below, at most twice", "fewer than 2 re-dispatches",
+                     "re-run it, at most twice;", "Resume one agent at most twice"):
+            self.assertIn(text, skill)
+        self.assertNotIn("Re-dispatch once", skill.replace("the older `Re-dispatch once, then leave it out`", ""))
+        self.assertIn("Check again at most twice in\n   all", read(SKILL_DIR, "references", "worker.md"))
+        self.assertIn("Stop after two\nreview rounds", read(SKILL_DIR, "references", "synthesis.md"))
+        self.assertIn("At most two fix rounds", read(SKILL_DIR, "references", "synthesis.md"))
+        for agents in (os.path.join(SKILL_DIR, "agents"), os.path.join(SKILL_DIR, "..", "..", "agents")):
+            self.assertIn("run it again, at most\n  twice", read(agents, "haiku-implementer.md"))
+            self.assertIn("at most 2\nretries", read(agents, "bmad-batch-worker.md"))
+        self.assertEqual(load("plan_review_gates", "plan-review.py").GATES[0], "Re-dispatch twice, then leave it out")
+
     def test_build_is_not_banned_when_the_project_requires_it(self):
         # An unconditional "Never run npm run build" made workers skip a build
         # that the intent or AGENTS.md required (healthpro-seed-fix, healthpro-cyber).
@@ -3004,7 +3023,7 @@ class PlanReview(unittest.TestCase):
                    "unit_estimates": {"1": {"p50": 42}}}, open(plan, "w"))
         self.assertEqual(self.run_pr("render", self.intake, "--out", page, "--gate", "--note", note, "--plan", plan)[0], 0)
         html_ = open(page, encoding="utf-8").read()
-        self.assertIn('name="gate" value="Re-dispatch once, then leave it out" checked', html_)
+        self.assertIn('name="gate" value="Re-dispatch twice, then leave it out" checked', html_)
         self.assertIn('value="build-directly" checked', html_)  # the advice puts it first
         self.assertIn("What changed since your comments", html_)
         self.assertIn("<code>dto.ts</code>", html_)

@@ -24,7 +24,9 @@ the code, or a skipped review, comes back to you as blocked work. It also
 rejects a bug unit without its `RED:`/`GREEN:` reproduction, and, when the
 project has an app check, a unit that did not pass it at its final code. The
 workflow's pinned facts say how to do both. Evidence comes from running the
-code, never from the coder's report of it.
+code, never from the coder's report of it. Anything that fails gets at most 2
+retries (fix rounds, gate re-checks); after the second, report it as the
+blocking condition.
 
 A guard (the plugin's hook) denies destructive commands: changing the
 main checkout, force pushes, pushes to a protected branch, merging a PR,
