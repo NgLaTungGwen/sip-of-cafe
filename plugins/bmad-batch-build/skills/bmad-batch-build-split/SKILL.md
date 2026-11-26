@@ -61,8 +61,11 @@ After approval and the freeze, create `<runs>/<slug>-split.json` (format in
 `<core>/scripts/split-prs.py`) with `ibranch` and one entry per approved unit
 with `id`, `title` and `depends_on`. Re-write it if the split changes later.
 
-**Build directly** works here too: build the units in that one worktree in
-dependency order, **one commit series per unit**, with `base`,
+**Build directly** works here too, the way the core skill runs it: one lane
+of `<agents>bmad-batch-worker` dispatches in that one worktree, in
+dependency order, so every unit keeps the run's models (never built in this
+session or by a subagent without a `model`). That gives **one commit series
+per unit**, with `base`,
 `base_branch` and `worktree` recorded as in section 4 below, and each unit's
 `from` (the head before it) and `to` (the head after it) in
 `<runs>/<slug>-split.json`. Then, instead of one PR, follow

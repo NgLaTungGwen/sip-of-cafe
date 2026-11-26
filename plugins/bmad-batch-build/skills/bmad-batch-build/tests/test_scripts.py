@@ -2186,6 +2186,47 @@ class Guard(unittest.TestCase):
         # A worker's reviewer (general-purpose) working inside a batch worktree is guarded.
         self.assertIsNotNone(self.bash("gh pr merge 12", agent="general-purpose", cwd=self.wt))
 
+    def test_a_subagent_for_a_batch_worktree_names_its_model(self):
+        # Build directly built every unit on the session's Opus: its subagents were
+        # general-purpose with no model, so they inherited it (2026-11-26).
+        main = {"agent": None, "agent_id": None}
+        prompt = f"Implement unit 1 in {self.wt}. Spec: {self.wt}/_bmad-output/spec.md"
+        for tool in ("Agent", "Task"):
+            why = self.hook(tool, {"subagent_type": "general-purpose", "prompt": prompt}, **main)
+            self.assertIn("names neither a run agent type nor a model", why)
+            self.assertIn(self.wt, why)
+        self.assertIsNotNone(self.hook("Agent", {"prompt": prompt}, **main))  # no type is general-purpose
+        self.assertIsNotNone(self.hook("Agent", {"subagent_type": "Explore", "prompt": prompt}, **main))
+        windows = prompt.replace("/", "\\")
+        self.assertIsNotNone(self.hook("Agent", {"subagent_type": "general-purpose", "prompt": windows}, **main))
+        # A subagent's own Agent call is checked the same way.
+        self.assertIsNotNone(self.hook("Agent", {"subagent_type": "general-purpose", "prompt": prompt}))
+
+    def test_build_directly_runs_the_units_on_the_run_agents(self):
+        hooks = json.load(open(os.path.join(SKILL_DIR, "..", "..", "hooks", "hooks.json"), encoding="utf-8"))
+        matcher = hooks["hooks"]["PreToolUse"][0]["matcher"].split("|")
+        self.assertIn("Agent", matcher)
+        self.assertIn("Task", matcher)
+        skill = open(os.path.join(SKILL_DIR, "SKILL.md"), encoding="utf-8").read()
+        direct = skill[skill.index("Building directly means:"):skill.index("Approving it still approves")]
+        self.assertIn("`<agents>bmad-batch-worker` per unit, one at a time", direct)
+        self.assertIn("Never build or review a unit in this session", direct)
+        self.assertNotIn("in this session, in dependency order, with `bmad-build`", direct)
+
+    def test_run_agents_and_named_models_may_work_on_a_batch_worktree(self):
+        main = {"agent": None, "agent_id": None}
+        prompt = f"Worktree: {self.wt}"
+        for agent in ("bmad-batch-build:bmad-batch-worker", "bmad-batch-worker", "bmad-batch-build:haiku-implementer",
+                      "bmad-batch-build:bmad-batch-planner", "bmad-batch-build:bmad-batch-synthesis"):
+            self.assertIsNone(self.hook("Agent", {"subagent_type": agent, "prompt": prompt}, **main), agent)
+        self.assertIsNone(self.hook("Agent", {"subagent_type": "general-purpose", "model": "sonnet",
+                                              "prompt": prompt}, **main))
+        # Not a prepared batch worktree, or no worktree at all: the call is not ours to check.
+        other = os.path.join(self.root, ".claude", "worktrees", "not-a-batch").replace("\\", "/")
+        self.assertIsNone(self.hook("Agent", {"subagent_type": "general-purpose", "prompt": f"Fix {other}"}, **main))
+        self.assertIsNone(self.hook("Agent", {"subagent_type": "general-purpose", "prompt": "Explain foo"}, **main))
+        self.assertIsNone(self.hook("Agent", {"subagent_type": "general-purpose"}, **main))
+
     def test_powershell_calls_are_read_like_bash(self):
         cmd = "bash -c 'cd " + self.wt + " && git push --force origin HEAD'"
         self.assertIsNotNone(self.hook("PowerShell", {"command": cmd}))
