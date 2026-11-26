@@ -252,8 +252,12 @@ class PlanEstimates(unittest.TestCase):
         self.assertIn("whole runs: 1", text)
         self.assertIn("no measured units", waves.accuracy(rows=[])[0])
 
-    def run_script(self, units, *extra):
+    def run_script(self, units, *extra, profile=None):
         d = tempfile.mkdtemp()
+        if profile is not None:
+            os.makedirs(os.path.join(d, ".claude"))
+            with open(os.path.join(d, ".claude", "bmad-batch-project.json"), "w", encoding="utf-8") as f:
+                f.write(profile if isinstance(profile, str) else json.dumps(profile))
         path = os.path.join(d, "plan.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"units": units}, f)
@@ -276,6 +280,19 @@ class PlanEstimates(unittest.TestCase):
         out, saved = self.run_script([dict(unit(1), files=["r.ts"]), dict(unit(2), files=["r.ts"])])
         self.assertIn("Chained: unit 2 now depends on unit 1", out)
         self.assertEqual(saved["units"][1]["depends_on"], [1])
+
+    def test_only_small_low_risk_units_plan_on_sonnet_and_only_when_the_profile_opts_in(self):
+        units = [dict(unit(1, "S"), risk="low"), dict(unit(2, "S"), risk="med"), dict(unit(3, "M"), risk="low"),
+                 unit(4, "S")]  # no risk: no intake
+        out, saved = self.run_script(units, profile={"sonnet_planner": True})
+        planners = {k: v["planner"] for k, v in saved["unit_estimates"].items()}
+        self.assertEqual(planners, {"1": "sonnet", "2": "opus", "3": "opus", "4": "opus"})
+        self.assertIn("Planner: sonnet for unit 1 ", out)
+        # Off by default, and fails closed on a missing, false or broken profile.
+        for profile in (None, {}, {"sonnet_planner": False}, {"sonnet_planner": "true"}, "{not json", "[]"):
+            out, saved = self.run_script([dict(unit(1, "S"), risk="low")], profile=profile)
+            self.assertEqual(saved["unit_estimates"]["1"]["planner"], "opus", profile)
+            self.assertNotIn("Planner:", out)
 
     def test_accuracy_runs_from_the_command_line(self):
         d = tempfile.mkdtemp()
@@ -1722,6 +1739,18 @@ class Roles(unittest.TestCase):
         for mod in (load("cost_report", "cost-report.py"), journal):
             self.assertEqual(mod.role({"spawnDepth": 2, "agentType": "bmad-batch-planner"}, "{}"), "planner")
             self.assertEqual(mod.role({"spawnDepth": 2, "agentType": "general-purpose"}, fallback), "planner")
+
+    def test_a_sonnet_planner_is_told_apart_by_its_model(self):
+        cost = load("cost_report", "cost-report.py")
+        turn = lambda model: {"type": "assistant", "message": {"model": model, "content": []}}
+        self.assertEqual(cost.first_model([{"type": "user"}, turn("<synthetic>"), turn("claude-sonnet-5-5")]),
+                         "claude-sonnet-5-5")
+        self.assertEqual(cost.first_model([{"type": "user"}]), "")
+        dash = open(os.path.join(DASHBOARD_DIR, "assets", "dashboard.html"), encoding="utf-8").read()
+        self.assertIn('"planner_sonnet"', dash)
+        # Every role has a colour slot defined, in each theme.
+        roles = re.search(r"var ROLES = \[(.*?)\]", dash).group(1).count('"') // 2
+        self.assertEqual(dash.count(f"--s{roles}:"), 3)
 
 
 class AgentFiles(unittest.TestCase):
@@ -3648,6 +3677,7 @@ class IntakeReview(unittest.TestCase):
     def test_the_worker_dispatch_carries_the_intake_lines(self):
         worker = open(os.path.join(SKILL_DIR, "references", "worker.md"), encoding="utf-8").read()
         for line in ("Intake: <intake>", "Risk: <risk>", "Interface changes: <iface>", "Size: <size>",
+                     "Planner: <planner>", "When your `Planner:` line\n   says `sonnet`, also pass `model: sonnet`",
                      "STATUS: blocked-interface", 'intake.py" unit "<intake>" <n>',
                      'intake.py" iface add "<iface>"', 'intake.py" iface show "<iface>"',
                      '--intake "<intake>" --unit <n> --iface "<iface>"', "--reply-interfaces"):

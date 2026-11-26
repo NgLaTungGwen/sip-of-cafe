@@ -219,6 +219,15 @@ def split_session(lines, subs):
     return runs, owner
 
 
+def first_model(lines):
+    """The model of a transcript's first real assistant turn, or ""."""
+    for x in lines:
+        m = x.get("message") if isinstance(x, dict) else None
+        if x.get("type") == "assistant" and isinstance(m, dict) and m.get("model") not in (None, "<synthetic>"):
+            return m["model"]
+    return ""
+
+
 def role(meta, first_line):
     agent = meta.get("agentType")
     if agent == "haiku-implementer":
@@ -420,6 +429,8 @@ def run(session_path, slug=None):
     acc["main"]["agents"] += 1
     for f, (meta, sub) in subs.items():
         lab = role(meta, json.dumps(sub[0]) if sub else "")
+        if lab == "planner" and "sonnet" in first_model(sub):
+            lab = "planner_sonnet"  # the sonnet_planner trial, kept apart from the Opus planners
         if lab == "worker":
             quality["workers"].append(unit_quality(sub, children(base, sub)))
         if lab == "synthesis":
