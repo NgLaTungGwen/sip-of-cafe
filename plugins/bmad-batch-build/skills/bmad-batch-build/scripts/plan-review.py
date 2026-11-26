@@ -63,7 +63,7 @@ import webbrowser
 
 MERMAID = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
 DECISIONS = ("approve", "build-directly", "adjust", "cancel")
-GATES = ("Re-dispatch twice, then leave it out", "Merge unverified", "Ask me")
+GATES = ("Fix it, then leave it out", "Merge unverified", "Ask me")
 MAX_BODY = 1_000_000
 TOKEN = "__PLAN_REVIEW_TOKEN__"
 MERMAID_BLOCK = re.compile(r"```mermaid[ \t]*\n(.*?)\n```", re.S)

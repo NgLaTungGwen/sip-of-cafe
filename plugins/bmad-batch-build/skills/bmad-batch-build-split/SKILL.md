@@ -95,7 +95,7 @@ unverified), write its range into `<runs>/<slug>-split.json`:
   `git -C "<root>" rev-parse <its branch>`.
 
 A unit left out goes into `left_out`, and so does every unit that depends on
-it. A re-dispatched unit gets its range from the new worker.
+it. A unit fixed in place keeps its `from`; its `to` is the head after the fix.
 
 ### Section 7: the final synthesis
 

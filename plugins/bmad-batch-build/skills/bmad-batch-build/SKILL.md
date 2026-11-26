@@ -46,13 +46,16 @@ Two rules shape the flow, because most of a run is waiting:
   failures.
 
 **Two retries, then stop.** Anything that fails gets at most 2 more tries,
-everywhere in a run: a failing test, check or gate reason gets 2 fix rounds
-(coder and worker), a unit that fails its gate 2 re-dispatches, a handed-back
-worker or synthesis 2 resumes, the ticket script 2 re-runs, and synthesis 2
-fix rounds per failure, per review and per CI run. After the second retry it
-is a failure: report it (a unit `NOT READY` with its reasons, synthesis
-`stuck`), never a third try. Splitting a long list of findings into rounds
-of about 15 is not a retry.
+everywhere in a run: a failing check or gate reason gets 2 fix rounds (coder
+and worker), a unit that fails its gate 2 fix attempts in place (never a
+rebuild: section 6), a handed-back worker or synthesis 2 resumes, the ticket
+script 2 re-runs, and synthesis 2 fix rounds per failure, per review and per
+CI run. After the second retry it is a failure: report it (a unit `NOT
+READY` with its reasons, synthesis `stuck`), never a third try. Splitting a
+long list of findings into rounds of about 15 is not a retry.
+A failing test is the exception: fix the code until it passes, with no
+round limit (only the unit's budget, or synthesis's turns, stop it), and
+never weaken, skip or delete the test to make it pass.
 
 Paths in this skill:
 
@@ -647,9 +650,9 @@ Otherwise the choice is approve, adjust or cancel. With it, the **gate
 policy** is asked once (on the page with `--gate`; in the fallback, in the same
 `AskUserQuestion` call) (skip it for a single unit, or
 when every unit is in one lane): `If a unit nothing depends on fails its gate,
-what then?`, with **Re-dispatch twice, then leave it out (Recommended)**, "A
-fresh worker builds it again, up to twice; if both fail, its task stays open and
-out of the PR", **Merge unverified**, "Keep its code when it failed only on
+what then?`, with **Fix it, then leave it out (Recommended)**, "A
+worker fixes what the gate found, keeping its commits, up to twice; if it is
+still not ready, its task stays open and out of the PR", **Merge unverified**, "Keep its code when it failed only on
 review traces, the reproduction or the app check; the PR marks it", and **Ask
 me**, "Stop and ask about each failed unit". Write the answer into the run file
 as `Gate policy: <option>`. The open questions were settled in Step 3, so this
@@ -969,11 +972,11 @@ interface without an approved `intake.py iface add` entry for it fails here.
 - **Some units nothing depends on are not ready:** follow the run file's
   `Gate policy:` line without asking. Write each unit, its reasons and its
   spec path into the run file, and what the policy did with it.
-  - **Re-dispatch twice, then leave it out** (also the policy when the run
-    file has none, or names the older `Re-dispatch once, then leave it out`):
-    re-dispatch the unit as below, at most twice, with the gate's
-    reasons added after its `intake.py unit` output. If the third worker's unit is not ready
-    either, leave it out: its task stays open and out of the PR.
+  - **Fix it, then leave it out** (also the policy when the run file has
+    none, or names an older `Re-dispatch ...` policy): fix the unit in place,
+    as `<skill>/references/worker.md` ("Fixing a failed unit in place") says,
+    at most twice. If it is still not ready, leave it out: its task stays open
+    and out of the PR.
   - **Merge unverified**: when the unit failed only on workflow traces (no
     baseline, no intent contract, no review pass), keep its code and mark it
     unreviewed; when it failed only on the reproduction or the app check,
@@ -983,26 +986,24 @@ interface without an approved `intake.py iface add` entry for it fails here.
     spec paths. Then ask one question per unit, up to four (beyond that, one
     question for the rest), for example `Unit 3 (metrics handler) isn't
     ready. What now?`, with **Leave it out**, "Continue; its task stays open
-    and out of the PR", **Re-dispatch**, "A fresh worker builds it again" (offered only while the
-    unit has had fewer than 2 re-dispatches), and
+    and out of the PR", **Fix it**, "A worker fixes what the gate found, keeping its commits"
+    (offered only while the unit has had fewer than 2 fix attempts), and
     **Stop**, "End the run here; the branches stay as they are", plus **Merge
     unreviewed** or **Merge unverified** when only the traces, or only the
     reproduction or app check, failed.
-  The final report lists every unit the policy re-dispatched, left out or
-  merged unreviewed or unverified.
-  To re-dispatch, clear the unit first, because `prepare-worktree.sh` refuses an
-  existing path and branch:
-  `bash "<skill>/scripts/remove-worktree.sh" "<root>" "<name>" "<branch>"`, then
-  `git -C "<root>" branch -D "<branch>"` (the script's `-d` keeps an unmerged
-  branch). Then send a fresh worker with the same intent, plus the gate's
-  reasons. A correction that changes what the unit must do goes into the
-  intake first, with `intake.py amend`.
+  The final report lists every unit the policy fixed, left out or merged
+  unreviewed or unverified.
+  A failed unit is never removed and rebuilt from scratch: its worktree,
+  branch and commits stay, and the fix works on them. A correction that
+  changes what the unit must do goes into the intake first, with
+  `intake.py amend`, and reaches the fix as an `amend` line in its intent.
 - **`STATUS: blocked-interface`:** the worker found that the agreed interface
   can't work as pinned, and says why. It is a failed unit that needs a
   decision, whatever the gate policy, so ask (it is a real blocker): show the
   reason and the interface line from the intake, and ask whether to change
   the interface (record it with `intake.py amend` and `intake.py iface add`,
-  then re-dispatch the unit and any unit that consumes it), leave the unit
+  then fix the unit, and any unit that consumes it, in place with an
+  `Approved interface change:` line), leave the unit
   out, or stop.
 - **A lane unit is not ready:** the lane stops there, because later units
   build on it. A unit that later waves depend on stops the run the same way.
@@ -1011,9 +1012,9 @@ interface without an approved `intake.py iface add` entry for it fails here.
   now?`, with:
   - **Keep, unreviewed**: "Continue with the next unit; the PR marks this one
     unreviewed".
-  - **Re-dispatch**: "Discard this unit's commits and build it again". Reset
-    the lane to the unit's base with `git -C <wt> reset --hard <base>`, then
-    send a fresh worker.
+  - **Fix it**: "A worker fixes what the gate found, keeping its commits"
+    (fix in place, as above; offered only while the unit has had fewer than 2
+    fix attempts).
   - **Stop**: "Send the units done so far to synthesis".
 
 ## 7. Synthesis

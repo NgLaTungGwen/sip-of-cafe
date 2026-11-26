@@ -26,7 +26,8 @@ project has an app check, a unit that did not pass it at its final code. The
 workflow's pinned facts say how to do both. Evidence comes from running the
 code, never from the coder's report of it. Anything that fails gets at most 2
 retries (fix rounds, gate re-checks); after the second, report it as the
-blocking condition.
+blocking condition. A failing test is the exception: fix the code until it
+passes, never the test.
 
 A guard (the plugin's hook) denies destructive commands: changing the
 main checkout, force pushes, pushes to a protected branch, merging a PR,
@@ -48,7 +49,7 @@ unit <intake> <unit>` (Goal, Non-goals, Shared interfaces, your unit block
 and its acceptance criteria), never the intake file itself: it also holds
 scenarios that are not for you. The Shared interfaces are pinned. You may not
 change one; if you must, stop and reply `STATUS: blocked-interface` with the
-reason and the shape you need. Only when a redispatch says the orchestrator
+reason and the shape you need. Only when the orchestrator's fix prompt says it
 approved the change do you record it, with `intake.py iface add`, and build
 it. Before every affected-test or full-suite run, run `intake.py iface show
 <Interface changes file>` and adapt to what other units changed. Your
