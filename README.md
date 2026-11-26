@@ -120,6 +120,15 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.21.5:** a failed unit is fixed in place, never rebuilt, and a failing
+  test is fixed until it passes. The gate policy is now "Fix it, then leave
+  it out": a worker fixes only what the gate found, on the unit's own
+  worktree, branch, commits and spec (the same worker within 50 minutes,
+  else a fresh one with a fix-in-place prompt), at most twice; "Ask me" and
+  the lane question offer **Fix it** instead of a rebuild. A failing test has
+  no round limit in the coder, the worker or synthesis (only the unit's
+  budget, or synthesis's turns, stop it), and the test is never weakened,
+  skipped or deleted to pass. Everything else still stops after 2 retries.
 - **0.21.4:** two retries, then stop, everywhere in a run. A failing test,
   check or gate reason gets 2 fix rounds (the Haiku coder and the worker), a
   unit that fails its gate 2 re-dispatches (the default gate policy is now

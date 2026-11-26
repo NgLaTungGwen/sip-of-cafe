@@ -837,24 +837,34 @@ class PrepareWorktree(unittest.TestCase):
         self.assertIn("Size: <size>", worker)
         self.assertIn("--db-template <template>", worker)
 
-    def test_every_retry_stops_after_two(self):
+    def test_every_retry_stops_after_two_but_a_failing_test_is_fixed_until_it_passes(self):
         # One rule for every loop in a run: at most 2 retries, then it is a failure.
+        # A failing test is the exception (fix the code until it passes), and a
+        # failed unit is fixed in place, never rebuilt from scratch.
         wt, toml = self.pinned(with_api=False)
-        self.assertIn("gets at most 2 fix rounds: if it still fails after the second, start no third", toml)
+        self.assertIn("A failing test is fixed until it passes, with no round limit", toml)
+        self.assertIn("Any other failure (a typecheck or check) gets at most 2 fix rounds", toml)
         read = lambda *p: open(os.path.join(*p), encoding="utf-8").read()
         skill = read(SKILL_DIR, "SKILL.md")
-        for text in ("**Two retries, then stop.**", "**Re-dispatch twice, then leave it out (Recommended)**",
-                     "re-dispatch the unit as below, at most twice", "fewer than 2 re-dispatches",
-                     "re-run it, at most twice;", "Resume one agent at most twice"):
+        for text in ("**Two retries, then stop.**", "A failing test is the exception: fix the code until it passes",
+                     "**Fix it, then leave it out (Recommended)**", "fix the unit in place",
+                     "fewer than 2 fix attempts", "re-run it, at most twice;", "Resume one agent at most twice",
+                     "never removed and rebuilt from scratch"):
             self.assertIn(text, skill)
-        self.assertNotIn("Re-dispatch once", skill.replace("the older `Re-dispatch once, then leave it out`", ""))
-        self.assertIn("Check again at most twice in\n   all", read(SKILL_DIR, "references", "worker.md"))
-        self.assertIn("Stop after two\nreview rounds", read(SKILL_DIR, "references", "synthesis.md"))
-        self.assertIn("At most two fix rounds", read(SKILL_DIR, "references", "synthesis.md"))
+        for gone in ("remove-worktree.sh\" \"<root>\" \"<name>\" \"<branch>\"`, then\n  `git -C \"<root>\" branch -D",
+                     "Discard this unit's commits and build it again", "**Re-dispatch"):
+            self.assertNotIn(gone, skill)
+        worker = read(SKILL_DIR, "references", "worker.md")
+        self.assertIn("## Fixing a failed unit in place", worker)
+        self.assertIn("Don't plan again and don't rebuild: keep\n  every commit and the spec.", worker)
+        synth = read(SKILL_DIR, "references", "synthesis.md")
+        self.assertIn("A failing test is fixed until it\npasses", synth)
+        self.assertIn("A failing test is fixed until it passes. Anything else gets at most two", synth)
         for agents in (os.path.join(SKILL_DIR, "agents"), os.path.join(SKILL_DIR, "..", "..", "agents")):
-            self.assertIn("run it again, at most\n  twice", read(agents, "haiku-implementer.md"))
-            self.assertIn("at most 2\nretries", read(agents, "bmad-batch-worker.md"))
-        self.assertEqual(load("plan_review_gates", "plan-review.py").GATES[0], "Re-dispatch twice, then leave it out")
+            self.assertIn("run it again until it passes", read(agents, "haiku-implementer.md"))
+            self.assertIn("Never weaken, skip or delete the test", read(agents, "haiku-implementer.md"))
+            self.assertIn("A failing test is the exception", read(agents, "bmad-batch-worker.md"))
+        self.assertEqual(load("plan_review_gates", "plan-review.py").GATES[0], "Fix it, then leave it out")
 
     def test_build_is_not_banned_when_the_project_requires_it(self):
         # An unconditional "Never run npm run build" made workers skip a build
@@ -3023,7 +3033,7 @@ class PlanReview(unittest.TestCase):
                    "unit_estimates": {"1": {"p50": 42}}}, open(plan, "w"))
         self.assertEqual(self.run_pr("render", self.intake, "--out", page, "--gate", "--note", note, "--plan", plan)[0], 0)
         html_ = open(page, encoding="utf-8").read()
-        self.assertIn('name="gate" value="Re-dispatch twice, then leave it out" checked', html_)
+        self.assertIn('name="gate" value="Fix it, then leave it out" checked', html_)
         self.assertIn('value="build-directly" checked', html_)  # the advice puts it first
         self.assertIn("What changed since your comments", html_)
         self.assertIn("<code>dto.ts</code>", html_)

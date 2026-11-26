@@ -249,8 +249,10 @@ the fix as `fix(merge): ...`. Don't weaken, skip or delete tests to get green.
 Checks that fail by design in this project, `<ci ignore>`, are ignored here and on
 the server (hive-factory's pipeline `Acceptance` stage, for example).
 
-**Stop and report if you're stuck.** If the same failure survives two serious
-fix attempts, or a fix would mean choosing between two units' requirements, do
+**Stop and report if you're stuck.** A failing test is fixed until it
+passes: fix the code, never weaken, skip or delete the test. If any other
+failure survives two serious fix attempts, or a test fails for a reason the
+code can't fix (the environment, a service that is down), or a fix would mean choosing between two units' requirements, do
 not open a PR. First write `<state>`: what is merged, the repairs so far, which
 checks pass, the failing command and the last lines of its output, what you
 tried, and the open decision. Then reply with `RESULT: stuck` and the same
@@ -555,7 +557,8 @@ failure a `LOG` file with the error lines and the end of the failed step.
     are about to watch runs every check on the pushed commit anyway. A fix to
     pipeline YAML only needs no local check at all.
 
-  At most two fix rounds. If it is still red, stop: write the failure and
+  A failing test is fixed until it passes. Anything else gets at most two
+  fix rounds. If it is still red, stop: write the failure and
   what you tried to `<state>`, and say so in `CI:` and `NOTES:`.
 
 Never merge or complete the PR, start a pipeline or a deploy, or approve

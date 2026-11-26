@@ -133,7 +133,7 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
       BLOCKED: <the interface, why it must change, and the shape you need: <old> -> <new>>
       HEAD: <output of `git -C <wt> rev-parse HEAD`>
       INTERFACES: <as in step 3>
-      The orchestrator decides. When it approves, it redispatches you with a
+      The orchestrator decides. When it approves, it sends you back (in place, same worktree) with a
       line `Approved interface change: <symbol>: <old> -> <new>`. Then, before
       changing the code, record it for the other units:
       python "<skill>/scripts/intake.py" iface add "<iface>" --unit <n> --iface "<symbol>" --change "<old> -> <new>" --reason "<why>"
@@ -216,8 +216,8 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
    follow `step-04-review.md`, which sits beside workflow.md, then check
    again. For any other reason you can fix (an uncommitted change, a missing
    reproduction line), fix it and check again. Check again at most twice in
-   all, a missing review pass included; if it still prints `NOT READY`, reply
-   with its reasons in BLOCKED. Then reply with exactly
+   all, a missing review pass included (a failing test is fixed until it
+   passes); if it still prints `NOT READY`, reply with its reasons in BLOCKED. Then reply with exactly
    these lines and nothing else:
    SPEC: <absolute path of the spec or result file the workflow wrote>
    STATUS: <the status in its frontmatter, or blocked-interface (step 0c)>
@@ -327,3 +327,40 @@ parallel unit:
   `bash "<skill>/scripts/check-unit.sh" [--bug] "<wt>" "<branch>" "<spec>" "<base>"`.
   A `NOT READY` unit stops the lane, because later units build on it. SKILL.md
   section 6 decides what happens next.
+
+## Fixing a failed unit in place
+
+A unit that fails its gate is fixed where it is, never rebuilt: its worktree,
+branch, commits and spec stay, and a worker fixes only what the gate named.
+At most 2 fix attempts per unit (SKILL.md, "Two retries, then stop").
+
+- Within 50 minutes of the worker's reply (its 1-hour cache is still warm),
+  continue the same worker with `SendMessage`:
+  `The gate says NOT READY: <reasons>. Fix only these, in <wt>, as the fix
+  steps below say, then run step 3 again and reply in its format.`
+- Later, send a fresh `<agents>bmad-batch-worker` with the unit's usual
+  prompt, with step 0 replaced by the later-lane-unit step 0 above (the
+  worktree is prepared and on `<branch>`), and with this as its intent,
+  before the `intake.py unit` output:
+  ```text
+  Fix in place. This unit was built on <branch>; its spec is <spec>. The
+  gate says NOT READY: <reasons>. Don't plan again and don't rebuild: keep
+  every commit and the spec. Fix only those reasons, as the fix steps say.
+  ```
+
+Fix steps, by reason:
+
+- a failing test: fix the code until the test passes (see the pinned facts:
+  a failing test has no round limit, only the unit's budget). Never weaken,
+  skip or delete the test to make it pass;
+- no review pass: run `step-04-review.md` (beside workflow.md) and its fixes;
+- no reproduction line: run the reproduction test as the spec's
+  `## Reproduction` says and record `RED:`/`GREEN:`;
+- an app check missing, failed, or older than the code: fix what it found and
+  run it again;
+- a dirty tree: commit or discard the change, whichever the spec wants;
+- a status that isn't done, or no `<intent-contract>` or `baseline_revision`:
+  continue the workflow from the step where the unit stopped, from its spec;
+  launch the planner (step 1) only when there is no spec at all.
+
+Source changes go through the implementation subagent, as in every fix round.
