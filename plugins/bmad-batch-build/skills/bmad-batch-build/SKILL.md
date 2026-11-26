@@ -45,6 +45,15 @@ Two rules shape the flow, because most of a run is waiting:
   agents spend their turns on judgment: planning, review triage, conflicts and
   failures.
 
+**Two retries, then stop.** Anything that fails gets at most 2 more tries,
+everywhere in a run: a failing test, check or gate reason gets 2 fix rounds
+(coder and worker), a unit that fails its gate 2 re-dispatches, a handed-back
+worker or synthesis 2 resumes, the ticket script 2 re-runs, and synthesis 2
+fix rounds per failure, per review and per CI run. After the second retry it
+is a failure: report it (a unit `NOT READY` with its reasons, synthesis
+`stuck`), never a third try. Splitting a long list of findings into rounds
+of about 15 is not a retry.
+
 Paths in this skill:
 
 - `<root>` is the project's main checkout, the absolute path printed by
@@ -638,8 +647,8 @@ Otherwise the choice is approve, adjust or cancel. With it, the **gate
 policy** is asked once (on the page with `--gate`; in the fallback, in the same
 `AskUserQuestion` call) (skip it for a single unit, or
 when every unit is in one lane): `If a unit nothing depends on fails its gate,
-what then?`, with **Re-dispatch once, then leave it out (Recommended)**, "A
-fresh worker builds it once more; if that fails too, its task stays open and
+what then?`, with **Re-dispatch twice, then leave it out (Recommended)**, "A
+fresh worker builds it again, up to twice; if both fail, its task stays open and
 out of the PR", **Merge unverified**, "Keep its code when it failed only on
 review traces, the reproduction or the app check; the PR marks it", and **Ask
 me**, "Stop and ask about each failed unit". Write the answer into the run file
@@ -828,8 +837,8 @@ approved intake or approve the new one (a real failure, so it may ask).
      in the format documented in `<skill>/scripts/<tickets script>`. Then make
      one Bash call with `run_in_background: true` and a long timeout:
      `python "<skill>/scripts/<tickets script>" "<runs>/<slug>-tickets.json"`.
-     The IDs are written back into that file. If the call fails, re-run it once;
-     it creates only what is still missing. If it fails again, carry on with the
+     The IDs are written back into that file. If the call fails, re-run it, at most twice;
+     it creates only what is still missing. If it still fails, carry on with the
      build and report the error at the end. Tickets never block the code.
    - **Wave 1's workers:** one foreground `Agent` call per unit for a parallel
      wave, or the first unit's worker for a lane wave, using the prompts in
@@ -942,7 +951,8 @@ then continue it with `SendMessage`, giving it their reports word for word
 and what it still has to do, and wait again. Gate only a reply that says
 `done` or `ready`, or one that names a real blocking condition. Note each
 resume in the run file as `RESUME: <unit or synthesis>: <why>`; the journal
-counts them.
+counts them. Resume one agent at most twice: a third hand-back is a failure,
+gated as `NOT READY` (a worker) or handled as `stuck` (synthesis).
 
 ## 6. Gate
 
@@ -959,9 +969,10 @@ interface without an approved `intake.py iface add` entry for it fails here.
 - **Some units nothing depends on are not ready:** follow the run file's
   `Gate policy:` line without asking. Write each unit, its reasons and its
   spec path into the run file, and what the policy did with it.
-  - **Re-dispatch once, then leave it out** (also the policy when the run
-    file has none): re-dispatch the unit once, as below, with the gate's
-    reasons added after its `intake.py unit` output. If the second worker's unit is not ready
+  - **Re-dispatch twice, then leave it out** (also the policy when the run
+    file has none, or names the older `Re-dispatch once, then leave it out`):
+    re-dispatch the unit as below, at most twice, with the gate's
+    reasons added after its `intake.py unit` output. If the third worker's unit is not ready
     either, leave it out: its task stays open and out of the PR.
   - **Merge unverified**: when the unit failed only on workflow traces (no
     baseline, no intent contract, no review pass), keep its code and mark it
@@ -972,7 +983,8 @@ interface without an approved `intake.py iface add` entry for it fails here.
     spec paths. Then ask one question per unit, up to four (beyond that, one
     question for the rest), for example `Unit 3 (metrics handler) isn't
     ready. What now?`, with **Leave it out**, "Continue; its task stays open
-    and out of the PR", **Re-dispatch**, "A fresh worker builds it again", and
+    and out of the PR", **Re-dispatch**, "A fresh worker builds it again" (offered only while the
+    unit has had fewer than 2 re-dispatches), and
     **Stop**, "End the run here; the branches stay as they are", plus **Merge
     unreviewed** or **Merge unverified** when only the traces, or only the
     reproduction or app check, failed.

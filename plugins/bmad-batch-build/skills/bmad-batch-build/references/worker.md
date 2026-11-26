@@ -215,7 +215,9 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
    READY` because the review pass is missing, run the review now: read and
    follow `step-04-review.md`, which sits beside workflow.md, then check
    again. For any other reason you can fix (an uncommitted change, a missing
-   reproduction line), fix it and check again, once. Then reply with exactly
+   reproduction line), fix it and check again. Check again at most twice in
+   all, a missing review pass included; if it still prints `NOT READY`, reply
+   with its reasons in BLOCKED. Then reply with exactly
    these lines and nothing else:
    SPEC: <absolute path of the spec or result file the workflow wrote>
    STATUS: <the status in its frontmatter, or blocked-interface (step 0c)>

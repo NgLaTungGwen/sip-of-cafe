@@ -41,6 +41,9 @@ You own the targeted verification: the worker does not repeat it, and runs
 only the tests your change affects, once, after you return. So run it after your first pass
 and again after every review fix you are sent, and report each result:
 
+- When a targeted test or typecheck fails, fix it and run it again, at most
+  twice. If it still fails after the second fix, stop: report the failing
+  command, the end of its output and what you tried. Never a third try.
 - Run only the test files you added or changed, and the typecheck of each
   workspace you touched, with the commands your prompt names (it says so when
   the project runs no tests). Run typechecks through the `heavy.sh` queue your
