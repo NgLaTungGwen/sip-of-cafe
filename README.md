@@ -120,6 +120,14 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.21.3:** a Sonnet planner for small, low-risk units, as a trial that is
+  off by default. With `"sonnet_planner": true` in the project profile
+  (`profile.py set <root> sonnet_planner true`), `plan-waves.py` gives every
+  S unit of low risk a Sonnet planner and prints a **Planner** line; every
+  other unit, and every unit of a run without an intake, keeps Opus. The
+  dashboard shows its cost as its own role, "Planner (Sonnet)", so the trial
+  can be compared before it becomes a default. The dashboard also gets the
+  colour slots its last roles were missing.
 - **0.21.2:** Build directly keeps the run's models. It built every unit in
   the orchestrator session, and its general-purpose subagents had no
   `model`, so the whole build ran on the session's Opus. Now it runs the

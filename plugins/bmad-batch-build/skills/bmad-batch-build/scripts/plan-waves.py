@@ -118,6 +118,13 @@ a **Chained** line lists every pair of units that share a file in "files" with
 no dependency between them: the later one gets a depends_on on the earlier
 (saved in plan.json), and they run in turn.
 
+Every unit gets a planner model in "unit_estimates" ("planner"): opus, unless
+the project profile under --root sets "sonnet_planner": true (off by default)
+and the unit is size S with risk low, which then gets sonnet and is named on
+a **Planner** line. A unit with no risk (no intake) keeps opus. Sonnet
+workers that also planned skipped the review in 31 of 47 units (2026-10-21/22),
+so this is a trial: compare the "planner_sonnet" role in the dashboard first.
+
 Prints the waves, every estimate, the critical path, units that dominate the
 run (**Straggler risk**), the chosen mode, the Mode line for the approval table
 and, when one applies, an Advice line. Writes the schedule back into plan.json
@@ -776,6 +783,24 @@ def set_mode_line(plan_path, line, result, cap_why, busy, hint=None):
             f"{shlex.quote(line)} --reason {shlex.quote(reason)}")
 
 
+def sonnet_planner_on(root):
+    """True when the project profile at <root> opts into Sonnet planners.
+    Fails closed: no root, no profile or an unreadable one keeps Opus."""
+    if not root:
+        return False
+    try:
+        with open(os.path.join(root, ".claude", "bmad-batch-project.json"), encoding="utf-8") as fh:
+            return json.load(fh).get("sonnet_planner") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def planner_of(unit, sonnet_on):
+    """The planner model for one unit: sonnet only for an S unit of low risk."""
+    small = unit.get("size") == "S" and str(unit.get("risk") or "").lower() == "low"
+    return "sonnet" if sonnet_on and small else "opus"
+
+
 def opt(args, name, default=None):
     return args[args.index(name) + 1] if name in args else default
 
@@ -843,11 +868,18 @@ def main(args):
     long_line = long_run(result, p80)
     if long_line:
         print("Long run: " + long_line + ".")
+    sonnet_on = sonnet_planner_on(root)
+    planners = {u["id"]: planner_of(u, sonnet_on) for u in units}
+    on_sonnet = [str(i) for i, m in planners.items() if m == "sonnet"]
+    if on_sonnet:
+        print(f"Planner: sonnet for unit {', '.join(on_sonnet)} (S, low risk; profile sonnet_planner); "
+              "opus for the rest.")
     data.update({"waves": result["waves"], "mode": result["mode"], "estimate": result["estimate"],
                  "estimate_p80": p80, "unit_minutes_used": model["size"], "advice": advice, "split": split,
                  "critical_path": {"units": path_ids, "minutes": path_min}, "stragglers": risks,
                  "unit_estimates": {str(u["id"]): {"p50": t[u["id"]], "p80": t80[u["id"]],
-                                                   "budget": budget(t[u["id"]], t80[u["id"]])}
+                                                   "budget": budget(t[u["id"]], t80[u["id"]]),
+                                                   "planner": planners[u["id"]]}
                                     for u in units}})
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)

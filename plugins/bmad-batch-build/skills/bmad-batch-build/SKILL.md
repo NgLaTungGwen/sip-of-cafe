@@ -591,8 +591,12 @@ Under it, paste the **Mode** line that `plan-waves.py` printed: the chosen
 mode, every estimate with its p80, the wave order and the dependencies, for
 example
 `Mode: waves (≈450 min, p80 ≈720 min; lane ≈670 min, parallel not possible, waves ≈450 min). Order: {1,2} → {3,4,5}.`
-Paste its **Critical path**, **Straggler risk**, **Chained** and **Long run**
-lines with it, when it printed them. This is information, not a question. The
+Paste its **Critical path**, **Straggler risk**, **Chained**, **Long run** and
+**Planner** lines with it, when it printed them. A **Planner** line appears only
+when the project profile sets `"sonnet_planner": true` (off by default; turn it
+on with `profile.py set "<root>" sonnet_planner true`): S units of low risk
+then plan on Sonnet instead of Opus, a trial to compare in the dashboard
+("Planner (Sonnet)"). This is information, not a question. The
 user can still change the schedule, or a dependency, by choosing "adjust".
 Write the same line into the run file. The plan file keeps the sizes and the
 waves.
@@ -835,7 +839,8 @@ approved intake or approve the new one (a real failure, so it may ask).
      with `<intake>` = `<runs>/<slug>-intake.md`, `<iface>` =
      `<runs>/<slug>-interface-changes.md` and `<n>` the unit's plan id (`1`
      for `U1`):
-     - the lines `Unit: <n>`, `Size: <size>`, `Risk: <risk>` (the unit's
+     - the lines `Unit: <n>`, `Size: <size>`, `Planner: <planner>` (the
+       unit's `planner` in the plan file's `unit_estimates`), `Risk: <risk>` (the unit's
        risk in the intake), `Intake: <intake>` and
        `Interface changes: <iface>`;
      - in step 0a, `--intake "<intake>" --unit <n> --iface "<iface>"` on

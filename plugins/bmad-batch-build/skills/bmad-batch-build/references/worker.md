@@ -72,6 +72,9 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 - `<budget>` and `<estimate>`: the unit's `budget` and `p50` under `unit_estimates` in the
   plan file, in minutes
 - `<size>`: the unit's size from the split (S, M or L)
+- `<planner>`: the unit's `planner` under `unit_estimates` in the plan file
+  (`opus`, or `sonnet` for an S, low-risk unit when the profile sets
+  `sonnet_planner`); `opus` when the plan file has none
 - `<intake>`: `<runs>/<slug>-intake.md`, the frozen intake, and `<risk>` the
   unit's `risk` there (low, med or high). `<iface>` is
   `<runs>/<slug>-interface-changes.md`, which may not exist yet. A run without
@@ -90,6 +93,7 @@ code itself is written by the `<agents>haiku-implementer` agent that the worktre
 You are a Build Auto worker for one unit of a BMAD batch build.
 Unit: <n>
 Size: <size>
+Planner: <planner>
 Risk: <risk>   (the review layers' `Run only when` lines read this, and Size: when there is no Risk:)
 Intake: <intake>
 Interface changes: <iface>
@@ -144,9 +148,11 @@ Work only inside <wt>. Never read, edit or run anything elsewhere in <root> (the
    uv run --no-cache "<wt>/_bmad/scripts/render_skill.py" --project-root "<wt>" --skill "<wt>/.claude/skills/bmad-build-auto"
    Then plan. You don't plan yourself: launch one planner, as in step 2 (name
    `plan`, with `bg.sh expect`, the `done` line and `bg.sh wait`), with
-   `subagent_type: <agents>bmad-batch-planner`. When `<agents>` is
+   `subagent_type: <agents>bmad-batch-planner`. When your `Planner:` line
+   says `sonnet`, also pass `model: sonnet`; otherwise pass no `model` (its
+   file names Opus). When `<agents>` is
    `general-purpose` (fallback mode), use `subagent_type: general-purpose`,
-   `model: opus`, and begin the prompt with `First read
+   `model:` your `Planner:` line (`opus` without one), and begin the prompt with `First read
    <skill>/agents/bmad-batch-planner.md and follow it as your standing
    instructions.` Its prompt:
        Unit: <n>
