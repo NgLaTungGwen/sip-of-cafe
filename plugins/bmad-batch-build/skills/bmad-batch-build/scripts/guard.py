@@ -9,7 +9,9 @@ PowerShell, Write, Edit and NotebookEdit call in every session. It acts only on:
   _bmad/custom/bmad-build-auto.toml), such as a worker's reviewers or the
   general-purpose agents of fallback mode.
 
-Everything else, your own session included, is left alone. A blocked call
+Everything else, your own session included, is left alone, with one
+exception: in every session, an Agent call whose prompt names a prepared batch
+worktree must use a run agent type or pass a model (see check_agent). A blocked call
 gets a "deny" with the reason, which the agent reads and works around. The
 rules are a safety net under the agents' instructions, not a sandbox: a
 command inside a script the agent runs is not inspected.
@@ -107,6 +109,28 @@ def batch_worktree(path):
     m = re.match(r"^(.*?/\.claude/worktrees/[^/]+)", norm(path) + "/")
     if m and os.path.isfile(os.path.join(m.group(1), "_bmad", "custom", "bmad-build-auto.toml")):
         return m.group(1)
+    return None
+
+
+WORKTREE_IN_TEXT = re.compile(r"[^\s'\"`<>()]*/\.claude/worktrees/[^/\s'\"`<>()]+")
+
+
+def check_agent(inp, cwd):
+    """Why an Agent call for a batch worktree must not run as asked, or None.
+
+    A subagent with neither a run agent type (whose file names its model) nor
+    a `model` inherits the session's model: a Build directly run on 2026-11-26
+    built every unit on Opus that way instead of the run's Sonnet worker,
+    Opus planner and Haiku coder."""
+    if inp.get("model") or (inp.get("subagent_type") or "").split(":")[-1] in AGENTS:
+        return None
+    text = (inp.get("prompt") or "")[:200_000].replace("\\", "/")
+    for m in WORKTREE_IN_TEXT.finditer(text):
+        wt = batch_worktree(os.path.join(cwd, m.group(0)))
+        if wt:
+            return (f"this subagent works on the batch worktree {wt} but names neither a run agent type nor a "
+                    "model, so it would run on this session's model. Launch a bmad-batch-worker for the unit "
+                    "(Build directly runs the units as one lane), or pass model: sonnet for a reviewer or helper")
     return None
 
 
@@ -317,6 +341,11 @@ def main():
         event = json.load(sys.stdin)
     except ValueError:
         return 0
+    if event.get("tool_name") in ("Agent", "Task"):
+        # Checked in every session, the user's own included: that is where
+        # Build directly dispatches from.
+        why = check_agent(event.get("tool_input") or {}, event.get("cwd") or os.getcwd())
+        return deny(why) if why else 0
     kind = in_scope(event)
     if not kind:
         return 0

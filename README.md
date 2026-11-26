@@ -120,6 +120,13 @@ the PAT comes from, never the PAT itself.
 
 ### Recent changes
 
+- **0.21.2:** Build directly keeps the run's models. It built every unit in
+  the orchestrator session, and its general-purpose subagents had no
+  `model`, so the whole build ran on the session's Opus. Now it runs the
+  units as one lane of `bmad-batch-worker` dispatches (Sonnet worker, Opus
+  planner, Haiku coder, Sonnet reviews), then verify and one PR, with no
+  synthesis agent. The guard now also checks `Agent` calls: one whose prompt
+  names a batch worktree must use a run agent type or pass a `model`.
 - **0.21.1:** the plan page fits a real plan (dast-gate-fixes).
   - Its C4 diagrams are drawn as C4-styled flowcharts: the same intake
     blocks, colours and shapes, with boundaries as dashed groups and the C4

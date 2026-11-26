@@ -607,23 +607,26 @@ When `plan-waves.py` printed an **Advice** line, put it above the table and
 offer **Build directly (Recommended)** as the first option, ahead of approve,
 adjust and cancel. Building directly means:
 
-- run `intake.py freeze` as below, then no workers and no synthesis;
-- `git fetch origin`, then create one worktree on `<run branch>` from
-  `origin/<base>` (never from the local `<base>`, which may be stale);
-- build the units in this session, in dependency order, with `bmad-build`,
-  passing each unit's `intake.py unit` output as one work list, and check the
-  intake's acceptance criteria and verification scenarios at the end;
-- start every subagent prompt for this work (implementation, review) with
-  the shell rules this skill's own agents carry, since a general-purpose
-  agent has none of them: write and change files with the Write or Edit
-  tool, never through a heredoc in Bash (`cat > f <<'EOF'`,
-  `python - <<'EOF'`), which breaks with "unexpected EOF while looking for
-  matching"; never start a command with `sleep N`, which the harness
-  blocks, but run anything long with `bash "<skill>/scripts/bg.sh" run` and
-  `wait`;
-- open one PR as `<skill>/references/synthesis.md` section 4 describes, link
-  the tickets as its section 5 does unless `TICKETS off`, and report as in
-  section 8.
+- run `intake.py freeze` as below, then no synthesis agent;
+- run section 4 (launch) with every unit in **one lane**, in dependency
+  order, whatever mode the plan chose: `<iwt>` is
+  `<root>/.claude/worktrees/<slug>` on `<run branch>` from `origin/<base>`
+  (never the local `<base>`, which may be stale). Dispatch one
+  `<agents>bmad-batch-worker` per unit, one at a time, with the lane prompts
+  of `<skill>/references/worker.md` ("Lane mode"), and gate each unit as
+  section 6 says;
+- **the units keep the run's models.** Each worker runs on Sonnet, its
+  planner on Opus, its coder on Haiku and its reviews on Sonnet, exactly as
+  in a batch run. Never build or review a unit in this session, and never
+  launch a subagent for one without a run agent type or a `model`: either
+  runs the whole build on this session's model (Opus 5.5 on 2026-11-26, the
+  bug this rule fixes). The guard (section 8, "Safety guard") denies such an
+  `Agent` call when its prompt names a batch worktree;
+- after the last gate, verify `<iwt>` once, in the background, as
+  `<skill>/references/synthesis.md` section 3 does, and check the intake's
+  acceptance criteria and verification scenarios; then open one PR as its
+  section 4 describes, link the tickets as its section 5 does unless
+  `TICKETS off`, and report as in section 8.
 
 Approving it still approves the new tickets.
 
@@ -1141,7 +1144,10 @@ command and file edit. For the run's agents (and any agent working inside a
 batch worktree) it denies what must stay with the user: changing the main
 checkout, force pushes or pushes to a protected branch, merging or
 completing a PR, starting or approving pipelines and deploys, infrastructure
-changes, dropping a non-test database. Your own session is not affected. A
+changes, dropping a non-test database. Your own session is affected by one
+rule only: an `Agent` call whose prompt names a batch worktree must use a
+run agent type or pass a `model`, so no unit silently inherits this session's
+model. Nothing else in your own session is checked. A
 copied (non-plugin) install has no guard. An agent that reports a guard
 denial needs the user's decision: pass it on.
 
